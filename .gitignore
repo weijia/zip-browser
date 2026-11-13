@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+
+# 运行时生成的版本状态（server/version.js 每次源码变更自动 +1，各机器独立）
+version.json
+
+# 测试生成的样例（可用 npm run samples 重新生成，测试缺失时也会自动生成）
+samples/
+tests/.version-state*.json
+
+# 本机配置 / 密码库 / 临时文件
+.env
+.env.*
+*.log
+*.kdbx
+*.tmp
+~$*
+
+# 操作系统
+Thumbs.db
+.DS_Store
+desktop.ini

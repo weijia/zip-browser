@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>本地文件浏览器</title>
+<link rel="stylesheet" href="/style.css">
+<script>window.__LOCAL_TOKEN__ = "__ZIP_BROWSER_TOKEN__"; window.__APP_VERSION__ = __ZIP_BROWSER_VERSION__;</script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="brand-mark"></span><span>本地文件浏览器</span></div>
+  <div class="top-actions">
+    <button id="vaultBtn" type="button" title="打开密码库（KeePass）">密码库</button>
+    <button id="defPwBtn" type="button" title="设置缺省解压密码：打开不知道密码的加密压缩包时会先用它尝试">缺省密码</button>
+    <button id="bookmarksBtn" type="button" title="打开书签面板">书签 <span id="bookmarkCount" class="anno-count">0</span></button>
+    <button id="tagsBtn" type="button" title="按标签筛选目录">标签 <span id="tagCount" class="anno-count">0</span></button>
+    <label class="encoding">文件名编码
+      <select id="encoding">
+        <option value="">自动</option>
+        <option value="gbk">GBK</option>
+        <option value="utf-8">UTF-8</option>
+      </select>
+    </label>
+    <button id="refresh" type="button">刷新</button>
+  </div>
+</header>
+
+<div class="toolbar">
+  <button id="back" type="button" title="后退">←</button>
+  <button id="forward" type="button" title="前进">→</button>
+  <div id="crumbs" class="crumbs"></div>
+  <span id="mode" class="mode"></span>
+</div>
+
+<div class="workspace">
+  <aside id="sidebar" class="sidebar"></aside>
+  <main id="stage" class="stage"></main>
+</div>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <h2>压缩包已加密</h2>
+    <p id="modalHint"></p>
+    <input id="passwordInput" type="password" placeholder="输入解压密码" autocomplete="off">
+    <div id="modalError" class="modal-error"></div>
+    <div class="modal-actions">
+      <button id="modalVault" type="button" title="从密码库选择已保存的密码">从密码库选择</button>
+      <button id="modalCancel" type="button">取消</button>
+      <button id="modalOk" type="button" class="primary">打开</button>
+    </div>
+  </div>
+</div>
+
+<div id="vaultModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2 id="vaultTitle">密码库</h2>
+      <button id="vaultClose" type="button" class="modal-x" title="关闭">×</button>
+    </div>
+    <p id="vaultHint"></p>
+    <div id="vaultBody"></div>
+  </div>
+</div>
+
+<div id="defPwModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2>缺省解压密码</h2>
+      <button id="defPwClose" type="button" class="modal-x" title="关闭">×</button>
+    </div>
+    <p>设置后，所有「不知道密码」的加密压缩包会自动先用它尝试解压；只在失败时才会弹出输入框让你手动输入。</p>
+    <p class="modal-note">提示：缺省密码会以明文保存在本机（zen-fs-config / 浏览器 localStorage），仅本机只读工具使用，请勿用于高敏感场景。</p>
+    <input id="defPwInput" type="password" placeholder="输入缺省密码（留空不可保存）" autocomplete="off">
+    <label class="def-pw-show"><input type="checkbox" id="defPwShow"> 显示密码</label>
+    <div id="defPwError" class="modal-error"></div>
+    <div class="modal-actions">
+      <button id="defPwClear" type="button" title="清除已设置的缺省密码">清除</button>
+      <button id="defPwSave" type="button" class="primary">保存</button>
+    </div>
+  </div>
+</div>
+
+<footer class="statusbar">
+  <span class="status-dot"></span>
+  <span id="statusText">正在连接本地服务…</span>
+  <span class="status-right">
+    <span id="appVersion" class="version-badge" title="读取版本信息…">v…</span>
+    <span>只读 · 仅监听 127.0.0.1</span>
+  </span>
+</footer>
+
+<div id="updateToast" class="update-toast hidden" role="status" aria-live="polite">
+  <div class="toast-text">
+    <span class="toast-title" id="updateTitle">发现新版本</span>
+    <span class="toast-sub" id="updateSub"></span>
+  </div>
+  <div class="toast-actions">
+    <button id="updateLater" type="button">稍后</button>
+    <button id="updateNow" type="button" class="toast-primary">立即刷新</button>
+  </div>
+</div>
+
+<div id="annoBackdrop" class="anno-backdrop hidden"></div>
+<aside id="annoPanel" class="anno-panel hidden" aria-label="书签与标签"></aside>
+
+<script src="/vendor/zen-fs-config.js"></script>
+<script type="module" src="/vault.js"></script>
+<script type="module" src="/app.js"></script>
+<script type="module" src="/update-checker.js"></script>
+</body>
+</html>
