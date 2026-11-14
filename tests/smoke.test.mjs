@@ -25,6 +25,8 @@ const {
   localTargetFromCompact, winDirname, winBasename,
 } = await import('../web/location.js');
 const ann = await import('../web/annotations-store.js');
+const manifest = await import('../web/manifest-export.js');
+const { readVolumeId } = await import('../server/hostinfo.js');
 
 before(async () => {
   const required = ['basic.zip', 'zipcrypto.zip', 'aes256.zip', 'chinese.zip', 'images.zip', 'images/blue.png'];
@@ -869,4 +871,329 @@ test('7z archives: browse, unlock, inner read and single-file cover via the loca
   assert.ok(hData.entries.some((e) => e.path === 'photo.png'), 'listing appears after unlocking a header-encrypted 7z');
 
   await fs.rm(tmp, { recursive: true, force: true });
+});
+
+/* ---------------- 收藏 → 目录结构清单 v2 ---------------- */
+
+test('v2 path helpers and manifest prefix derivation', () => {
+  assert.equal(manifest.hostRelativePath('C:\\Photos\\2024\\'), 'C:/Photos/2024');
+  assert.equal(manifest.hostRelativePath('d:/private'), 'D:/private');
+  assert.equal(manifest.hostRelativePath('C:\\'), 'C:');
+  assert.equal(manifest.hostRelativePath('/etc/hosts'), null);
+  assert.equal(manifest.driveOfHostRelative('C:/Photos/2024'), 'C:');
+  assert.equal(manifest.normalizeEntry('..\\a/./b'), 'a/b');
+  assert.equal(manifest.sanitizeKey('MY-PC::C:'), 'MY-PC__C_');
+
+  assert.equal(manifest.hostIndexFile('MY-PC'), 'struct/zip-browser.MY-PC.json',
+    'host index must not be named <host>.json (dir-struct-gen owns that file)');
+  assert.equal(manifest.shardBaseFor('MY-PC', 'vid-1'), 'zip-browser.MY-PC.vid-1');
+  assert.equal(manifest.tagFileFor('vid-1'), 'file-tags/vid-1.json');
+
+  assert.equal(manifest.manifestPrefixFor([
+    { type: 'IndexedDB' }, { type: 'RemoteStorage', options: { basePath: 'app_data/folders/' } },
+  ]).prefix, '', 'RemoteStorage basePath already points at the manifest base');
+  assert.equal(manifest.manifestPrefixFor([{ type: 'Gitee' }]).prefix, 'app_data/folders',
+    'repo-root backends need the app_data/folders prefix');
+  assert.equal(manifest.manifestPrefixFor([{ type: 'InMemory' }]).ok, false,
+    'local-only data group must not be accepted');
+  assert.equal(manifest.manifestPrefixFor([
+    { type: 'RemoteStorage', options: { basePath: 'somewhere/else' } },
+  ]).ok, false, 'an unaligned basePath must abort instead of guessing');
+  assert.equal(manifest.manifestPrefixFor([
+    { type: 'RemoteStorage', options: { basePath: 'app_data/folders' } }, { type: 'Gitee' },
+  ]).ok, false, 'mixed prefixes cannot share one relative path');
+});
+
+test('v2 export builds host index, per-volume shards and file-tags without polluting struct', () => {
+  const now = 1794500000000;
+  const data = {
+    v: 1, updatedAt: 1,
+    tags: {
+      'fs:c:\\photos\\2024': ['旅行'],
+      'fs:d:\\private': ['私密'],
+      'zip:c:\\a.zip#inner/dir': ['压缩包'],
+    },
+    paths: {
+      'fs:c:\\photos\\2024': { kind: 'dir', path: 'C:\\Photos\\2024', entry: '', label: '2024' },
+      'fs:d:\\private': { kind: 'dir', path: 'D:\\private', entry: '', label: 'private' },
+      'zip:c:\\a.zip#inner/dir': { kind: 'zip', path: 'C:\\a.zip', zipPath: 'C:\\a.zip', entry: 'inner/dir', label: 'a' },
+    },
+    bookmarks: [
+      { id: 'bm1', key: 'fs:c:\\photos\\2024', kind: 'dir', label: '2024', path: 'C:\\Photos\\2024', entry: '' },
+      { id: 'bm2', key: 'zip:c:\\a.zip#inner/dir', kind: 'zip', label: 'a', path: 'C:\\a.zip', zipPath: 'C:\\a.zip', entry: 'inner/dir' },
+    ],
+  };
+  const result = manifest.buildV2Export({
+    data, host: 'MY-PC', now, revision: 7,
+    volumes: { C: '11111111-2222-3333-4444-555555555555', D: null },
+    existing: {
+      'file-tags/11111111-2222-3333-4444-555555555555.json': {
+        tags: { 'C:/Old': ['别的工具', '书签'] },
+      },
+    },
+  });
+  const byKind = (kind) => result.files.filter((f) => f.kind === kind);
+  const host = byKind('host')[0];
+  assert.equal(host.path, 'struct/zip-browser.MY-PC.json');
+  assert.equal(host.json.version, 2, 'host index is v2');
+  assert.equal(host.json.generator, 'zip-browser');
+  assert.equal(host.json.source, 'MY-PC (zip-browser)');
+  assert.equal(host.json.mounts.length, 2, 'one mount per volume');
+  assert.equal(host.json.mounts[0].volumeId, '11111111-2222-3333-4444-555555555555');
+  assert.equal(host.json.mounts[1].volumeId, null, 'no marker / serial falls back to null in the mount');
+  for (const mount of host.json.mounts) {
+    assert.equal(mount.files.length, 1, 'fixed shard name, one shard per volume');
+    assert.ok(mount.files[0].startsWith('zip-browser.MY-PC.'), 'shard base carries the host id');
+  }
+
+  const shards = byKind('shard');
+  assert.equal(shards.length, 2);
+  for (const shard of shards) {
+    assert.equal(shard.json.type, 'folder');
+    assert.equal(shard.json.part.id, 'MY-PC');
+    assert.equal(shard.json.part.revision, 7);
+    assert.equal(shard.json.part.generatedAt, now);
+    assert.deepEqual(shard.json.sources, ['MY-PC']);
+  }
+  const cShard = shards.find((s) => s.json.name === 'C:');
+  assert.deepEqual(cShard.json.children.map((n) => n.name), ['Photos']);
+  assert.deepEqual(cShard.json.children[0].children.map((n) => n.name), ['2024']);
+  assert.equal(cShard.json.children[0].updatedAt, now, 'nodes carry ms epoch updatedAt');
+  assert.equal(cShard.json.volumeId, '11111111-2222-3333-4444-555555555555');
+  const dShard = shards.find((s) => s.json.name === 'D:');
+  assert.equal(dShard.json.volumeId, null);
+  assert.deepEqual(dShard.json.children.map((n) => n.name), ['private']);
+  // 文档硬性要求：用户标签绝不回写 struct 清单。
+  assert.equal(JSON.stringify(shards).includes('"tags"'), false, 'no tags inside struct files');
+  assert.equal(JSON.stringify(shards).includes('zip:'), false, 'zip pseudo paths never become tree nodes');
+
+  const tagFiles = byKind('tags');
+  assert.equal(tagFiles.length, 2);
+  assert.equal(tagFiles[0].path, 'file-tags/11111111-2222-3333-4444-555555555555.json',
+    'file-tags key is the volumeId');
+  const cTags = tagFiles[0].json.tags;
+  assert.deepEqual(cTags['C:/Photos/2024'].sort(), ['书签', '旅行'].sort());
+  assert.deepEqual(cTags['zip:C:/a.zip#inner/dir'].sort(), ['zip-bookmark', '压缩包'].sort());
+  assert.deepEqual(cTags['C:/Old'], ['别的工具'], 'other tools tags are preserved, stale reserved tags removed');
+  const dTags = tagFiles[1].json.tags;
+  assert.deepEqual(dTags['D:/private'], ['私密'], 'D: falls back to host::drive key');
+  assert.equal(tagFiles[1].path, 'file-tags/MY-PC__D_.json');
+
+  assert.equal(result.knownVolumes.length, 2);
+  assert.equal(result.stats.shardCount, 2);
+  assert.equal(result.stats.revision, 7);
+});
+
+test('v2 export keeps known volumes so clearing bookmarks cannot leave orphan shards', () => {
+  const knownVolumes = [
+    { key: 'MY-PC::C:', drive: 'C:', volumeId: null },
+  ];
+  const result = manifest.buildV2Export({
+    data: { tags: {}, paths: {}, bookmarks: [] },
+    host: 'MY-PC', volumes: {}, now: 1794500000000, revision: 3, knownVolumes,
+  });
+  assert.equal(result.files.filter((f) => f.kind === 'shard').length, 1,
+    'the previous shard is rewritten with empty children instead of becoming an orphan');
+  assert.deepEqual(result.files.find((f) => f.kind === 'shard').json.children, []);
+  assert.equal(result.files[0].json.mounts.length, 1);
+});
+
+test('file-tags merge drops stale bookmark markers but keeps foreign tags', () => {
+  const merged = manifest.mergeTagDoc(
+    { tags: { 'C:/A': ['旅行', '书签', 'zip-bookmark'], 'C:/B': ['别人的'] } },
+    { 'C:/A': ['书签'] },
+  );
+  assert.deepEqual(merged.tags['C:/A'], ['旅行', '书签']);
+  assert.deepEqual(merged.tags['C:/B'], ['别人的']);
+  assert.deepEqual(manifest.mergeTagDoc(null, {}), { tags: {} });
+});
+
+test('hostinfo reads the volume marker without writing to the disk', async () => {
+  const dir = path.join(ROOT, 'tests', '.hostinfo-fixture');
+  await fs.mkdir(dir, { recursive: true });
+  const marker = path.join(dir, '.dir-struct-id');
+  await fs.writeFile(marker, 'abcdefab-1234-5678-9abc-defabcdefab');
+  assert.equal(readVolumeId(dir), 'abcdefab-1234-5678-9abc-defabcdefab');
+  await fs.rm(dir, { recursive: true, force: true });
+  assert.equal(readVolumeId(null), null);
+});
+
+test('hostinfo api and v2 sync assets are served', async () => {
+  const infoRes = await fetch(`${BASE}/api/hostinfo`, { headers: { 'X-Local-Token': TEST_TOKEN } });
+  assert.equal(infoRes.status, 200);
+  const info = await infoRes.json();
+  assert.equal(typeof info.host, 'string');
+  assert.ok(info.host.length > 0, 'hostname is needed for source and file names');
+  assert.equal(typeof info.volumes, 'object');
+  assert.ok(info.volumes !== null);
+
+  const denied = await fetch(`${BASE}/api/hostinfo`);
+  assert.ok(denied.status >= 400, 'hostinfo must still require the local token');
+
+  for (const file of [
+    '/manifest-export.js', '/manifest-sync.js',
+    '/vendor/zen-fs-config-ui.js',
+    '/vendor/zen-fs-remotestoragejs.global.js',
+    '/vendor/zen-fs-gitee.global.js',
+  ]) {
+    const res = await fetch(`${BASE}${file}`);
+    assert.equal(res.status, 200, `${file} is not served`);
+    assert.match(res.headers.get('content-type') || '', /javascript/);
+  }
+  const html = await (await fetch(BASE)).text();
+  for (const id of ['syncBtn', 'syncModal', 'syncHost', 'syncNowBtn', 'syncStatus']) {
+    assert.match(html, new RegExp(`id="${id}"`), `${id} missing from the page`);
+  }
+  assert.match(html, /vendor\/zen-fs-config-ui\.js/);
+  assert.match(html, /目录结构清单 v2/);
+  const pageRes = await fetch(BASE);
+  assert.match(pageRes.headers.get('content-security-policy') || '', /connect-src 'self' https: http:/,
+    'remote sync backends must not be blocked by connect-src');
+});
+
+test('v2 sync writes host index, shard and file-tags into a fake app-data group', async () => {
+  // 用假的 DOM / 数据组 fs 跑通 manifest-sync.js 的真实写入链路。
+  const written = new Map();
+  const fakeFs = {
+    promises: {
+      readFile: async () => { throw new Error('ENOENT'); },
+      writeFile: async (file, text) => { written.set(file, JSON.parse(text)); },
+      mkdir: async () => {},
+    },
+  };
+  const makeEl = () => ({
+    dataset: {}, textContent: '', title: '',
+    classList: { add() {}, remove() {} },
+    addEventListener() {}, appendChild() {}, setAttribute() {},
+  });
+  const elements = new Map();
+  const elFor = (id) => {
+    if (!elements.has(id)) elements.set(id, makeEl());
+    return elements.get(id);
+  };
+  const configurator = {
+    ...makeEl(),
+    getConnection: () => ({
+      groupType: 'data-sync',
+      dataGroup: {
+        fs: fakeFs,
+        listBackends: () => [{ type: 'RemoteStorage', options: { basePath: 'app_data/folders/' } }],
+        listDeclaredBackends: () => [],
+      },
+    }),
+  };
+  const store = new Map();
+  const saved = {
+    window: globalThis.window, document: globalThis.document,
+    customElements: globalThis.customElements, localStorage: globalThis.localStorage,
+    fetch: globalThis.fetch,
+  };
+  globalThis.window = { __LOCAL_TOKEN__: 'harness-token' };
+  globalThis.document = {
+    getElementById: elFor,
+    createElement: () => configurator,
+  };
+  globalThis.customElements = { get: () => ({}) };
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, v),
+  };
+  globalThis.fetch = async (url) => {
+    assert.match(String(url), /\/api\/hostinfo$/);
+    return { ok: true, json: async () => ({ host: 'HARNESS-PC', volumes: { C: 'vid-harness' } }) };
+  };
+  let sync;
+  try {
+    // query 让本用例拿到独立模块实例，不污染其它用例的模块状态
+    sync = await import('../web/manifest-sync.js?harness=rs');
+    const data = {
+      v: 1, updatedAt: 2,
+      tags: { 'fs:c:\\work': ['项目'] },
+      paths: { 'fs:c:\\work': { kind: 'dir', path: 'C:\\Work', entry: '', label: 'Work' } },
+      bookmarks: [{ id: 'b1', key: 'fs:c:\\work', kind: 'dir', label: 'Work', path: 'C:\\Work', entry: '' }],
+    };
+    const result = sync.initManifestSync({ getSnapshot: () => data });
+    assert.equal(result.ok, true);
+    sync.cancelScheduledSync(); // 连接建立时会自动排一次同步，这里只验证显式调用
+    const stats = await sync.syncNow();
+    assert.equal(stats.shardCount, 1);
+    assert.equal(stats.revision, 1);
+
+    const hostPath = '/struct/zip-browser.HARNESS-PC.json';
+    const shardPath = '/struct/zip-browser.HARNESS-PC.vid-harness.json';
+    const tagPath = '/file-tags/vid-harness.json';
+    assert.ok(written.has(hostPath), `missing ${hostPath}`);
+    assert.ok(written.has(shardPath), `missing ${shardPath}`);
+    assert.ok(written.has(tagPath), `missing ${tagPath}`);
+    assert.equal(written.get(hostPath).version, 2);
+    assert.deepEqual(written.get(hostPath).mounts[0].files, ['zip-browser.HARNESS-PC.vid-harness']);
+    assert.equal(written.get(shardPath).volumeId, 'vid-harness');
+    assert.deepEqual(written.get(shardPath).children.map((n) => n.name), ['Work']);
+    assert.deepEqual(written.get(tagPath).tags['C:/Work'].sort(), ['书签', '项目'].sort());
+    assert.equal(store.get('zip-browser:manifest-revision'), '1');
+    assert.equal(JSON.parse(store.get('zip-browser:manifest-volumes'))[0].key, 'vid-harness');
+  } finally {
+    sync.cancelScheduledSync();
+    Object.assign(globalThis, saved);
+  }
+});
+
+test('v2 sync prefixes app_data/folders for repo-root backends', async () => {
+  const written = new Map();
+  const fakeFs = {
+    promises: {
+      readFile: async () => { throw new Error('ENOENT'); },
+      writeFile: async (file, text) => { written.set(file, JSON.parse(text)); },
+      mkdir: async () => {},
+    },
+  };
+  const makeEl = () => ({
+    dataset: {}, textContent: '', title: '',
+    classList: { add() {}, remove() {} },
+    addEventListener() {}, appendChild() {}, setAttribute() {},
+  });
+  const elements = new Map();
+  const elFor = (id) => {
+    if (!elements.has(id)) elements.set(id, makeEl());
+    return elements.get(id);
+  };
+  const configurator = {
+    ...makeEl(),
+    getConnection: () => ({
+      groupType: 'data-sync',
+      dataGroup: {
+        fs: fakeFs,
+        listBackends: () => [{ type: 'Gitee' }],
+        listDeclaredBackends: () => [],
+      },
+    }),
+  };
+  const store = new Map();
+  const saved = {
+    window: globalThis.window, document: globalThis.document,
+    customElements: globalThis.customElements, localStorage: globalThis.localStorage,
+    fetch: globalThis.fetch,
+  };
+  globalThis.window = { __LOCAL_TOKEN__: 'harness-token' };
+  globalThis.document = { getElementById: elFor, createElement: () => configurator };
+  globalThis.customElements = { get: () => ({}) };
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, v),
+  };
+  globalThis.fetch = async () => ({
+    ok: true, json: async () => ({ host: 'GITEE-PC', volumes: {} }),
+  });
+  let sync;
+  try {
+    sync = await import('../web/manifest-sync.js?harness=gitee');
+    sync.initManifestSync({ getSnapshot: () => ({ tags: {}, paths: {}, bookmarks: [] }) });
+    sync.cancelScheduledSync();
+    await sync.syncNow();
+    assert.ok(written.has('/app_data/folders/struct/zip-browser.GITEE-PC.json'),
+      'repo-root backends must write under app_data/folders/struct');
+  } finally {
+    sync.cancelScheduledSync();
+    Object.assign(globalThis, saved);
+  }
 });

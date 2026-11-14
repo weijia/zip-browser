@@ -6,8 +6,9 @@ import {
   winBasename,
   winDirname,
 } from './location.js';
-import { initAnnotations, onRender } from './annotations-ui.js';
+import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.js';
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
+import { initManifestSync, scheduleSync } from './manifest-sync.js';
 
 const TOKEN = window.__LOCAL_TOKEN__;
 const $ = (id) => document.getElementById(id);
@@ -710,8 +711,16 @@ window.addEventListener('hashchange', () => {
   restore().catch(showError);
 });
 
-initAnnotations({ navigate, openZipBookmark, status }).catch((err) => {
+initAnnotations({
+  navigate, openZipBookmark, status,
+  // 收藏（含多标签页同步过来的变更）一变，就把 v2 清单重导一次。
+  onMutate: () => scheduleSync(),
+}).catch((err) => {
   console.warn('annotations store unavailable', err);
+});
+
+initManifestSync({
+  getSnapshot: () => getAnnotationStore()?.snapshot() || null,
 });
 
 let prevVaultUnlocked = false;

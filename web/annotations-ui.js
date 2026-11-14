@@ -308,7 +308,13 @@ export function onRender(target) {
 
 export function initAnnotations(options) {
   hooks = options;
-  store = createAnnotationStore({ onChange: refresh });
+  store = createAnnotationStore({
+    onChange: () => {
+      refresh();
+      // 本地 mutate 与跨标签页 reload 都会走这里，供 v2 清单导出防抖重算。
+      if (hooks && typeof hooks.onMutate === 'function') hooks.onMutate();
+    },
+  });
 
   $('bookmarksBtn').addEventListener('click', () => openPanel('bookmarks'));
   $('tagsBtn').addEventListener('click', () => openPanel('tags'));

@@ -18,6 +18,7 @@ import {
 import { handleContent } from './content.js';
 import { handleThumb } from './thumb.js';
 import { getVersionInfo } from './version.js';
+import { getHostInfo } from './hostinfo.js';
 import {
   createVault,
   unlockVault,
@@ -33,7 +34,9 @@ const MAIN_CSP = [
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
-  "connect-src 'self'",
+  // 同步组（RemoteStorage / Gitee / WebDAV）要访问用户配置的远端地址，
+  // 不能只放行 'self'；本机 API 仍由 X-Local-Token 保护。
+  "connect-src 'self' https: http:",
   "form-action 'none'",
   "object-src 'none'",
 ].join('; ');
@@ -41,6 +44,12 @@ const MAIN_CSP = [
 // 第三方浏览器 bundle 走固定映射表，不接受任意路径，避免变成读文件的通道。
 const VENDOR_FILES = new Map([
   ['/vendor/zen-fs-config.js', path.join(ROOT_DIR, 'node_modules', 'zen-fs-config', 'dist', 'zen-fs-config.js')],
+  // 同步组配置组件及其远端后端 UMD：随源码入库，离线可用，不走 CDN。
+  // 注意：zen-fs-config-ui 内部自带一份 zen-fs-config，但它只导出 UI 辅助函数，
+  // 不导出 createConfigRepo；上面的 zen-fs-config.js 仍需保留给 /annotations 与密码库。
+  ['/vendor/zen-fs-config-ui.js', path.join(WEB_DIR, 'vendor', 'zen-fs-config-ui.js')],
+  ['/vendor/zen-fs-remotestoragejs.global.js', path.join(WEB_DIR, 'vendor', 'zen-fs-remotestoragejs.global.js')],
+  ['/vendor/zen-fs-gitee.global.js', path.join(WEB_DIR, 'vendor', 'zen-fs-gitee.global.js')],
 ]);
 
 async function serveVendor(res, pathname) {
@@ -90,6 +99,11 @@ async function handleApi(req, res, url) {
 
   if (req.method === 'GET' && pathname === '/api/drives') {
     return json(res, 200, { drives: await listDrives() });
+  }
+
+  // v2 清单导出需要主机名与盘稳定身份（浏览器拿不到，且不允许写盘）。
+  if (req.method === 'GET' && pathname === '/api/hostinfo') {
+    return json(res, 200, await getHostInfo());
   }
 
   if (req.method === 'GET' && pathname === '/api/list') {
@@ -197,7 +211,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && pathname.startsWith('/vendor/')) {
       return await serveVendor(res, pathname);
     }
-    if (req.method === 'GET' && ['/app.js', '/vault.js', '/style.css', '/location.js', '/update-checker.js', '/annotations-store.js', '/annotations-ui.js', '/image-viewer.js'].includes(pathname)) {
+    if (req.method === 'GET' && ['/app.js', '/vault.js', '/style.css', '/location.js', '/update-checker.js', '/annotations-store.js', '/annotations-ui.js', '/image-viewer.js', '/manifest-export.js', '/manifest-sync.js'].includes(pathname)) {
       return await serveStatic(res, pathname);
     }
     if (pathname.startsWith('/api/')) return await handleApi(req, res, url);

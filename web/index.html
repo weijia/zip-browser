@@ -15,6 +15,7 @@
     <button id="defPwBtn" type="button" title="设置缺省解压密码：打开不知道密码的加密压缩包时会先用它尝试">缺省密码</button>
     <button id="bookmarksBtn" type="button" title="打开书签面板">书签 <span id="bookmarkCount" class="anno-count">0</span></button>
     <button id="tagsBtn" type="button" title="按标签筛选目录">标签 <span id="tagCount" class="anno-count">0</span></button>
+    <button id="syncBtn" type="button" title="把收藏同步为目录结构清单 v2">同步收藏</button>
     <label class="encoding">文件名编码
       <select id="encoding">
         <option value="">自动</option>
@@ -81,6 +82,26 @@
   </div>
 </div>
 
+<div id="syncModal" class="modal hidden">
+  <div class="modal-card sync-card">
+    <div class="modal-head">
+      <h2>收藏同步 · 目录结构清单 v2</h2>
+      <button id="syncClose" type="button" class="modal-x" title="关闭">×</button>
+    </div>
+    <p>把目录书签与标签导出为 v2 格式：主机索引 + 每块盘一份卷分片（<code>struct/</code>），
+      用户标签写入 <code>file-tags/</code>。收藏本体仍以本机 <code>/annotations</code> 为准，这里是单向导出。</p>
+    <div id="syncStatus" class="sync-status" data-state="idle">正在检查同步组…</div>
+    <div class="sync-host-wrap">
+      <div class="sync-section-title">zen-fs-config 数据同步组</div>
+      <div id="syncHost" class="sync-host"></div>
+    </div>
+    <p class="modal-note">需要「含远端后端」的 app-data 数据组；只有本地后端时导出会被禁用，避免假同步。</p>
+    <div class="modal-actions">
+      <button id="syncNowBtn" type="button" class="primary">立即导出</button>
+    </div>
+  </div>
+</div>
+
 <footer class="statusbar">
   <span class="status-dot"></span>
   <span id="statusText">正在连接本地服务…</span>
@@ -104,7 +125,11 @@
 <div id="annoBackdrop" class="anno-backdrop hidden"></div>
 <aside id="annoPanel" class="anno-panel hidden" aria-label="书签与标签"></aside>
 
+<!-- zen-fs-config 供 /annotations 与密码库使用；下面三个供同步组配置组件使用。顺序不可颠倒。 -->
 <script src="/vendor/zen-fs-config.js"></script>
+<script src="/vendor/zen-fs-remotestoragejs.global.js"></script>
+<script src="/vendor/zen-fs-gitee.global.js"></script>
+<script src="/vendor/zen-fs-config-ui.js"></script>
 <script type="module" src="/vault.js"></script>
 <script type="module" src="/app.js"></script>
 <script type="module" src="/update-checker.js"></script>
