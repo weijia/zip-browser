@@ -9,6 +9,11 @@ import {
 import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.js';
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
 import { initManifestSync, scheduleSync } from './manifest-sync.js';
+import {
+  initTrash, resetTrashSelection, trashToolbarHtml,
+  trashHeadStart, trashHeadEnd, trashRowStart, trashRowEnd,
+  trashCardControls, trashChipControls, handleTrashAction,
+} from './trash-ui.js';
 
 const TOKEN = window.__LOCAL_TOKEN__;
 const $ = (id) => document.getElementById(id);
@@ -265,7 +270,7 @@ async function renderDrives() {
   }).join('');
   stage.innerHTML = `<h2 class="stage-title">此电脑 · 磁盘（${drives.length}）</h2>
     <div class="drive-grid">${cards || '<div class="empty">没有检测到可用磁盘</div>'}</div>
-    <p class="stage-hint">点击盘符进入目录；遇到 zip / 7z / rar / tar.gz 等压缩包可直接点开，加密压缩包会提示输入密码（可自动用缺省密码或密码库记录尝试）。</p>`;
+    <p class="stage-hint">点击盘符进入目录；遇到 zip / 7z / rar / tar.gz 等压缩包可直接点开，加密压缩包会提示输入密码（可自动用缺省密码或密码库记录尝试）。进入目录后可用行内「删除」或勾选批量删除，把文件/文件夹移入 Windows 回收站（可还原）。</p>`;
   sidebar.innerHTML = `<div class="side-title">此电脑</div>${drives.map((drive) =>
     `<div class="side-item" data-action="drive" data-path="${esc(drive.path)}"><span class="icon icon-dir"></span>${drive.letter}: ${esc(drive.label || drive.kind)}</div>`
   ).join('')}`;
@@ -281,6 +286,8 @@ function parentOf(abs) {
 
 async function renderDir(abs) {
   const data = await api(`/api/list?path=${encodeURIComponent(abs)}`);
+  // 每次重列目录都清空勾选，避免上一目录的选中项被误删
+  resetTrashSelection();
   const images = data.items.filter((item) => !item.dir && isImageName(item.name));
   const zips = data.items.filter((item) => item.zip);
   const vsid = getVaultSessionId() || undefined;
@@ -294,18 +301,20 @@ async function renderDir(abs) {
   if (viewMode === 'thumbs') {
     const folders = data.items.filter((item) => item.dir);
     const imageCards = images.map((item) => `<div class="thumb-card" data-action="file" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
+      ${trashCardControls(item)}
       <div class="thumb-box"><img src="${esc(localThumbUrlFront(item.path))}" loading="lazy" alt="${esc(item.name)}"></div>
       <div class="thumb-name" title="${esc(item.name)}">${esc(item.name)}</div>
       <div class="thumb-meta">${formatSize(item.size)}</div>
     </div>`).join('');
     const zipCards = zips.map((item) => `<div class="thumb-card" data-action="zip" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
+      ${trashCardControls(item)}
       <div class="thumb-box"><img src="${esc(fsCoverUrlFront(item.path, vsid, defpw))}" loading="lazy" alt="${esc(item.name)}"></div>
       <div class="thumb-name" title="${esc(item.name)}">${esc(item.name)}</div>
       <div class="thumb-meta">${formatSize(item.size)}</div>
     </div>`).join('');
     const allCards = imageCards + zipCards;
     body = `<div class="thumb-head">图片/压缩包 · ${thumbsCount} 项<span>仅当前目录 · 点击缩略图查看原图或打开压缩包</span></div>
-      ${folders.length ? `<div class="folder-chips">${folders.map((item) => `<span class="folder-chip" data-action="dir" data-path="${esc(item.path)}">${esc(item.name)}</span>`).join('')}</div>` : ''}
+      ${folders.length ? `<div class="folder-chips">${folders.map((item) => `<span class="folder-chip" data-action="dir" data-path="${esc(item.path)}">${esc(item.name)}${trashChipControls({ ...item, dir: true })}</span>`).join('')}</div>` : ''}
       <div class="thumb-grid">${allCards || '<div class="thumb-empty">当前目录没有图片或压缩包，可切换到列表视图</div>'}</div>`;
   } else {
     const rows = data.items.map((item) => {
@@ -318,15 +327,17 @@ async function renderDir(abs) {
         ? `<img class="file-thumb" src="${esc(fsCoverUrlFront(item.path, vsid, defpw))}" loading="lazy" alt="">`
         : `<span class="icon ${icon}"></span>`;
       return `<tr data-action="${action}" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
+        ${trashRowStart(item)}
         <td><span class="file-name">${thumb}${esc(item.name)}${hint}</span></td>
         <td class="file-size">${item.dir ? '文件夹' : formatSize(item.size)}</td>
         <td class="file-time">${formatTime(item.mtime)}</td>
+        ${trashRowEnd(item)}
       </tr>`;
     }).join('');
-    body = `<table class="file-table"><thead><tr><th>名称</th><th style="width:110px">大小</th><th style="width:150px">修改时间</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="3" class="empty">此目录为空</td></tr>'}</tbody></table>`;
+    body = `<table class="file-table"><thead><tr>${trashHeadStart()}<th>名称</th><th style="width:110px">大小</th><th style="width:150px">修改时间</th>${trashHeadEnd()}</tr></thead>
+      <tbody>${rows || '<tr><td colspan="5" class="empty">此目录为空</td></tr>'}</tbody></table>`;
   }
-  stage.innerHTML = `<h2 class="stage-title">${esc(abs)}</h2>${switcher}${body}`;
+  stage.innerHTML = `<h2 class="stage-title">${esc(abs)}</h2>${switcher}${trashToolbarHtml()}${body}`;
   const upper = parentOf(abs);
   const dirs = data.items.filter((item) => item.dir);
   sidebar.innerHTML = `<div class="side-title">当前目录</div>
@@ -638,6 +649,11 @@ document.addEventListener('click', async (event) => {
   const element = event.target.closest('[data-action]');
   if (!element) return;
   const action = element.dataset.action;
+  // 行内勾选/删除控件优先处理，否则 closest 会落到带 data-action 的行上触发导航
+  if (action.startsWith('trash-')) {
+    await handleTrashAction(action, element, event);
+    return;
+  }
   const target = current();
   const dir = target.kind === 'dir' ? target.path : (target.dir || target.zipDir);
   try {
@@ -721,6 +737,13 @@ initAnnotations({
 
 initManifestSync({
   getSnapshot: () => getAnnotationStore()?.snapshot() || null,
+});
+
+initTrash({
+  api,
+  getDir: () => (current().kind === 'dir' ? current().path : ''),
+  refresh: () => render(current()),
+  status,
 });
 
 let prevVaultUnlocked = false;

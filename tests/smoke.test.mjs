@@ -1197,3 +1197,198 @@ test('v2 sync prefixes app_data/folders for repo-root backends', async () => {
     Object.assign(globalThis, saved);
   }
 });
+
+test('trash script only ever uses SendToRecycleBin and reports per-item results', async () => {
+  const trash = await import('../server/trash-service.js');
+  const items = [
+    { i: 0, p: 'C:\\Temp\\a.txt', d: false },
+    { i: 1, p: 'C:\\Temp\\目录', d: true },
+  ];
+  const script = trash.buildTrashScript(items);
+  assert.match(script, /RecycleOption\]::SendToRecycleBin/);
+  assert.match(script, /DeleteDirectory/);
+  assert.match(script, /DeleteFile/);
+  assert.doesNotMatch(script, /DeletePermanently|Remove-Item|FromBase64String\('[^']*remove/);
+  assert.match(script, /\[Text\.Encoding\]::UTF8\.GetString/, 'paths travel as base64 JSON, never raw in argv');
+  const results = trash.parseTrashOutput(
+    '{"i":0,"ok":true,"e":""}\nnoise\n{"i":1,"ok":false,"e":"denied"}', items,
+  );
+  assert.deepEqual(results, [
+    { path: items[0].p, ok: true, error: '' },
+    { path: items[1].p, ok: false, error: 'denied' },
+  ]);
+  assert.equal(trash.isRecyclableDriveType(3), true, 'only fixed local disks carry a Recycle Bin');
+  for (const type of [2, 4, 5, 6, undefined]) {
+    assert.equal(trash.isRecyclableDriveType(type), false);
+  }
+});
+
+test('trash validation enforces browsed dir, direct children, batch limit and protected paths', async () => {
+  const trash = await import('../server/trash-service.js');
+  const fss = await import('../server/fs-service.js');
+  const tmp = path.join(ROOT, 'tests', `.trash-validate-${process.pid}`);
+  await fs.mkdir(path.join(tmp, 'sub'), { recursive: true });
+  await fs.writeFile(path.join(tmp, 'a.txt'), 'a');
+  fss.allowDirectory(tmp);
+  try {
+    const ok = await trash.validateTrashTargets(tmp, [path.join(tmp, 'a.txt'), path.join(tmp, 'sub')]);
+    assert.equal(ok.items.length, 2);
+    assert.equal(ok.items[1].d, true);
+    await assert.rejects(() => trash.validateTrashTargets(tmp, []), /没有选择/);
+    await assert.rejects(
+      () => trash.validateTrashTargets(tmp, Array.from({ length: 11 }, () => path.join(tmp, 'a.txt'))),
+      /最多删除 10/,
+    );
+    await assert.rejects(
+      () => trash.validateTrashTargets(tmp, [path.join(tmp, '..', 'outside.txt')]),
+      /直接子项/,
+    );
+    await assert.rejects(
+      () => trash.validateTrashTargets(tmp, [path.join(tmp, 'missing.txt')]),
+      /不存在/,
+    );
+    const unbrowsed = path.join(ROOT, 'tests', `.trash-unbrowsed-${process.pid}`);
+    await assert.rejects(
+      () => trash.validateTrashTargets(unbrowsed, [path.join(unbrowsed, 'x.txt')]),
+      /未在当前会话中打开/,
+    );
+    assert.equal(trash.isProtectedPath('C:\\'), true);
+    assert.equal(trash.isProtectedPath('C:\\Windows'), true);
+    assert.equal(trash.isProtectedPath(process.env.USERPROFILE || 'C:\\Users'), true);
+    assert.equal(trash.isProtectedPath(`${process.env.USERPROFILE || 'C:\\Users'}\\Desktop`), true);
+    assert.equal(trash.isProtectedPath('C:\\Windows\\notepad.exe'), false);
+    assert.equal(trash.isInsideProtectedTree('C:\\Windows\\System32\\drivers\\etc\\hosts'), true,
+      'system subtrees must be off limits');
+    assert.equal(trash.isInsideProtectedTree('C:\\Program Files\\SomeApp'), true);
+    assert.equal(trash.isInsideProtectedTree(`${process.env.USERPROFILE || 'C:\\Users'}\\Desktop\\a.txt`), false,
+      'individual files on the Desktop remain deletable');
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('trash API moves files and folders into the Windows Recycle Bin', async (t) => {
+  if (process.platform !== 'win32') return t.skip('recycle bin is Windows-only');
+  const tmp = path.join(ROOT, 'tests', `.trash-http-${process.pid}`);
+  await fs.mkdir(path.join(tmp, 'sub'), { recursive: true });
+  await fs.writeFile(path.join(tmp, 'a.txt'), 'a');
+  await fs.writeFile(path.join(tmp, 'b.txt'), 'b');
+  await fs.writeFile(path.join(tmp, 'sub', 'inner.txt'), 'inner');
+  const headers = { 'X-Local-Token': TEST_TOKEN, 'Content-Type': 'application/json' };
+  const post = (body, withToken = true) => fetch(`${BASE}/api/trash`, {
+    method: 'POST',
+    headers: withToken ? headers : { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  try {
+    const listed = await fetch(`${BASE}/api/list?path=${encodeURIComponent(tmp)}`, {
+      headers: { 'X-Local-Token': TEST_TOKEN },
+    });
+    assert.equal(listed.status, 200, 'the directory must be opened once before deletion is allowed');
+
+    assert.equal((await post({ dir: tmp, paths: [path.join(tmp, 'a.txt')] }, false)).status, 403);
+    assert.equal((await post({
+      dir: tmp,
+      paths: Array.from({ length: 11 }, (_, i) => path.join(tmp, `x${i}.txt`)),
+    })).status, 400);
+    assert.equal((await post({ dir: tmp, paths: [path.join(tmp, '..', 'outside.txt')] })).status, 400);
+
+    const fileRes = await post({ dir: tmp, paths: [path.join(tmp, 'a.txt')] });
+    assert.equal(fileRes.status, 200);
+    const fileData = await fileRes.json();
+    assert.equal(fileData.ok, true, JSON.stringify(fileData));
+    assert.equal(fileData.trashed, 1);
+    await assert.rejects(() => fs.access(path.join(tmp, 'a.txt')), /ENOENT/);
+
+    const dirRes = await post({ dir: tmp, paths: [path.join(tmp, 'sub')] });
+    const dirData = await dirRes.json();
+    assert.equal(dirData.ok, true, JSON.stringify(dirData));
+    await assert.rejects(() => fs.access(path.join(tmp, 'sub')), /ENOENT/);
+    assert.equal(await fs.readFile(path.join(tmp, 'b.txt'), 'utf8'), 'b', 'untargeted files stay untouched');
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('trash UI is wired into the page and served as a module', async () => {
+  const html = await (await fetch(BASE)).text();
+  assert.match(html, /id="trashModal"/);
+  assert.match(html, /data-action="trash-confirm"/);
+  assert.match(html, /浏览 · 删除到回收站/);
+  const module = await fetch(`${BASE}/trash-ui.js`);
+  assert.equal(module.status, 200);
+  assert.match(await module.text(), /\/api\/trash/);
+});
+
+test('trash UI confirms, batches 10 at a time and refreshes', async () => {
+  const makeEl = (dataset = {}) => ({
+    dataset, checked: false, disabled: false, textContent: '', innerHTML: '',
+    classList: {
+      hidden: true,
+      add(c) { if (c === 'hidden') this.hidden = true; },
+      remove(c) { if (c === 'hidden') this.hidden = false; },
+      contains(c) { return c === 'hidden' ? this.hidden : false; },
+    },
+  });
+  const boxes = Array.from({ length: 12 }, (_, i) => makeEl({
+    path: `C:\\tmp\\f${i}.txt`, name: `f${i}.txt`, dir: 'false',
+  }));
+  const els = {
+    trashAll: makeEl(), trashSelectedBtn: makeEl(), trashCount: makeEl(),
+    trashModal: makeEl(), trashList: makeEl(), trashCountText: makeEl(),
+    trashConfirm: makeEl(),
+  };
+  const calls = [];
+  const statuses = [];
+  let refreshed = 0;
+  const savedDocument = globalThis.document;
+  globalThis.document = {
+    getElementById: (id) => els[id] || null,
+    querySelectorAll: (selector) => (selector === '.trash-check' ? boxes : []),
+    addEventListener: () => {},
+  };
+  try {
+    const ui = await import('../web/trash-ui.js?harness=trash');
+    ui.initTrash({
+      api: async (url, options) => {
+        const body = JSON.parse(options.body);
+        calls.push({ url, body });
+        return { ok: true, results: body.paths.map((p) => ({ path: p, ok: true })) };
+      },
+      getDir: () => 'C:\\tmp',
+      refresh: () => { refreshed += 1; },
+      status: (text, bad) => statuses.push({ text, bad }),
+    });
+
+    // 单项删除 → 弹窗列出完整路径；取消后不应再发起请求
+    await ui.handleTrashAction('trash-one', makeEl({
+      path: 'C:\\tmp\\照片 目录', name: '照片 目录', dir: 'true',
+    }));
+    assert.equal(els.trashCountText.textContent, '1');
+    assert.match(els.trashList.innerHTML, /C:\\tmp\\照片 目录/);
+    assert.match(els.trashList.innerHTML, /文件夹/);
+    await ui.handleTrashAction('trash-cancel', makeEl());
+    await ui.handleTrashAction('trash-confirm', els.trashConfirm);
+    assert.equal(calls.length, 0, 'cancel must clear the pending batch');
+
+    for (const box of boxes) {
+      box.checked = true;
+      // eslint-disable-next-line no-await-in-loop
+      await ui.handleTrashAction('trash-check', box);
+    }
+    assert.equal(els.trashSelectedBtn.disabled, false);
+    assert.equal(els.trashCount.textContent, '12');
+    await ui.handleTrashAction('trash-selected', els.trashSelectedBtn);
+    assert.equal(els.trashCountText.textContent, '12');
+    assert.match(els.trashList.innerHTML, /C:\\tmp\\f11\.txt/);
+    await ui.handleTrashAction('trash-confirm', els.trashConfirm);
+    assert.equal(calls.length, 2, '12 items must be sent as 10 + 2');
+    assert.deepEqual(calls.map((call) => call.body.paths.length), [10, 2]);
+    assert.equal(calls[0].body.dir, 'C:\\tmp');
+    assert.equal(refreshed, 1);
+    assert.equal(els.trashSelectedBtn.disabled, true);
+    assert.match(statuses.at(-1).text, /已把 12 项移入回收站/);
+  } finally {
+    globalThis.document = savedDocument;
+  }
+});

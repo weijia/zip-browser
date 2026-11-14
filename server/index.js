@@ -19,6 +19,7 @@ import { handleContent } from './content.js';
 import { handleThumb } from './thumb.js';
 import { getVersionInfo } from './version.js';
 import { getHostInfo } from './hostinfo.js';
+import { trashPaths } from './trash-service.js';
 import {
   createVault,
   unlockVault,
@@ -109,6 +110,12 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && pathname === '/api/list') {
     const abs = normalizeLocalPath(url.searchParams.get('path') || '');
     return json(res, 200, await listDirectory(abs));
+  }
+
+  // 唯一的写操作：把当前目录的直接子项送进 Windows 回收站（可还原），不做永久删除。
+  if (req.method === 'POST' && pathname === '/api/trash') {
+    const body = await readJson(req);
+    return json(res, 200, await trashPaths({ dir: body.dir, paths: body.paths }));
   }
 
   if (req.method === 'GET' && pathname === '/api/download') {
@@ -211,7 +218,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && pathname.startsWith('/vendor/')) {
       return await serveVendor(res, pathname);
     }
-    if (req.method === 'GET' && ['/app.js', '/vault.js', '/style.css', '/location.js', '/update-checker.js', '/annotations-store.js', '/annotations-ui.js', '/image-viewer.js', '/manifest-export.js', '/manifest-sync.js'].includes(pathname)) {
+    if (req.method === 'GET' && ['/app.js', '/vault.js', '/style.css', '/location.js', '/update-checker.js', '/annotations-store.js', '/annotations-ui.js', '/image-viewer.js', '/manifest-export.js', '/manifest-sync.js', '/trash-ui.js'].includes(pathname)) {
       return await serveStatic(res, pathname);
     }
     if (pathname.startsWith('/api/')) return await handleApi(req, res, url);
@@ -234,5 +241,5 @@ server.listen(PORT, HOST, async () => {
   const info = await getVersionInfo().catch(() => null);
   const label = info ? ` v${info.version} (${info.sha})` : '';
   console.log(`本地文件浏览器${label}已启动: http://${HOST}:${PORT}/`);
-  console.log('只读模式 · 仅监听 127.0.0.1 · Ctrl+C 停止');
+  console.log('浏览 + 删除到回收站 · 仅监听 127.0.0.1 · Ctrl+C 停止');
 });

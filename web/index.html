@@ -102,12 +102,29 @@
   </div>
 </div>
 
+<div id="trashModal" class="modal hidden">
+  <div class="modal-card trash-card">
+    <div class="modal-head">
+      <h2>确认删除到回收站</h2>
+      <button id="trashClose" type="button" class="modal-x" data-action="trash-close" title="关闭">×</button>
+    </div>
+    <p class="trash-warning">⚠️ 以下项目会被移入 Windows 回收站；<strong>文件夹会连同内部全部内容一起移动</strong>，回收站一旦清空数据将无法恢复。请核对完整路径。</p>
+    <p class="modal-note">U 盘 / 网络盘 / 光驱与超过 1 GiB 的单个文件会被拒绝，避免 Windows 把「移入回收站」降级为永久删除；这类文件请到资源管理器手动处理。</p>
+    <p>共 <strong id="trashCountText">0</strong> 项，删除后本工具不提供还原，请到 Windows 回收站操作。</p>
+    <div id="trashList" class="trash-list"></div>
+    <div class="modal-actions">
+      <button id="trashCancel" type="button" data-action="trash-cancel">取消</button>
+      <button id="trashConfirm" type="button" class="danger" data-action="trash-confirm">删除到回收站</button>
+    </div>
+  </div>
+</div>
+
 <footer class="statusbar">
   <span class="status-dot"></span>
   <span id="statusText">正在连接本地服务…</span>
   <span class="status-right">
     <span id="appVersion" class="version-badge" title="读取版本信息…">v…</span>
-    <span>只读 · 仅监听 127.0.0.1</span>
+    <span>浏览 · 删除到回收站 · 仅监听 127.0.0.1</span>
   </span>
 </footer>
 
