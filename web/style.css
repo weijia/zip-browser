@@ -347,3 +347,19 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
 .bp-code { font: 10px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow: auto; margin: 0; color: var(--text-2); }
 #builderDiag textarea, #builderDiag input[type=file] { width: 100%; font-size: 12px; margin: 4px 0 8px; }
 #builderDiag textarea { font-family: ui-monospace, Consolas, monospace; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius); }
+
+/* 网络副本预留引用（只存链接/路径，不上传内容） */
+.cr-add-btn { margin-left: 6px; font-size: 11px; line-height: 1.4; padding: 1px 7px; color: #534ab7; background: #eeedfe; border: 1px solid #d4d0f5; border-radius: 99px; cursor: pointer; vertical-align: middle; }
+.cr-add-btn:hover { background: #e0ddfb; }
+.thumb-card .cr-add-btn { position: absolute; top: 5px; left: 5px; z-index: 2; margin-left: 0; background: rgba(238, 237, 254, .95); }
+.bl-section-title .bt-add { margin-left: 8px; font-weight: 400; }
+.cr-list { max-height: 220px; }
+.cr-row { flex-wrap: wrap; }
+.cr-kind { flex: 0 0 auto; font-size: 10px; color: #534ab7; background: #eeedfe; border-radius: 99px; padding: 1px 6px; }
+.cr-link, .cr-value { flex: 1 1 160px; min-width: 0; font-size: 11px; word-break: break-all; }
+.cr-link { color: #185fa5; text-decoration: none; }
+.cr-link:hover { text-decoration: underline; }
+.cr-value { font-family: ui-monospace, Consolas, monospace; color: var(--text-2); }
+#copyRefModal .modal-card { width: min(540px, 94vw); max-height: 88vh; overflow: auto; }
+.cr-field { display: block; font-size: 12px; color: var(--text-2); margin: 9px 0; }
+.cr-field input, .cr-field select { display: block; width: 100%; margin-top: 4px; font-size: 12px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: #fff; color: var(--text); box-sizing: border-box; }

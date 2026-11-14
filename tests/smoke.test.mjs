@@ -1671,6 +1671,8 @@ test('manifest builder UI, new modules and token-protected mft routes are served
   assert.match(html, /id="builderBtn"/);
   assert.match(html, /id="builderModal"/);
   assert.match(html, /data-builder-tab="files"/);
+  assert.match(html, /id="copyRefModal"/);
+  assert.match(html, /id="copyRefSave"/);
   assert.match(html, /清单生成/);
   for (const name of [
     'manifest-builder.js', 'manifest-selection.js', 'manifest-payload.js',
@@ -1678,5 +1680,235 @@ test('manifest builder UI, new modules and token-protected mft routes are served
   ]) {
     const response = await fetch(`${BASE}/${name}`);
     assert.equal(response.status, 200, `${name} must be served`);
+  }
+  const app = await (await fetch(`${BASE}/app.js`)).text();
+  assert.match(app, /data-action="cr-add"/);
+  assert.match(app, /openCopyRefForItem/);
+});
+
+test('network copy refs reject unsafe values, dedupe paths and support CRUD', async () => {
+  const sel = await import('../web/manifest-selection.js');
+  assert.equal(sel.cleanCopyRef({ value: 'javascript:alert(1)' }), null);
+  assert.equal(sel.cleanCopyRef({ value: 'data:text/plain,hi' }), null);
+  assert.equal(sel.cleanCopyRef({ value: 'file:///C:/a.txt' }), null);
+  assert.equal(sel.cleanCopyRef({ value: 'C:\\secret\\a.txt' }), null,
+    'a local absolute path is not a network copy');
+  assert.ok(sel.cleanCopyRef({ value: '\\\\nas\\share\\a.jpg' }), 'UNC paths are allowed');
+  assert.equal(sel.cleanCopyRef({ value: 'https://example.com/a.jpg' }).kind, 'url');
+  assert.equal(sel.cleanCopyRef({ value: 'app_data/drive/a.jpg' }).kind, 'path');
+
+  let state = sel.emptyCopyRefs();
+  state = sel.addCopyRef(state, 'C:\\Photos\\a.jpg', {
+    id: 'r1', kind: 'url', value: 'https://example.com/a.jpg', label: '图床', addedAt: 1000,
+  });
+  state = sel.addCopyRef(state, 'c:/photos/a.jpg', {
+    id: 'r2', kind: 'path', value: 'app_data/drive/a.jpg', addedAt: 1001,
+  });
+  assert.deepEqual(sel.copyRefTotals(state), { files: 1, refs: 2 },
+    'Windows case-insensitive paths must map to one entry');
+  assert.equal(Object.keys(state.refs)[0], 'C:/Photos/a.jpg');
+
+  state = sel.updateCopyRef(state, 'C:\\Photos\\a.jpg', 'r1', { label: '新图床' });
+  const first = sel.copyRefsFor(state, 'c:/PHOTOS/a.jpg')[0];
+  assert.equal(first.label, '新图床');
+  assert.equal(first.addedAt, 1000, 'editing keeps the original addedAt');
+  assert.equal(sel.copyRefsByRel(state)['c:/photos/a.jpg'].length, 2);
+
+  state = sel.removeCopyRef(state, 'C:\\Photos\\a.jpg', 'r1');
+  assert.deepEqual(sel.copyRefTotals(state), { files: 1, refs: 1 });
+  state = sel.removeCopyRef(state, 'C:\\Photos\\a.jpg', 'r2');
+  assert.deepEqual(state.refs, {}, 'empty buckets are removed');
+
+  const limited = sel.sanitizeCopyRefs({
+    refs: {
+      'C:\\A\\x': Array.from({ length: 30 }, (_, i) => ({ id: `r${i}`, value: `https://e/${i}` })),
+    },
+  });
+  assert.equal(limited.refs['C:/A/x'].length, sel.MAX_REFS_PER_FILE);
+  assert.equal(sel.sanitizeCopyRefs({ refs: { 'C:\\A\\x': [{ id: 'bad', value: 'javascript:x' }] } }).refs['C:/A/x'], undefined);
+});
+
+test('file-list docs merge network copy refs into files and idempotency signature', async () => {
+  const fle = await import('../web/file-list-export.js');
+  const sel = await import('../web/manifest-selection.js');
+  let refs = sel.emptyCopyRefs();
+  refs = sel.addCopyRef(refs, 'C:\\Work\\a.txt', {
+    id: 'r1', kind: 'url', value: 'https://example.com/a.txt', label: '图床', addedAt: 1000,
+  });
+  const copiesByRel = sel.copyRefsByRel(refs);
+  const scan = {
+    files: { 'C:\\Work': [{ path: 'C:\\Work\\a.txt', name: 'a.txt', size: 5, mtime: 123 }] },
+    status: { 'C:\\Work': { incomplete: false, truncated: false, total: 1 } },
+  };
+  const built = fle.buildFileListDocs({
+    selection: { dirs: [{ path: 'C:\\Work', recursive: true }], files: [] },
+    scan, host: 'PC', volumes: { C: 'vid-c' }, copiesByRel, now: 1000, revision: 1,
+  });
+  const doc = built.files[0].json;
+  assert.equal(doc.files[0].copies[0].value, 'https://example.com/a.txt');
+  assert.deepEqual(doc.copyRefs, { files: 1, refs: 1 });
+  assert.equal(built.stats.copyRefs, 1);
+  const changed = JSON.parse(JSON.stringify(doc));
+  changed.files[0].copies[0].label = '另一个图床';
+  assert.notEqual(fle.fileListSignature(doc), fle.fileListSignature(changed),
+    'copy ref edits must invalidate the idempotency signature');
+
+  const picked = fle.buildFileListDocs({
+    selection: { dirs: [], files: [{ path: 'C:\\Work\\a.txt', name: 'a.txt', size: 5, mtime: 123 }] },
+    scan: { files: {}, status: {} }, host: 'PC', volumes: { C: 'vid-c' },
+    copiesByRel, now: 1000, revision: 1,
+  });
+  assert.equal(picked.files.find((f) => f.kind === 'file-list-picked').json.files[0].copies.length, 1,
+    'picked files also carry their copy refs');
+
+  const plain = fle.buildFileListDocs({
+    selection: { dirs: [{ path: 'C:\\Work', recursive: true }], files: [] },
+    scan, host: 'PC', volumes: { C: 'vid-c' }, now: 1000, revision: 1,
+  }).files[0].json;
+  assert.equal(plain.files[0].copies, undefined, 'no refs means no copies field');
+  assert.deepEqual(plain.copyRefs, { files: 0, refs: 0 });
+});
+
+test('patchCopyRefs rewrites only generated file-list shards, zero-scan and idempotent', async () => {
+  const harness = syncHarness({ hostInfo: { host: 'COPIES', volumes: { C: 'vid-c' } } });
+  let sync;
+  try {
+    const sel = await import('../web/manifest-selection.js');
+    let refs = sel.emptyCopyRefs();
+    const selection = { dirs: [{ path: 'C:\\Work', recursive: true }], files: [] };
+    sync = await import('../web/manifest-sync.js?harness=copyrefs');
+    sync.initManifestSync({
+      getSnapshot: () => ({ tags: {}, paths: {}, bookmarks: [] }),
+      getFileSelection: () => selection,
+      getCopyRefs: () => refs,
+    });
+    sync.cancelScheduledSync();
+    const scan = {
+      roots: [{
+        path: 'C:\\Work', name: 'Work', type: 'folder', tags: [], children: [],
+        fileCount: 1, totalSize: 5, totalSizeOnDisk: 4096, sizePartial: false, mtime: 123,
+      }],
+      summaries: {},
+      files: { 'C:\\Work': [{ path: 'C:\\Work\\a.txt', name: 'a.txt', size: 5, mtime: 123 }] },
+      status: { 'C:\\Work': { incomplete: false, truncated: false, total: 1 } },
+    };
+    await sync.syncScanNow(scan, { fileSelection: selection });
+    const shard = '/file-list/vid-c/C/Work/files.json';
+    assert.ok(harness.written.has(shard));
+    const indexWrites = harness.writes.filter((p) => p === '/struct/COPIES.json').length;
+
+    refs = sel.addCopyRef(refs, 'C:\\Work\\a.txt', {
+      id: 'r1', kind: 'url', value: 'https://example.com/a.txt', label: '图床', addedAt: 1000,
+    });
+    const result = await sync.patchCopyRefs(refs);
+    assert.equal(result.patched, 1);
+    assert.equal(result.skipped, 0);
+    const patched = harness.written.get(shard);
+    assert.equal(patched.files[0].copies[0].value, 'https://example.com/a.txt');
+    assert.deepEqual(patched.copyRefs, { files: 1, refs: 1 });
+    assert.equal(harness.writes.filter((p) => p === '/struct/COPIES.json').length, indexWrites,
+      'C channel must not rewrite the host index');
+    assert.equal(harness.madeDirs.has('/file-list/vid-c/C/Work'), true);
+
+    const before = harness.writes.length;
+    await sync.patchCopyRefs(refs);
+    assert.equal(harness.writes.length, before, 'unchanged refs produce zero writes');
+
+    refs = sel.removeCopyRef(refs, 'C:\\Work\\a.txt', 'r1');
+    await sync.patchCopyRefs(refs);
+    assert.equal(harness.written.get(shard).files[0].copies, undefined,
+      'removing the last ref removes the field');
+    assert.deepEqual(harness.written.get(shard).copyRefs, { files: 0, refs: 0 });
+
+    const shardWrites = harness.writes.filter((p) => p === shard).length;
+    await sync.syncScanNow(scan, { fileSelection: selection });
+    assert.equal(harness.writes.filter((p) => p === shard).length, shardWrites,
+      'B channel output must agree byte-for-byte with C channel patching');
+  } finally {
+    sync?.cancelScheduledSync();
+    harness.restore();
+  }
+});
+
+test('copy-ref modal saves refs, rejects unsafe values and removes via panel delegation', async () => {
+  const makeEl = () => ({
+    dataset: {}, value: '', textContent: '', innerHTML: '', title: '',
+    handlers: {},
+    classList: {
+      hidden: true,
+      add(c) { if (c === 'hidden') this.hidden = true; },
+      remove(c) { if (c === 'hidden') this.hidden = false; },
+      toggle() {},
+      contains(c) { return c === 'hidden' ? this.hidden : false; },
+    },
+    addEventListener(type, fn) { this.handlers[type] = fn; },
+    appendChild() {}, setAttribute() {}, focus() {}, remove() {},
+  });
+  const ids = [
+    'builderBtn', 'builderClose', 'builderModal', 'builderBody', 'builderScan',
+    'builderCopy', 'builderDownload', 'builderUpload', 'builderStatus',
+    'builderDirs', 'builderFiles', 'builderPreview', 'builderDiag',
+    'copyRefTitle', 'copyRefPath', 'copyRefKind', 'copyRefValue', 'copyRefLabel',
+    'copyRefNote', 'copyRefError', 'copyRefModal', 'copyRefSave', 'copyRefCancel', 'copyRefClose',
+  ];
+  const els = Object.fromEntries(ids.map((id) => [id, makeEl()]));
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  const sel = await import('../web/manifest-selection.js');
+  const state = {
+    dirs: { v: 1, dirs: [], options: { recursive: true, includeSize: true, includeMtime: true } },
+    files: { v: 1, dirs: [], files: [] },
+    copies: sel.emptyCopyRefs(),
+  };
+  const store = {
+    get: (which) => clone(state[which]),
+    set: (which, value) => { state[which] = clone(value); return clone(value); },
+  };
+  const statuses = [];
+  const saved = { window: globalThis.window, document: globalThis.document };
+  globalThis.window = { __LOCAL_TOKEN__: 'ui-token' };
+  globalThis.document = {
+    getElementById: (id) => els[id] || null,
+    querySelectorAll: () => [],
+    addEventListener() {},
+  };
+  try {
+    const ui = await import('../web/manifest-builder.js?harness=copyui');
+    ui.initManifestBuilder({
+      api: async () => ({}), store,
+      getSnapshot: () => null,
+      getCurrentDir: () => 'C:\\Work',
+      status: (text) => statuses.push(text),
+    });
+
+    ui.openCopyRefForItem({ path: 'C:\\Work\\a.txt', name: 'a.txt' });
+    assert.equal(els.copyRefModal.classList.hidden, false, 'file row opens the modal');
+    assert.equal(els.copyRefPath.value, 'C:\\Work\\a.txt');
+    els.copyRefValue.value = 'https://example.com/a.txt';
+    els.copyRefLabel.value = '图床';
+    els.copyRefKind.value = 'url';
+    els.copyRefSave.handlers.click();
+    assert.equal(sel.copyRefTotals(store.get('copies')).refs, 1, 'saving persists one ref');
+    assert.equal(els.copyRefModal.classList.hidden, true, 'modal closes after save');
+    const ref = sel.copyRefsFor(store.get('copies'), 'C:\\Work\\a.txt')[0];
+    assert.equal(ref.value, 'https://example.com/a.txt');
+
+    ui.openCopyRefForItem({ path: 'C:\\Work\\b.txt', name: 'b.txt' });
+    els.copyRefValue.value = 'javascript:alert(1)';
+    els.copyRefSave.handlers.click();
+    assert.match(els.copyRefError.textContent, /javascript/);
+    assert.equal(sel.copyRefTotals(store.get('copies')).refs, 1, 'unsafe value is not saved');
+    els.copyRefCancel.handlers.click();
+
+    const bodyClick = els.builderBody.handlers.click;
+    assert.equal(typeof bodyClick, 'function', 'panel delegation is bound');
+    const fakeEvent = {
+      target: { closest: () => ({ dataset: { bt: 'cr-remove', path: 'C:/Work/a.txt', id: ref.id }, tagName: 'BUTTON' }) },
+      preventDefault() {},
+    };
+    await bodyClick(fakeEvent);
+    assert.deepEqual(store.get('copies').refs, {}, 'remove action clears the ref');
+    assert.ok(statuses.some((text) => /引用已保存/.test(text)));
+  } finally {
+    Object.assign(globalThis, saved);
   }
 });

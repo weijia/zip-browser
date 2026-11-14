@@ -131,6 +131,32 @@
   </div>
 </div>
 
+<div id="copyRefModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2 id="copyRefTitle">预留网络副本</h2>
+      <button id="copyRefClose" type="button" class="modal-x" title="关闭">×</button>
+    </div>
+    <p class="modal-note">仅登记一个 Web 链接或远端服务路径（如 <code>https://…</code>、<code>app_data/…</code>、UNC 共享路径）。<strong>本程序不会上传文件内容、不会创建副本，也不会校验链接是否可用</strong>；这些内容会写入你配置的网络数据组。</p>
+    <label class="cr-field">文件路径<input id="copyRefPath" type="text" placeholder="C:\Photos\a.jpg"></label>
+    <label class="cr-field">类型
+      <select id="copyRefKind">
+        <option value="url">Web 链接</option>
+        <option value="path">远端路径</option>
+        <option value="other">其它</option>
+      </select>
+    </label>
+    <label class="cr-field">链接 / 路径<input id="copyRefValue" type="text" placeholder="https://… 或 app_data/drive/…"></label>
+    <label class="cr-field">备注标签（可选）<input id="copyRefLabel" type="text" placeholder="图床 / WebDAV"></label>
+    <label class="cr-field">说明（可选）<input id="copyRefNote" type="text" placeholder="待上传"></label>
+    <div id="copyRefError" class="modal-error"></div>
+    <div class="modal-actions">
+      <button id="copyRefCancel" type="button">取消</button>
+      <button id="copyRefSave" type="button" class="primary">保存引用</button>
+    </div>
+  </div>
+</div>
+
 <div id="trashModal" class="modal hidden">
   <div class="modal-card trash-card">
     <div class="modal-head">

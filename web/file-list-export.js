@@ -96,10 +96,53 @@ export function removedDoc(rel, host, now = Date.now()) {
   };
 }
 
-/** 幂等签名：内容（路径/大小/mtime/完整性标记）不变则零写入。 */
+/** 写入片内前做白名单投影：配置仓里的多余字段一律不带进导出文件。 */
+export function normalizeDocCopyRefs(list) {
+  return (Array.isArray(list) ? list : [])
+    .map((ref) => ({
+      id: String(ref?.id || ''),
+      kind: ['url', 'path', 'other'].includes(ref?.kind) ? ref.kind : 'other',
+      value: String(ref?.value || ''),
+      label: String(ref?.label || ''),
+      note: String(ref?.note || ''),
+      addedAt: Number(ref?.addedAt) || 0,
+    }))
+    .filter((ref) => ref.id && ref.value)
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/**
+ * 把网络副本引用按 host-relative 路径（大小写不敏感）合并进片。
+ * B 通道生成新片与 C 通道 patch 旧片都调用它，保证两边写出的结构逐字节一致。
+ * 引用只是预留位置，不表示副本已存在、也不触发任何上传。
+ */
+export function applyCopyRefs(doc, copiesByRel = {}) {
+  let files = 0;
+  let refs = 0;
+  for (const file of (Array.isArray(doc.files) ? doc.files : [])) {
+    const key = String(file.path || '').toLowerCase();
+    const list = normalizeDocCopyRefs(copiesByRel?.[key]);
+    if (list.length) {
+      file.copies = list;
+      files += 1;
+      refs += list.length;
+    } else {
+      delete file.copies;
+    }
+  }
+  doc.copyRefs = { files, refs };
+  return doc;
+}
+
+/** 幂等签名：路径/大小/mtime/完整性标记 + 网络副本引用；不变则零写入。 */
 export function fileListSignature(doc) {
   const rows = (doc.files || [])
-    .map((file) => `${file.path}\0${file.size ?? ''}\0${file.mtime ?? ''}`)
+    .map((file) => {
+      const copies = (file.copies || [])
+        .map((ref) => `${ref.id}\0${ref.kind}\0${ref.value}\0${ref.label ?? ''}\0${ref.note ?? ''}\0${ref.addedAt ?? ''}`)
+        .join('\n');
+      return `${file.path}\0${file.size ?? ''}\0${file.mtime ?? ''}\0${copies}`;
+    })
     .join('\n');
   return fnv1a64Hex([
     doc.dir || '', String(doc.recursive), String(Boolean(doc.incomplete)),
@@ -170,15 +213,19 @@ function baseDoc({ host, volumeId, letter, dir, recursive, now, revision }) {
  * @param {string} options.host       主机名
  * @param {object} options.volumes    盘符 -> volumeId
  * @param {object} options.tagsByRel  host-relative 路径 -> 标签数组
+ * @param {object} options.copiesByRel 小写 host-relative 路径 -> 网络副本引用数组（仅预留）
  * @returns {{files:Array<{path,json,rootAbs,kind}>, stats:object}}
  */
 export function buildFileListDocs({
   selection = {}, scan = {}, host = 'pc', volumes = {}, tagsByRel = {},
-  now = Date.now(), revision = 1, maxFiles = DEFAULT_MAX_FILES,
+  copiesByRel = {}, now = Date.now(), revision = 1, maxFiles = DEFAULT_MAX_FILES,
 } = {}) {
   const safeHost = String(host || 'pc').trim() || 'pc';
   const out = [];
-  const stats = { dirs: 0, files: 0, fallback: 0, incomplete: 0, truncated: 0, picked: 0 };
+  const stats = {
+    dirs: 0, files: 0, fallback: 0, incomplete: 0, truncated: 0, picked: 0,
+    copyFiles: 0, copyRefs: 0,
+  };
   const seenDirs = new Set();
 
   const dirs = Array.isArray(selection.dirs) ? selection.dirs : [];
@@ -211,8 +258,11 @@ export function buildFileListDocs({
     doc.truncated = truncated;
     doc.files = truncated ? list.slice(0, maxFiles) : list;
     doc.fileCount = doc.files.length;
+    applyCopyRefs(doc, copiesByRel);
     if (target.fallback) { doc.fallbackPath = true; doc.dirKey = target.dirKey; }
     out.push({ path: target.path, json: doc, rootAbs: abs, kind: 'file-list' });
+    stats.copyFiles += doc.copyRefs.files;
+    stats.copyRefs += doc.copyRefs.refs;
     stats.dirs += 1;
     stats.files += doc.fileCount;
     if (target.fallback) stats.fallback += 1;
@@ -253,6 +303,9 @@ export function buildFileListDocs({
     doc.picked = true;
     doc.files = uniqueSorted(group.files);
     doc.fileCount = doc.files.length;
+    applyCopyRefs(doc, copiesByRel);
+    stats.copyFiles += doc.copyRefs.files;
+    stats.copyRefs += doc.copyRefs.refs;
     out.push({
       path: `file-list/${sanitizeKey(volumeKey)}/_picked.json`,
       json: doc,

@@ -1,8 +1,9 @@
 // struct 目录清单 + file-list 文件列表 → zen-fs-config「app-data 数据组」的单向导出。
 //
-// 双通道（定稿）：
+// 三通道（定稿）：
 //   A 收藏增量（300ms 防抖）：只重建书签固定分片、file-tags 与统一主机索引，不扫盘、不碰 scan 分片。
 //   B 手动「重新扫描并生成」：物理扫描 → 新增时间戳 scan 分片 + 全量重建 file-list 分片 + 统一索引。
+//   C 网络副本引用变更：读远端已生成的 file-list 片，只 patch files[].copies，零扫盘。
 // 主机索引只有一份 struct/<host>.json，mounts[].files 列全远端历史分片与本次分片。
 // 同步组由 <sync-group-configurator> 配置；只有含远端后端的组才允许导出。
 
@@ -14,8 +15,9 @@ import {
   bookmarkShardBase,
 } from './manifest-payload.js';
 import {
-  buildFileListDocs, fileListSignature, removedDoc,
+  buildFileListDocs, fileListSignature, removedDoc, applyCopyRefs,
 } from './file-list-export.js';
+import { copyRefsByRel, copyRefTotals } from './manifest-selection.js';
 
 // 与 dir-struct-gen 共用同步组命名空间，两个生成器写同一个远端数据组。
 const APP_ID = 'dir-struct-gen';
@@ -33,6 +35,7 @@ let prefix = null;
 let blockReason = '尚未连接同步组';
 let getSnapshot = () => null;
 let getFileSelection = () => null;
+let getCopyRefs = () => null;
 let onStatus = null;
 let configurator = null;
 let timer = null;
@@ -157,7 +160,7 @@ function mergeVolumeDescriptors(bookmarkVolumes, scanVolumes, remoteShards) {
  */
 export function composeExport({
   scan = null, hostInfo = {}, snapshot = null, fileSelection = null,
-  remoteNames = [], existing = {}, knownVolumes = [], cachedScanBases = [],
+  copyRefs = null, remoteNames = [], existing = {}, knownVolumes = [], cachedScanBases = [],
   now = Date.now(), revision = 1,
 } = {}) {
   const host = hostInfo.host || 'pc';
@@ -185,7 +188,7 @@ export function composeExport({
   const fileList = scan && fileSelection
     ? buildFileListDocs({
       selection: fileSelection, scan, host, volumes,
-      tagsByRel: tagsByRelFrom(data), now, revision,
+      tagsByRel: tagsByRelFrom(data), copiesByRel: copyRefsByRel(copyRefs), now, revision,
     })
     : { files: [], stats: {} };
 
@@ -317,7 +320,7 @@ async function commonContext() {
  * 导出一次：withScan 传物理扫描结果时走 B 通道（扫描分片 + file-list），
  * 否则走 A 通道（仅收藏增量）。两阶段：先读远端 file-tags 做并集合并，再组装写入。
  */
-export async function syncNow(withScan = null, { fileSelection = null } = {}) {
+export async function syncNow(withScan = null, { fileSelection = null, copyRefs = null } = {}) {
   const { fp, hostInfo } = await commonContext();
   const now = Date.now();
   const revision = (Number(readRaw(REV_KEY)) || 0) + 1;
@@ -326,6 +329,7 @@ export async function syncNow(withScan = null, { fileSelection = null } = {}) {
   const remoteNames = await listRemoteStruct(fp);
   const args = {
     scan: withScan, hostInfo, snapshot: getSnapshot(), fileSelection,
+    copyRefs: copyRefs === null ? getCopyRefs() : copyRefs,
     knownVolumes, cachedScanBases, remoteNames, now, revision,
   };
   const probe = composeExport(args);
@@ -350,6 +354,42 @@ export function syncScanNow(scanResult, options = {}) {
   return syncNow(scanResult, options);
 }
 
+/**
+ * C 通道：网络副本引用变更后，只 patch 已生成的 file-list 片。
+ * 不扫盘、不重建 struct/、不写索引；片不存在或不可读时跳过，等下次 B 通道生成时合并。
+ * 未连接同步组时静默返回原因，本地引用仍然保存在 zen-fs-config 中。
+ */
+export async function patchCopyRefs(copyRefs = getCopyRefs()) {
+  if (!appFs || prefix === null) {
+    return { patched: 0, skipped: 0, reason: blockReason || '同步组未就绪' };
+  }
+  const fp = appFs.promises || appFs;
+  const byRel = copyRefsByRel(copyRefs);
+  const paths = readJson(FILE_LIST_PATHS_KEY, []);
+  let patched = 0;
+  let skipped = 0;
+  for (const relPath of (Array.isArray(paths) ? paths : [])) {
+    let doc;
+    try {
+      doc = JSON.parse(await fp.readFile(pathFor(relPath), 'utf8'));
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    if (!doc || !Array.isArray(doc.files) || doc.removed) { skipped += 1; continue; }
+    const before = JSON.stringify(doc);
+    applyCopyRefs(doc, byRel);
+    if (JSON.stringify(doc) === before) continue; // 引用未变，零写入
+    try {
+      await fp.writeFile(pathFor(relPath), `${JSON.stringify(doc, null, 2)}\n`);
+      patched += 1;
+    } catch {
+      skipped += 1;
+    }
+  }
+  return { patched, skipped, reason: '' };
+}
+
 async function runSync(manual) {
   if (running) { queued = manual || queued; return; }
   running = true;
@@ -359,7 +399,9 @@ async function runSync(manual) {
       return;
     }
     if (manual) report('正在导出 v2 清单…');
-    const stats = await syncNow(null, { fileSelection: getFileSelection() });
+    const stats = await syncNow(null, {
+      fileSelection: getFileSelection(), copyRefs: getCopyRefs(),
+    });
     const detail = `${stats.bookmarkShardCount} 书签分片 · ${stats.scanShardCount} 扫描分片 · ${stats.tagFileCount} 标签文件 · r${stats.revision}`;
     report(`已导出 v2 清单（${new Date().toLocaleTimeString()}）`, true, detail);
   } catch (err) {
@@ -398,6 +440,7 @@ export function syncDiagnostics() {
     scanBases: readJson(SCAN_BASES_KEY, []),
     fileListPaths: readJson(FILE_LIST_PATHS_KEY, []),
     knownVolumes: readJson(KNOWN_KEY, []),
+    copyRefs: copyRefTotals(getCopyRefs()),
     state: syncState(),
   };
 }
@@ -405,6 +448,7 @@ export function syncDiagnostics() {
 export function initManifestSync(options = {}) {
   getSnapshot = options.getSnapshot || getSnapshot;
   getFileSelection = options.getFileSelection || getFileSelection;
+  getCopyRefs = options.getCopyRefs || getCopyRefs;
   onStatus = options.onStatus || null;
 
   $('syncBtn')?.addEventListener('click', openSyncModal);

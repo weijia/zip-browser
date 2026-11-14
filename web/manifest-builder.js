@@ -3,11 +3,13 @@
 
 import {
   composeExport, syncScanNow, syncDiagnostics, syncState, writeDeepenMarks,
+  patchCopyRefs,
 } from './manifest-sync.js';
 import {
   addDirSelection, removeDirSelection, isDirSelected,
   addFileDirSelection, removeFileDirSelection, isFileSelected,
   addPickedFile, removePickedFile,
+  addCopyRef, updateCopyRef, removeCopyRef, cleanCopyRef, copyRefsFor,
 } from './manifest-selection.js';
 import { hostRelativePath } from './manifest-export.js';
 import { makeZip } from './zip-writer.js';
@@ -26,6 +28,7 @@ let hostInfo = null;
 let lastScan = null;
 let preview = null;
 let tab = 'dirs';
+let copyDraft = null; // 正在编辑的网络副本引用（null = 新增）
 
 function setStatus(text, bad = false) {
   const el = $('builderStatus');
@@ -92,10 +95,26 @@ async function renderDirs() {
     </div>`;
 }
 
+function copyRowHtml(path, ref) {
+  const isLink = ref.kind === 'url' && /^https?:\/\//i.test(ref.value);
+  const title = esc(ref.label || ref.value);
+  const display = isLink
+    ? `<a class="cr-link" href="${esc(ref.value)}" target="_blank" rel="noopener noreferrer" title="${esc(ref.value)}">${title}</a>`
+    : `<span class="cr-value" title="${esc(ref.value)}">${title}</span>`;
+  return `<div class="bl-row cr-row">
+    <span class="bl-path" title="${esc(path)}">${esc(path)}</span>
+    <span class="cr-kind">${esc(ref.kind)}</span>
+    ${display}
+    <button type="button" data-bt="cr-edit" data-path="${esc(path)}" data-id="${esc(ref.id)}" title="编辑这条引用">编辑</button>
+    <button type="button" class="danger-text" data-bt="cr-remove" data-path="${esc(path)}" data-id="${esc(ref.id)}" title="删除这条引用">删除</button>
+  </div>`;
+}
+
 function renderFiles() {
   const pane = $('builderFiles');
   if (!pane) return;
   const sel = store.get('files');
+  const copies = store.get('copies');
   const dirRows = (sel.dirs || []).map((item) => `<div class="bl-row">
     <span class="bl-path" title="${esc(item.path)}">${esc(item.path)}</span>
     <button type="button" data-bt="fl-recursive" data-path="${esc(item.path)}" title="切换是否递归">${item.recursive === false ? '仅本层' : '递归'}</button>
@@ -104,16 +123,89 @@ function renderFiles() {
   </div>`).join('');
   const fileRows = (sel.files || []).map((item) => `<div class="bl-row">
     <span class="bl-path" title="${esc(item.path)}">${esc(item.name || item.path)}${item.archive ? ' · 包内' : ''}</span>
+    <button type="button" class="cr-add-btn" data-bt="cr-add" data-path="${esc(item.path)}" title="给这个文件预留一个网络副本链接或路径">+ 副本</button>
     <button type="button" class="danger-text" data-bt="fp-remove" data-path="${esc(item.path)}">移除</button>
   </div>`).join('');
+  const copyEntries = Object.entries(copies.refs || {});
+  const copyRows = copyEntries.map(([path, refs]) => refs.map((ref) => copyRowHtml(path, ref)).join('')).join('');
+  const total = copyEntries.reduce((sum, [, refs]) => sum + refs.length, 0);
   const root = getCurrentDir();
   pane.innerHTML = `<p class="builder-hint">「哪些目录下的文件列表要上传」完全由你决定：在目录清单里点 <strong>+ 列表</strong>，或在文件浏览页的目录行点同名按钮。</p>
     <div class="bl-section-title">已选目录（${(sel.dirs || []).length}）</div>
     <div class="bl-list">${dirRows || '<div class="bl-empty">尚未选择目录</div>'}</div>
     <div class="bl-section-title">手工加入的文件（${(sel.files || []).length}）</div>
     <div class="bl-list">${fileRows || '<div class="bl-empty">无</div>'}</div>
+    <div class="bl-section-title">预留的网络副本（${total} 条 / ${copyEntries.length} 个文件）
+      <button type="button" class="bt-add" data-bt="cr-new">+ 按路径添加</button></div>
+    <p class="builder-hint">仅登记 Web 链接或远端服务路径，<strong>本程序不会上传文件内容，也不会校验链接是否可用</strong>。这些内容会写入你配置的网络数据组；引用变更只回写相关的文件列表片，不重新扫盘。</p>
+    <div class="bl-list cr-list">${copyRows || '<div class="bl-empty">还没有预留引用；在文件浏览页的文件行点「+ 副本」，或点上面「按路径添加」</div>'}</div>
     ${root ? `<div class="bl-section-title">当前目录快捷加入</div>
       <button type="button" class="bt-add" data-bt="add-fl" data-path="${esc(root)}">+ 把 ${esc(root)} 加入文件列表</button>` : ''}`;
+}
+
+function openCopyRefModal(draft = {}) {
+  copyDraft = { ...draft };
+  $('copyRefTitle').textContent = draft.id ? '编辑网络副本引用' : '预留网络副本';
+  $('copyRefPath').value = draft.path || '';
+  $('copyRefKind').value = draft.kind || 'url';
+  $('copyRefValue').value = draft.value || '';
+  $('copyRefLabel').value = draft.label || '';
+  $('copyRefNote').value = draft.note || '';
+  $('copyRefError').textContent = '';
+  $('copyRefModal')?.classList.remove('hidden');
+  $('copyRefValue')?.focus?.();
+}
+
+function closeCopyRefModal() {
+  $('copyRefModal')?.classList.add('hidden');
+  copyDraft = null;
+}
+
+function formCopyRef() {
+  return cleanCopyRef({
+    id: copyDraft?.id,
+    addedAt: copyDraft?.addedAt,
+    kind: $('copyRefKind')?.value || 'url',
+    value: $('copyRefValue')?.value || '',
+    label: $('copyRefLabel')?.value || '',
+    note: $('copyRefNote')?.value || '',
+  });
+}
+
+/** 引用变更后只 patch 受影响的文件列表片；同步组未连接时保留本地引用并如实提示。 */
+async function afterCopyChange() {
+  render();
+  try {
+    const result = await patchCopyRefs(store.get('copies'));
+    if (result.reason) setStatus(`引用已保存到本机；远端未更新（${result.reason}）`);
+    else setStatus(`引用已保存 · 回写 ${result.patched} 份文件列表片${result.skipped ? ` · 跳过 ${result.skipped} 份（尚未生成）` : ''}`);
+  } catch (err) {
+    setStatus(`引用已保存到本机，但回写失败：${err.message}`, true);
+  }
+}
+
+function saveCopyRef() {
+  const path = String($('copyRefPath')?.value || '').trim();
+  const ref = formCopyRef();
+  if (!path || (!hostRelativePath(path) && !path.startsWith('zip:'))) {
+    $('copyRefError').textContent = '请填写本机文件的完整路径（如 C:\\Photos\\a.jpg）或 zip: 伪路径';
+    return;
+  }
+  if (!ref) {
+    $('copyRefError').textContent = '链接/路径不能为空，也不能是 javascript:/data:/file: 或本机盘符路径（C:\\…）';
+    return;
+  }
+  const state = store.get('copies');
+  let next = state;
+  if (copyDraft?.id) {
+    next = removeCopyRef(next, copyDraft.path, copyDraft.id);
+    next = addCopyRef(next, path, { ...ref, id: copyDraft.id, addedAt: copyDraft.addedAt || ref.addedAt });
+  } else {
+    next = addCopyRef(next, path, ref);
+  }
+  store.set('copies', next);
+  closeCopyRefModal();
+  void afterCopyChange();
 }
 
 function renderPreview() {
@@ -144,7 +236,7 @@ function renderDiag() {
     <p class="builder-hint">主机 <strong>${esc(hostInfo?.host || '未知')}</strong> · 同步组 app-id <code>${esc(diag.appId)}</code> · ${diag.state.ready ? '已连接' : `未连接（${esc(diag.state.reason)}）`} · 上次导出 r${diag.revision}</p>
     <p class="builder-hint">${vols || '未读到卷身份'}</p>
     <div class="bl-section-title">缓存</div>
-    <p class="builder-hint">扫描分片 ${diag.scanBases.length} 份 · file-list 片 ${diag.fileListPaths.length} 份 · 已知卷 ${diag.knownVolumes.length} 个</p>
+    <p class="builder-hint">扫描分片 ${diag.scanBases.length} 份 · file-list 片 ${diag.fileListPaths.length} 份 · 已知卷 ${diag.knownVolumes.length} 个 · 网络副本引用 ${diag.copyRefs?.refs || 0} 条 / ${diag.copyRefs?.files || 0} 个文件</p>
     <div class="bl-section-title">反向加载清单</div>
     <p class="builder-hint">选择本地导出的 JSON（主机索引 / 卷分片 / file-list 片），把其中的 <code>dir</code> 回填成选择集。</p>
     <input type="file" id="builderLoadFile" accept=".json,application/json" multiple>
@@ -213,7 +305,7 @@ async function doScan(paths = null, fileSelection = null) {
     const revision = syncDiagnostics().revision + 1;
     preview = composeExport({
       scan, hostInfo, snapshot: getSnapshot(), fileSelection: fileSel,
-      now: Date.now(), revision,
+      copyRefs: store.get('copies'), now: Date.now(), revision,
     });
     render();
     const stats = preview.stats;
@@ -322,6 +414,19 @@ async function onAction(action, element) {
     case 'add-fl': toggleFileDir(path); break;
     case 'fl-remove': store.set('files', removeFileDirSelection(store.get('files'), path)); render(); break;
     case 'fp-remove': store.set('files', removePickedFile(store.get('files'), path)); render(); break;
+    case 'cr-new': openCopyRefModal({}); break;
+    case 'cr-add': openCopyRefModal({ path, kind: 'url' }); break;
+    case 'cr-edit': {
+      const ref = copyRefsFor(store.get('copies'), path).find((item) => item.id === element.dataset.id);
+      if (ref) openCopyRefModal({ ...ref, path });
+      break;
+    }
+    case 'cr-remove': {
+      const next = removeCopyRef(store.get('copies'), path, element.dataset.id);
+      store.set('copies', next);
+      void afterCopyChange();
+      break;
+    }
     case 'fl-recursive': {
       const sel = store.get('files');
       store.set('files', {
@@ -360,6 +465,12 @@ export function openBuilder() {
   if (modal) modal.classList.remove('hidden');
   void ensureHostInfo().then(() => render()).catch((err) => setStatus(`读取本机信息失败：${err.message}`, true));
   render();
+}
+
+/** 文件浏览页行内「+ 副本」入口：只打开引用表单，不打开清单面板、不上传任何内容。 */
+export function openCopyRefForItem(item) {
+  if (!store || !item?.path) return;
+  openCopyRefModal({ path: item.path, kind: 'url' });
 }
 
 export function addPickedFromItem(item) {
@@ -432,6 +543,15 @@ export function initManifestBuilder(options = {}) {
   $('builderCopy')?.addEventListener('click', () => void onAction('copy', { dataset: {} }));
   $('builderDownload')?.addEventListener('click', () => void onAction('download', { dataset: {} }));
   $('builderUpload')?.addEventListener('click', () => void onAction('upload', { dataset: {} }));
+  $('copyRefSave')?.addEventListener('click', saveCopyRef);
+  $('copyRefCancel')?.addEventListener('click', closeCopyRefModal);
+  $('copyRefClose')?.addEventListener('click', closeCopyRefModal);
+  $('copyRefModal')?.addEventListener('click', (event) => {
+    if (event.target?.id === 'copyRefModal') closeCopyRefModal();
+  });
+  $('copyRefValue')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') saveCopyRef();
+  });
   // Tab 按钮位于 builderBody 之外，单独绑定；body 内只处理 [data-bt]。
   document.querySelectorAll('[data-builder-tab]').forEach((btn) => {
     btn.addEventListener('click', () => void onAction('tab', btn));

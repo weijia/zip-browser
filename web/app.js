@@ -10,7 +10,7 @@ import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
 import { initManifestSync, scheduleSync } from './manifest-sync.js';
 import { createSelectionStore } from './manifest-selection.js';
-import { initManifestBuilder, addPickedFromItem, addFileListDir } from './manifest-builder.js';
+import { initManifestBuilder, addPickedFromItem, addFileListDir, openCopyRefForItem } from './manifest-builder.js';
 import {
   initTrash, resetTrashSelection, trashToolbarHtml,
   trashHeadStart, trashHeadEnd, trashRowStart, trashRowEnd,
@@ -85,6 +85,14 @@ function flControls(item) {
     data-path="${esc(item.path)}" data-name="${esc(item.name)}" data-dir="${dir ? '1' : ''}"
     data-size="${Number(item.size) || 0}" data-mtime="${Number(item.mtime) || 0}"
     title="${dir ? '把该目录下的文件列表加入上传选择集' : '把该文件加入文件列表选择集'}">+ 列表</button>`;
+}
+
+// 「+ 副本」：给单个文件预留一个网络副本链接 / 远端路径（仅元数据，不上传内容）。
+function copyControls(item) {
+  if (item.dir) return '';
+  return `<button type="button" class="cr-add-btn" data-action="cr-add"
+    data-path="${esc(item.path)}" data-name="${esc(item.name)}"
+    title="给这个文件预留一个网络副本链接或远端路径">+ 副本</button>`;
 }
 
 function status(text, bad = false) {
@@ -314,6 +322,7 @@ async function renderDir(abs) {
     const imageCards = images.map((item) => `<div class="thumb-card" data-action="file" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
       ${trashCardControls(item)}
       ${flControls(item)}
+      ${copyControls(item)}
       <div class="thumb-box"><img src="${esc(localThumbUrlFront(item.path))}" loading="lazy" alt="${esc(item.name)}"></div>
       <div class="thumb-name" title="${esc(item.name)}">${esc(item.name)}</div>
       <div class="thumb-meta">${formatSize(item.size)}</div>
@@ -321,6 +330,7 @@ async function renderDir(abs) {
     const zipCards = zips.map((item) => `<div class="thumb-card" data-action="zip" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
       ${trashCardControls(item)}
       ${flControls(item)}
+      ${copyControls(item)}
       <div class="thumb-box"><img src="${esc(fsCoverUrlFront(item.path, vsid, defpw))}" loading="lazy" alt="${esc(item.name)}"></div>
       <div class="thumb-name" title="${esc(item.name)}">${esc(item.name)}</div>
       <div class="thumb-meta">${formatSize(item.size)}</div>
@@ -341,7 +351,7 @@ async function renderDir(abs) {
         : `<span class="icon ${icon}"></span>`;
       return `<tr data-action="${action}" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
         ${trashRowStart(item)}
-        <td><span class="file-name">${thumb}${esc(item.name)}${hint}${flControls(item)}</span></td>
+        <td><span class="file-name">${thumb}${esc(item.name)}${hint}${flControls(item)}${copyControls(item)}</span></td>
         <td class="file-size">${item.dir ? '文件夹' : formatSize(item.size)}</td>
         <td class="file-time">${formatTime(item.mtime)}</td>
         ${trashRowEnd(item)}
@@ -679,6 +689,10 @@ document.addEventListener('click', async (event) => {
     else addPickedFromItem(item);
     return;
   }
+  if (action === 'cr-add') {
+    openCopyRefForItem({ path: element.dataset.path, name: element.dataset.name });
+    return;
+  }
   const target = current();
   const dir = target.kind === 'dir' ? target.path : (target.dir || target.zipDir);
   try {
@@ -766,6 +780,7 @@ initAnnotations({
 initManifestSync({
   getSnapshot: () => getAnnotationStore()?.snapshot() || null,
   getFileSelection: () => selectionStore.get('files'),
+  getCopyRefs: () => selectionStore.get('copies'),
 });
 
 initManifestBuilder({
