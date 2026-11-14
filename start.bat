@@ -5,8 +5,19 @@ title Local ZIP Browser Launcher
 
 rem ===== Settings: change PORT here if 4173 is already used =====
 set "PORT=4173"
+rem Local browser always uses 127.0.0.1; the listen address is ZIP_BROWSER_HOST, not this URL.
 set "URL=http://127.0.0.1:%PORT%/"
+set "PROBE=http://127.0.0.1:%PORT%/health"
 set "NPM_REGISTRY=https://registry.npmmirror.com"
+
+rem ===== Optional LAN access: uncomment the next two lines and set a STRONG code =====
+rem 1) bind to all NICs (or set a single LAN IP, which is safer); 2) require an access code.
+rem set "ZIP_BROWSER_HOST=0.0.0.0"
+rem set "ZIP_BROWSER_ACCESS_CODE=CHANGE_ME_TO_A_STRONG_CODE"
+rem Windows Firewall (admin, once):
+rem   netsh advfirewall firewall add rule name="ZipBrowser 4173" dir=in action=allow protocol=TCP localport=4173 remoteip=192.168.1.0/24
+rem Then other machines open http://LAN-IP:4173/ (user: any, password: the code above).
+rem NOTE: plain HTTP on a LAN. Never expose this port to the public Internet.
 set "NO_BROWSER="
 if /i "%~1"=="--no-browser" set "NO_BROWSER=1"
 
@@ -43,7 +54,7 @@ if exist "node_modules\@zip.js\zip.js\package.json" (
 
 rem ===== Probe: is OUR server already listening on this port? =====
 set "READY=0"
-node -e "require('http').get('%URL%',r=>{let s='';r.on('data',d=>s+=d);r.on('end',()=>process.exit(r.statusCode===200?(s.includes('__LOCAL_TOKEN__')?0:1):1))}).on('error',()=>process.exit(1))" >nul 2>nul
+node -e "require('http').get('%PROBE%',r=>{let s='';r.on('data',d=>s+=d);r.on('end',()=>process.exit(r.statusCode===200&&s.includes('ok')?0:1))}).on('error',()=>process.exit(1))" >nul 2>nul
 if not errorlevel 1 set "READY=1"
 
 if "!READY!"=="1" (
@@ -54,7 +65,7 @@ if "!READY!"=="1" (
   for /L %%i in (1,1,25) do (
     if "!READY!"=="0" (
       ping -n 2 127.0.0.1 >nul
-      node -e "require('http').get('%URL%',r=>{let s='';r.on('data',d=>s+=d);r.on('end',()=>process.exit(r.statusCode===200?(s.includes('__LOCAL_TOKEN__')?0:1):1))}).on('error',()=>process.exit(1))" >nul 2>nul
+      node -e "require('http').get('%PROBE%',r=>{let s='';r.on('data',d=>s+=d);r.on('end',()=>process.exit(r.statusCode===200&&s.includes('ok')?0:1))}).on('error',()=>process.exit(1))" >nul 2>nul
       if not errorlevel 1 set "READY=1"
     )
   )

@@ -1912,3 +1912,444 @@ test('copy-ref modal saves refs, rejects unsafe values and removes via panel del
     Object.assign(globalThis, saved);
   }
 });
+
+test('explorer args and open-in-explorer enforce browsed paths', async () => {
+  const { explorerArgs, openInExplorer } = await import('../server/explorer-service.js');
+  const { allowDirectory } = await import('../server/fs-service.js');
+  assert.deepEqual(explorerArgs('C:\\Work', true), ['C:\\Work']);
+  assert.deepEqual(explorerArgs('C:\\Work\\a.txt', false), ['/select,C:\\Work\\a.txt']);
+
+  const tmp = await fs.mkdtemp(path.join(ROOT, 'tests', 'explorer-'));
+  try {
+    const file = path.join(tmp, 'a.txt');
+    await fs.writeFile(file, 'hello');
+    allowDirectory(tmp); // 等价于用户先在页面里浏览过该目录
+    const calls = [];
+    const run = (args) => calls.push(args);
+    const dir = await openInExplorer({ path: tmp }, { run });
+    assert.equal(dir.kind, 'dir');
+    assert.deepEqual(dir.args, [tmp]);
+    const picked = await openInExplorer({ path: file }, { run });
+    assert.equal(picked.kind, 'file');
+    assert.deepEqual(picked.args, [`/select,${file}`]);
+    assert.equal(calls.length, 2, 'injected runner avoids launching a real GUI process');
+
+    await assert.rejects(
+      () => openInExplorer({ path: 'Z:\\not-browsed\\x' }, { run }),
+      (err) => err.status === 403,
+    );
+    await assert.rejects(
+      () => openInExplorer({ path: 'zip:C:/a.zip#x.png' }, { run }),
+      (err) => err.status === 400,
+    );
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('one-level vs recursive directory lists keep full subtree sizes', async () => {
+  const tmp = await fs.mkdtemp(path.join(ROOT, 'tests', 'dl-'));
+  try {
+    await fs.mkdir(path.join(tmp, 'sub', 'deep'), { recursive: true });
+    await fs.writeFile(path.join(tmp, 'a.txt'), 'aaa');
+    await fs.writeFile(path.join(tmp, 'sub', 'b.txt'), 'bbbb');
+    await fs.writeFile(path.join(tmp, 'sub', 'deep', 'c.txt'), 'ccccc');
+    const token = { 'X-Local-Token': TEST_TOKEN };
+    const headers = { ...token, 'Content-Type': 'application/json' };
+    const listed = await fetch(`${BASE}/api/list?path=${encodeURIComponent(tmp)}`, { headers: token });
+    assert.equal(listed.status, 200, 'browsing registers the root for mft scans');
+    const post = async (body) => (await fetch(`${BASE}/api/mft/scan`, {
+      method: 'POST', headers, body: JSON.stringify(body),
+    })).json();
+
+    const one = await post({ paths: [{ path: tmp, recursive: false, sizeFull: true }] });
+    const rootOne = one.roots[0];
+    assert.equal(rootOne.children.length, 1, 'one level emits only direct child folders');
+    assert.equal(rootOne.children[0].children.length, 0, 'grandchildren are not emitted');
+    assert.equal(rootOne.fileCount, 3, 'root size still covers the whole physical subtree');
+    assert.equal(rootOne.totalSize, 12);
+    assert.equal(rootOne.children[0].fileCount, 2, 'each child carries its own subtree size');
+    assert.equal(Object.values(one.files)[0].length, 1, 'file-list for one level has direct files only');
+
+    const all = await post({ paths: [{ path: tmp, recursive: true, sizeFull: true }] });
+    assert.equal(all.roots[0].children[0].children.length, 1, 'recursive emits grandchildren');
+    assert.equal(all.roots[0].totalSize, 12);
+    assert.equal(Object.values(all.files)[0].length, 3);
+
+    // 逐根 sizeFull=false：不下钻，体积只含本层（旧行为），不影响别的根。
+    const shallow = await post({ paths: [{ path: tmp, recursive: false, sizeFull: false }] });
+    assert.equal(shallow.roots[0].children.length, 0);
+    assert.equal(shallow.roots[0].totalSize, 3);
+
+    const legacy = await post({ paths: [tmp], recursive: false });
+    assert.equal(legacy.roots[0].children.length, 0, 'plain string roots keep the old global behaviour');
+    assert.equal(legacy.roots[0].totalSize, 3);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('directory-list button, explorer button and new modal are wired', async () => {
+  const html = await (await fetch(BASE)).text();
+  for (const id of ['dirListModal', 'dirListOne', 'dirListAll', 'dirListSave', 'dirListRefresh']) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  const app = await (await fetch(`${BASE}/app.js`)).text();
+  for (const text of ['+ 目录下文件', '+ 该文件', '+ 目录清单', '打开位置',
+    'data-action="dl-add"', 'data-action="ex-open"', '/api/explorer/open']) {
+    assert.ok(app.includes(text), `app.js must contain ${text}`);
+  }
+  assert.doesNotMatch(app, />\+ 列表</, 'old ambiguous button text is gone');
+  const builder = await (await fetch(`${BASE}/manifest-builder.js`)).text();
+  for (const text of ['openDirListForItem', 'scanRootEntries', 'sizeFull: true']) {
+    assert.ok(builder.includes(text), `manifest-builder.js must contain ${text}`);
+  }
+
+  const noToken = await fetch(`${BASE}/api/explorer/open`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: 'C:\\Work' }),
+  });
+  assert.equal(noToken.status, 403);
+  const unbrowsed = await fetch(`${BASE}/api/explorer/open`, {
+    method: 'POST', headers: { 'X-Local-Token': TEST_TOKEN, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: 'Z:\\not-browsed\\x' }),
+  });
+  assert.equal(unbrowsed.status, 403, 'unbrowsed paths are rejected before any process launch');
+});
+
+test('directory-list modal computes sizes and saves one-level/recursive selections', async () => {
+  const makeEl = () => ({
+    dataset: {}, value: '', textContent: '', innerHTML: '', title: '', checked: false,
+    handlers: {},
+    classList: {
+      hidden: true,
+      add(c) { if (c === 'hidden') this.hidden = true; },
+      remove(c) { if (c === 'hidden') this.hidden = false; },
+      toggle() {}, contains(c) { return c === 'hidden' ? this.hidden : false; },
+    },
+    addEventListener(type, fn) { this.handlers[type] = fn; },
+    appendChild() {}, setAttribute() {}, focus() {}, remove() {},
+  });
+  const ids = [
+    'builderBtn', 'builderClose', 'builderModal', 'builderBody', 'builderScan',
+    'builderCopy', 'builderDownload', 'builderUpload', 'builderStatus',
+    'builderDirs', 'builderFiles', 'builderPreview', 'builderDiag',
+    'dirListModal', 'dirListClose', 'dirListCancel', 'dirListSave', 'dirListRefresh',
+    'dirListPath', 'dirListOne', 'dirListAll', 'dirListSummary',
+    'dirListChildren', 'dirListError',
+  ];
+  const els = Object.fromEntries(ids.map((id) => [id, makeEl()]));
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  const sel = await import('../web/manifest-selection.js');
+  const state = { dirs: sel.emptyDirSelection(), files: sel.emptyFileSelection(), copies: sel.emptyCopyRefs() };
+  const store = {
+    get: (which) => clone(state[which]),
+    set: (which, value) => { state[which] = clone(value); return clone(value); },
+  };
+  const statuses = [];
+  const saved = { window: globalThis.window, document: globalThis.document };
+  globalThis.window = { __LOCAL_TOKEN__: 'ui-token' };
+  globalThis.document = {
+    getElementById: (id) => els[id] || null,
+    querySelectorAll: () => [],
+    addEventListener() {},
+  };
+  try {
+    const ui = await import('../web/manifest-builder.js?harness=dirlistui');
+    ui.initManifestBuilder({
+      api: async () => ({
+        roots: [{
+          path: 'C:\\Work', name: 'Work', fileCount: 3, totalSize: 3072,
+          totalSizeOnDisk: 4096, sizePartial: false,
+          children: [{ name: 'sub', fileCount: 2, totalSize: 2048 }],
+        }],
+        summaries: {}, files: {}, status: {},
+      }),
+      store,
+      getSnapshot: () => null,
+      getCurrentDir: () => 'C:\\Work',
+      status: (text) => statuses.push(text),
+    });
+
+    ui.openDirListForItem({ path: 'C:\\Work', name: 'Work' });
+    assert.equal(els.dirListModal.classList.hidden, false);
+    assert.equal(els.dirListPath.value, 'C:\\Work');
+    assert.equal(els.dirListOne.checked, true, 'one level is the default');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.match(els.dirListSummary.innerHTML, /3<\/strong> 个文件/);
+    assert.match(els.dirListSummary.innerHTML, /3\.0 KB/);
+    assert.match(els.dirListChildren.innerHTML, /sub/);
+
+    els.dirListAll.checked = true;
+    els.dirListSave.handlers.click();
+    assert.equal(store.get('dirs').dirs.length, 1);
+    assert.equal(store.get('dirs').dirs[0].recursive, true);
+    assert.equal(els.dirListModal.classList.hidden, true);
+    assert.ok(statuses.some((text) => /含所有子目录/.test(text)));
+
+    ui.openDirListForItem({ path: 'c:\\WORK', name: 'Work' });
+    assert.equal(els.dirListAll.checked, true, 'existing selection is restored case-insensitively');
+    els.dirListAll.checked = false;
+    els.dirListOne.checked = true;
+    els.dirListSave.handlers.click();
+    assert.equal(store.get('dirs').dirs.length, 1, 'updating does not duplicate');
+    assert.equal(store.get('dirs').dirs[0].recursive, false);
+    assert.ok(statuses.some((text) => /仅本层/.test(text)));
+  } finally {
+    Object.assign(globalThis, saved);
+  }
+});
+
+// ── 加密归档标记 ──────────────────────────────────────────────────────────
+
+test('archive encryption probe agrees with zip.js on the real sample archives', async () => {
+  const flags = await import('../server/archive-flags.js');
+  const zs = await import('../server/zip-service.js');
+  flags.clearArchiveEncryptionCache();
+  const expected = {
+    'basic.zip': false,
+    'images.zip': false,
+    'chinese.zip': false,
+    'zipcrypto.zip': true,
+    'aes256.zip': true,
+  };
+  for (const [name, want] of Object.entries(expected)) {
+    const abs = path.join(SAMPLES, name);
+    const opened = await zs.openZipTransient(new Uint8Array(await fs.readFile(abs)));
+    assert.equal(opened.encrypted, want, `zip.js reports ${name} as encrypted=${want}`);
+    await opened.reader.close().catch(() => {});
+    assert.equal(await flags.probeArchiveEncryption(abs), want, `${name} probe`);
+    assert.equal(await flags.probeArchiveEncryption(abs), want, `${name} cached probe`);
+  }
+});
+
+function centralEntry({ flags = 0, name = 'a.txt', extra = Buffer.alloc(0) } = {}) {
+  const nameBuf = Buffer.from(name);
+  const buf = Buffer.alloc(46 + nameBuf.length + extra.length);
+  buf.writeUInt32LE(0x02014b50, 0);
+  buf.writeUInt16LE(flags, 8);
+  buf.writeUInt16LE(nameBuf.length, 28);
+  buf.writeUInt16LE(extra.length, 30);
+  buf.writeUInt16LE(0, 32);
+  nameBuf.copy(buf, 46);
+  extra.copy(buf, 46 + nameBuf.length);
+  return buf;
+}
+
+test('detectZipEncryption reads GP flags, WinZip AES extra and rejects truncated CD', async () => {
+  const { detectZipEncryption } = await import('../server/archive-flags.js');
+  assert.equal(detectZipEncryption(centralEntry(), 1), false);
+  assert.equal(detectZipEncryption(centralEntry({ flags: 0x1 }), 1), true, 'general purpose bit 0');
+  const aesExtra = Buffer.concat([Buffer.from([0x01, 0x99, 0x07, 0x00]), Buffer.alloc(7)]);
+  assert.equal(detectZipEncryption(centralEntry({ extra: aesExtra }), 1), true, 'AES extra 0x9901');
+  assert.equal(
+    detectZipEncryption(Buffer.concat([centralEntry(), centralEntry({ name: 'b.txt' })]), 2),
+    false,
+  );
+  assert.equal(detectZipEncryption(centralEntry(), 3), 'unknown', 'declared entries not all present');
+  assert.equal(detectZipEncryption(Buffer.from('not a central directory'), 1), 'unknown');
+});
+
+test('archive encryption probe covers 7z/rar headers and stays fail-closed elsewhere', async () => {
+  const flags = await import('../server/archive-flags.js');
+  const tmp = path.join(ROOT, 'tests', `.enc-probe-${process.pid}`);
+  await fs.mkdir(tmp, { recursive: true });
+  const write = async (name, bytes) => {
+    const abs = path.join(tmp, name);
+    await fs.writeFile(abs, bytes);
+    return flags.probeArchiveEncryption(abs);
+  };
+  const seven = (body) => {
+    const buf = Buffer.alloc(32 + body.length);
+    Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]).copy(buf, 0);
+    buf.writeBigUInt64LE(0n, 12); // next header offset
+    buf.writeBigUInt64LE(BigInt(body.length), 20); // next header size
+    body.copy(buf, 32);
+    return buf;
+  };
+  const rar4 = (mainFlags = 0, fileFlags = 0) => {
+    const buf = Buffer.alloc(64);
+    Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00]).copy(buf, 0);
+    buf[9] = 0x73; // main header
+    buf.writeUInt16LE(mainFlags, 10);
+    buf.writeUInt16LE(13, 12);
+    const at = 20; // 7-byte marker + 13-byte main header
+    buf[at + 2] = 0x74; // file header
+    buf.writeUInt16LE(fileFlags, at + 3);
+    return buf;
+  };
+  const rar5 = (goodCrc) => {
+    const headerData = Buffer.from([0x01, 0x00, 0x00]); // type=1, flags=0, extra=0
+    const buf = Buffer.alloc(64);
+    Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00]).copy(buf, 0);
+    buf.writeUInt32LE(goodCrc ? flags.crc32(headerData) : 0, 8);
+    buf[12] = headerData.length;
+    headerData.copy(buf, 13);
+    return buf;
+  };
+  try {
+    assert.equal(await write('enc-header.7z', seven(Buffer.from([0x17, 0, 0, 0, 0, 0, 0, 0]))), true,
+      'kEncodedHeader means even the directory is encrypted');
+    assert.equal(await write('aes-content.7z', seven(Buffer.from([0x01, 0x06, 0xf1, 0x07, 0x01, 0, 0, 0]))), true,
+      'AES coder id in a readable header means encrypted content');
+    assert.equal(await write('plain.7z', seven(Buffer.from([0x01, 0, 0, 0, 0, 0, 0, 0]))), false);
+    assert.equal(await write('password.rar', rar4(0, 0x0004)), true, 'RAR4 LHD_PASSWORD');
+    assert.equal(await write('hp.rar', rar4(0x0080, 0)), true, 'RAR4 -hp encrypted headers');
+    assert.equal(await write('plain.rar', rar4()), false);
+    assert.equal(await write('rar5-bad-crc.rar', rar5(false)), true, 'RAR5 broken header CRC = encrypted header');
+    assert.equal(await write('rar5-ok-crc.rar', rar5(true)), 'unknown', 'RAR5 content encryption is not guessed');
+    assert.equal(await write('archive.tar.gz', Buffer.from('no password in gz')), false);
+    assert.equal(await write('notes.txt', Buffer.from('plain text')), 'unknown');
+    assert.equal(await flags.probeArchiveEncryption(path.join(tmp, 'missing.zip')), 'unknown');
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('/api/list exposes encrypted only on archive items', async () => {
+  const res = await fetch(`${BASE}/api/list?path=${encodeURIComponent(SAMPLES)}`, {
+    headers: { 'X-Local-Token': TEST_TOKEN },
+  });
+  assert.equal(res.status, 200);
+  const { items } = await res.json();
+  const byName = new Map(items.map((item) => [item.name, item]));
+  assert.equal(byName.get('aes256.zip').encrypted, true);
+  assert.equal(byName.get('zipcrypto.zip').encrypted, true);
+  assert.equal(byName.get('basic.zip').encrypted, false);
+  assert.equal(byName.get('images.zip').encrypted, false);
+  assert.equal(byName.get('images').encrypted, undefined, 'directories carry no encryption flag');
+});
+
+test('encryption badge is wired into list rows, thumbnail cards and styles', async () => {
+  const app = await (await fetch(`${BASE}/app.js`)).text();
+  for (const text of ['encBadge(item)', 'encBadge(item, true)', 'tag tag-enc', 'enc-badge', "item.encrypted !== true"]) {
+    assert.ok(app.includes(text), `app.js must contain ${text}`);
+  }
+  const css = await (await fetch(`${BASE}/style.css`)).text();
+  for (const text of ['.tag-enc', '.enc-badge', 'position: relative; height: 120px']) {
+    assert.ok(css.includes(text), `style.css must contain ${text}`);
+  }
+});
+
+// ── 局域网访问 / 访问码 ──────────────────────────────────────────────────
+
+test('access code is Basic Auth, fail-closed, and never injected into the page', async () => {
+  const { basicAuthAccepted, isLoopbackRequest } = await import('../server/access.js');
+  assert.equal(basicAuthAccepted(undefined, ''), true, 'no code configured = disabled');
+  assert.equal(basicAuthAccepted(undefined, 'lan-secret'), false);
+  assert.equal(basicAuthAccepted('Bearer anything', 'lan-secret'), false);
+  assert.equal(basicAuthAccepted('Basic !!!', 'lan-secret'), false);
+  const good = 'Basic ' + Buffer.from('zip:lan-secret').toString('base64');
+  assert.equal(basicAuthAccepted(good, 'lan-secret'), true);
+  assert.equal(basicAuthAccepted(good, 'other'), false);
+  assert.equal(basicAuthAccepted('Basic ' + Buffer.from('zip:lan-secret-more').toString('base64'), 'lan-secret'), false);
+  assert.equal(isLoopbackRequest({ socket: { remoteAddress: '127.0.0.1' } }), true);
+  assert.equal(isLoopbackRequest({ socket: { remoteAddress: '::ffff:127.0.0.1' } }), true);
+  assert.equal(isLoopbackRequest({ socket: { remoteAddress: '192.168.1.9' } }), false);
+});
+
+test('default server stays loopback-only and exposes the bind hint', async () => {
+  const cfg = await import('../server/config.js');
+  assert.equal(cfg.HOST, process.env.ZIP_BROWSER_HOST || '127.0.0.1');
+  assert.equal(cfg.ACCESS_CODE, process.env.ZIP_BROWSER_ACCESS_CODE || '');
+  const page = await fetch(BASE);
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.match(html, /id="bindHint">仅监听 127\.0\.0\.1/);
+  assert.doesNotMatch(html, /未启用访问码/);
+  const health = await fetch(`${BASE}/health`);
+  assert.equal(health.status, 200);
+  assert.deepEqual(await health.json(), { ok: true });
+  // 环境变量确实能改监听地址（不真的绑定 0.0.0.0，避免影响运行测试的机器）。
+  const out = execFileSync(process.execPath, ['--input-type=module', '-e',
+    "const c = await import('./server/config.js'); console.log(c.HOST + '|' + c.ACCESS_CODE);"], {
+    cwd: ROOT,
+    env: { ...process.env, ZIP_BROWSER_HOST: '0.0.0.0', ZIP_BROWSER_ACCESS_CODE: 'env-code' },
+    encoding: 'utf8',
+  }).trim();
+  assert.equal(out, '0.0.0.0|env-code');
+});
+
+test('LAN mode gates every route behind the access code', async () => {
+  const LAN_PORT = 4189;
+  const LAN_BASE = `http://127.0.0.1:${LAN_PORT}`;
+  const LAN_STATE = path.join(ROOT, 'tests', '.version-state.lan.json');
+  const child = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js')], {
+    env: {
+      ...process.env,
+      PORT: String(LAN_PORT),
+      ZIP_BROWSER_HOST: '127.0.0.1',
+      ZIP_BROWSER_TOKEN: TEST_TOKEN,
+      ZIP_BROWSER_ACCESS_CODE: 'lan-secret',
+      ZIP_BROWSER_VERSION_STATE: LAN_STATE,
+    },
+    stdio: 'ignore',
+  });
+  const waitReady = async () => {
+    const start = Date.now();
+    while (Date.now() - start < 12000) {
+      try {
+        const response = await fetch(`${LAN_BASE}/health`);
+        if (response.ok) return true;
+      } catch {
+        // still starting
+      }
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+    return false;
+  };
+  try {
+    assert.equal(await waitReady(), true, 'LAN-mode server started');
+    const anonPage = await fetch(`${LAN_BASE}/`);
+    assert.equal(anonPage.status, 401);
+    assert.match(anonPage.headers.get('www-authenticate') || '', /Basic realm="ZipBrowser LAN"/);
+    const denied = await anonPage.text();
+    assert.ok(!denied.includes(TEST_TOKEN), '401 response never leaks the local token');
+    assert.ok(!denied.includes('__ZIP_BROWSER_TOKEN__'));
+    for (const url of ['/version.json', '/app.js', '/style.css',
+      '/thumb/fs/C/x.png', '/fs/C/x.txt', '/api/list?path=C%3A%5C']) {
+      const response = await fetch(`${LAN_BASE}${url}`);
+      assert.equal(response.status, 401, `${url} must require the access code`);
+    }
+    const auth = (extra = {}) => ({
+      Authorization: 'Basic ' + Buffer.from('zip:lan-secret').toString('base64'),
+      ...extra,
+    });
+    const wrong = await fetch(`${LAN_BASE}/`, {
+      headers: { Authorization: 'Basic ' + Buffer.from('zip:nope').toString('base64') },
+    });
+    assert.equal(wrong.status, 401);
+    const page = await fetch(`${LAN_BASE}/`, { headers: auth() });
+    assert.equal(page.status, 200);
+    const html = await page.text();
+    assert.ok(html.includes(`window.__LOCAL_TOKEN__ = "${TEST_TOKEN}"`), 'token is only served after auth');
+    assert.match(html, /id="bindHint">仅监听 127\.0\.0\.1 · 已启用访问码/);
+    assert.ok(!html.includes('lan-secret'), 'access code is never written into the page');
+    const noToken = await fetch(`${LAN_BASE}/api/list?path=C%3A%5C`, { headers: auth() });
+    assert.equal(noToken.status, 403, 'access code does not replace the API token');
+    const okApi = await fetch(`${LAN_BASE}/api/list?path=${encodeURIComponent(SAMPLES)}`, {
+      headers: auth({ 'X-Local-Token': TEST_TOKEN }),
+    });
+    assert.equal(okApi.status, 200);
+    const health = await fetch(`${LAN_BASE}/health`);
+    assert.equal(health.status, 200, 'local health probe is exempt from auth');
+  } finally {
+    child.kill();
+    await fs.rm(LAN_STATE, { force: true });
+  }
+});
+
+test('launch/stop scripts work with a non-loopback bind and probe /health', async () => {
+  const start = await fs.readFile(path.join(ROOT, 'start.bat'), 'utf8');
+  const stop = await fs.readFile(path.join(ROOT, 'stop.bat'), 'utf8');
+  assert.match(start, /set "PROBE=http:\/\/127\.0\.0\.1:%PORT%\/health"/);
+  assert.ok(start.includes('ZIP_BROWSER_HOST'), 'LAN switch is documented in start.bat');
+  assert.ok(start.includes('ZIP_BROWSER_ACCESS_CODE'));
+  assert.ok(!start.includes('__LOCAL_TOKEN__'), 'probe no longer depends on the injected token');
+  assert.ok(!start.includes('0.0.0.0:%PORT%/'), 'browser URL is back to loopback');
+  assert.match(stop, /0\.0\.0\.0:%PORT%/);
+  // 与 start.bat 里同一条 node -e 探活命令，确认真能跑通。
+  execFileSync(process.execPath, ['-e',
+    `require('http').get('${BASE}/health',r=>{let s='';r.on('data',d=>s+=d);r.on('end',()=>process.exit(r.statusCode===200&&s.includes('ok')?0:1))}).on('error',()=>process.exit(1))`],
+    { stdio: 'ignore' });
+});

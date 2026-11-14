@@ -6,8 +6,11 @@ import { promisify } from 'node:util';
 import { HttpError } from './util.js';
 import { isStaticAllowed, isArchiveName } from './mime.js';
 import { detectTags } from './tag-rules.js';
+import { probeArchiveEncryption } from './archive-flags.js';
 
 const execFileAsync = promisify(execFile);
+// 一个目录里最多探测这么多压缩包，避免成百上千个归档把列目录拖慢。
+const ARCHIVE_PROBE_LIMIT = 200;
 const PS_COMMAND = 'Get-CimInstance Win32_LogicalDisk | Select-Object DeviceID,VolumeName,Size,FreeSpace,DriveType | ConvertTo-Json -Compress';
 
 const allowedPrefixes = new Set();
@@ -146,6 +149,7 @@ export async function listDirectory(abs) {
     throw new HttpError(err.code === 'ENOENT' ? 404 : 403, `cannot open directory: ${err.message}`);
   }
   const items = [];
+  const probes = [];
   for (const entry of entries) {
     if (entry.isSymbolicLink()) continue;
     const full = path.win32.join(abs, entry.name);
@@ -153,7 +157,7 @@ export async function listDirectory(abs) {
       const stat = await fs.stat(full);
       const dir = stat.isDirectory();
       const archive = !dir && isArchiveName(entry.name);
-      items.push({
+      const item = {
         name: entry.name,
         path: full,
         dir,
@@ -162,14 +166,25 @@ export async function listDirectory(abs) {
         archive,
         // zip 字段保留为 archive 的别名，避免旧前端/测试失效。
         zip: archive,
-      });
+      };
+      items.push(item);
+      if (archive) probes.push({ item, size: stat.size, mtimeMs: stat.mtimeMs });
     } catch {
       // skip unreadable entries instead of failing the whole listing
     }
   }
   items.sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name, 'zh-CN'));
   allowDirectory(abs);
-  // 自动标签口径与 dir-struct-gen 一致：只看该目录的直接子项名，零额外 IO。
+  // 压缩包加密标记：只对归档做「读头尾若干 KB」的轻量探测，判不准返回 unknown。
+  if (probes.length) {
+    const limited = probes.slice(0, ARCHIVE_PROBE_LIMIT);
+    const results = await Promise.all(limited.map(({ item, size, mtimeMs }) => probeArchiveEncryption(item.path, {
+      size, mtimeMs,
+    }).catch(() => 'unknown')));
+    limited.forEach(({ item }, index) => { item.encrypted = results[index]; });
+    for (const { item } of probes.slice(ARCHIVE_PROBE_LIMIT)) item.encrypted = 'unknown';
+  }
+  // 自动标签口径与 dir-struct-gen 一致：只看该目录的直接子项名，不递归读盘。
   return { path: abs, items, tags: detectTags(entries.map((entry) => entry.name)) };
 }
 

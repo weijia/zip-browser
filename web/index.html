@@ -131,6 +131,31 @@
   </div>
 </div>
 
+<div id="dirListModal" class="modal hidden">
+  <div class="modal-card dl-card">
+    <div class="modal-head">
+      <h2>加入目录清单</h2>
+      <button id="dirListClose" type="button" class="modal-x" title="关闭">×</button>
+    </div>
+    <p class="modal-note">把目录加入目录结构清单（<code>struct/</code> v2）。体积按<strong>整棵物理子树</strong>统计，与清单里显示几层无关（与 dir-struct-gen 口径一致）；因此「仅本层」也需要扫描整棵子树才能算准大小。</p>
+    <label class="cr-field">目录<input id="dirListPath" type="text" readonly></label>
+    <div class="dl-options">
+      <label><input type="radio" name="dlDepth" id="dirListOne" value="one" checked> 仅本层 — 清单里只列该目录与一层子目录</label>
+      <label><input type="radio" name="dlDepth" id="dirListAll" value="all"> 含所有子目录 — 递归整棵子树</label>
+    </div>
+    <div class="bl-section-title">目录体积
+      <button id="dirListRefresh" type="button" class="bt-add">重新计算</button>
+    </div>
+    <div id="dirListSummary" class="dl-summary">正在计算…</div>
+    <div id="dirListChildren"></div>
+    <div id="dirListError" class="modal-error"></div>
+    <div class="modal-actions">
+      <button id="dirListCancel" type="button">取消</button>
+      <button id="dirListSave" type="button" class="primary">加入目录清单</button>
+    </div>
+  </div>
+</div>
+
 <div id="copyRefModal" class="modal hidden">
   <div class="modal-card">
     <div class="modal-head">
@@ -179,7 +204,7 @@
   <span id="statusText">正在连接本地服务…</span>
   <span class="status-right">
     <span id="appVersion" class="version-badge" title="读取版本信息…">v…</span>
-    <span>浏览 · 删除到回收站 · 仅监听 127.0.0.1</span>
+    <span>浏览 · 删除到回收站 · <span id="bindHint">__ZIP_BROWSER_HOST__</span></span>
   </span>
 </footer>
 

@@ -276,7 +276,7 @@ input[type="password"] { width: 100%; padding: 8px 10px; }
 .thumb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
 .thumb-card { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--bg); cursor: pointer; }
 .thumb-card:hover { border-color: var(--accent); background: #fbfdff; }
-.thumb-box { height: 120px; background: var(--bg-soft); }
+.thumb-box { position: relative; height: 120px; background: var(--bg-soft); }
 .thumb-box img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .thumb-name { padding: 7px 9px 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .thumb-meta { padding: 0 9px 8px; font-size: 11px; color: var(--text-3); }
@@ -363,3 +363,23 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
 #copyRefModal .modal-card { width: min(540px, 94vw); max-height: 88vh; overflow: auto; }
 .cr-field { display: block; font-size: 12px; color: var(--text-2); margin: 9px 0; }
 .cr-field input, .cr-field select { display: block; width: 100%; margin-top: 4px; font-size: 12px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: #fff; color: var(--text); box-sizing: border-box; }
+
+/* 目录清单（struct）快捷按钮与「在资源管理器打开」 */
+.dl-add { margin-left: 6px; font-size: 11px; line-height: 1.4; padding: 1px 7px; color: #0f6e56; background: #e1f5ee; border: 1px solid #bfe6d8; border-radius: 99px; cursor: pointer; vertical-align: middle; }
+.dl-add:hover { background: #cdeee2; }
+.ex-open { margin-left: 6px; font-size: 11px; line-height: 1.4; padding: 1px 7px; color: #5f4b8b; background: #f2eefb; border: 1px solid #ddd3f0; border-radius: 99px; cursor: pointer; vertical-align: middle; }
+.ex-open:hover { background: #e7dffa; }
+.thumb-card .dl-add, .folder-chip .dl-add, .folder-chip .ex-open { position: relative; z-index: 2; }
+.thumb-card .ex-open { position: absolute; top: 30px; right: 5px; z-index: 2; margin-left: 0; background: rgba(242, 238, 251, .95); }
+
+/* 加密归档标记：列表行标签 + 缩略图卡片角标（避开右上的删除、右下的打开位置） */
+.tag-enc { color: #8a4b00; border-color: #f0d6a8; background: #fff5e6; }
+.enc-badge { position: absolute; right: 5px; bottom: 5px; z-index: 1; font-size: 10px; line-height: 1.6; padding: 1px 7px; color: #8a4b00; background: rgba(255, 245, 230, .96); border: 1px solid #f0d6a8; border-radius: 99px; white-space: nowrap; }
+
+#dirListModal .modal-card { width: min(600px, 94vw); max-height: 88vh; overflow: auto; }
+.dl-options { display: flex; flex-direction: column; gap: 7px; font-size: 12px; color: var(--text-2); margin: 10px 0; }
+.dl-options label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.dl-summary { font-size: 12px; line-height: 1.7; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-soft); color: var(--text); }
+.dl-warn { color: #a32d2d; }
+.dl-children-list { max-height: 170px; }
+.dl-size { flex: 0 1 260px; min-width: 0; font-size: 10px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

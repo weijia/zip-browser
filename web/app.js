@@ -10,7 +10,10 @@ import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
 import { initManifestSync, scheduleSync } from './manifest-sync.js';
 import { createSelectionStore } from './manifest-selection.js';
-import { initManifestBuilder, addPickedFromItem, addFileListDir, openCopyRefForItem } from './manifest-builder.js';
+import {
+  initManifestBuilder, addPickedFromItem, addFileListDir, openCopyRefForItem,
+  openDirListForItem,
+} from './manifest-builder.js';
 import {
   initTrash, resetTrashSelection, trashToolbarHtml,
   trashHeadStart, trashHeadEnd, trashRowStart, trashRowEnd,
@@ -78,13 +81,24 @@ function formatTime(ms) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-// 「+ 列表」：目录加入文件列表选择集的 dirs，文件加入 files（手工挑选片）。
+// 加密归档标记：后端列目录时只读头尾探测，encrypted === true 才显示；
+// false / 'unknown' 一律不显示，避免把判不准的包误标成「未加密」。
+const ENC_TITLE = '这个压缩包已加密，打开时需要密码（可用缺省密码或密码库记录）';
+function encBadge(item, card = false) {
+  if (item.encrypted !== true) return '';
+  return card
+    ? `<span class="enc-badge" title="${ENC_TITLE}">🔒 加密</span>`
+    : `<span class="tag tag-enc" title="${ENC_TITLE}">🔒 加密</span>`;
+}
+
+// 文件列表选择集：目录 → 收集该目录下的文件；文件 → 单个散文件。
+// 文案按对象区分，避免与「+ 目录清单」（进 struct 目录树）混淆。
 function flControls(item) {
   const dir = Boolean(item.dir);
   return `<button type="button" class="fl-add" data-action="fl-add"
     data-path="${esc(item.path)}" data-name="${esc(item.name)}" data-dir="${dir ? '1' : ''}"
     data-size="${Number(item.size) || 0}" data-mtime="${Number(item.mtime) || 0}"
-    title="${dir ? '把该目录下的文件列表加入上传选择集' : '把该文件加入文件列表选择集'}">+ 列表</button>`;
+    title="${dir ? '把该目录下的文件加入文件列表选择集' : '把该文件加入文件列表选择集'}">${dir ? '+ 目录下文件' : '+ 该文件'}</button>`;
 }
 
 // 「+ 副本」：给单个文件预留一个网络副本链接 / 远端路径（仅元数据，不上传内容）。
@@ -93,6 +107,21 @@ function copyControls(item) {
   return `<button type="button" class="cr-add-btn" data-action="cr-add"
     data-path="${esc(item.path)}" data-name="${esc(item.name)}"
     title="给这个文件预留一个网络副本链接或远端路径">+ 副本</button>`;
+}
+
+// 「+ 目录清单」：把目录加入 struct v2 目录清单，可选只加一层或整棵子树（含目录体积）。
+function dirListControls(item) {
+  if (!item.dir) return '';
+  return `<button type="button" class="dl-add" data-action="dl-add"
+    data-path="${esc(item.path)}" data-name="${esc(item.name)}"
+    title="把该目录加入目录结构清单（可选一层 / 含所有子目录，并带目录体积）">+ 目录清单</button>`;
+}
+
+// 「打开位置」：调起 Windows 资源管理器；目录直接打开，文件在所在文件夹中选中。
+function explorerControls(item) {
+  return `<button type="button" class="ex-open" data-action="ex-open"
+    data-path="${esc(item.path)}" data-name="${esc(item.name)}"
+    title="在 Windows 资源管理器中打开${item.dir ? '该目录' : '该文件所在位置并选中它'}">打开位置</button>`;
 }
 
 function status(text, bad = false) {
@@ -323,6 +352,7 @@ async function renderDir(abs) {
       ${trashCardControls(item)}
       ${flControls(item)}
       ${copyControls(item)}
+      ${explorerControls(item)}
       <div class="thumb-box"><img src="${esc(localThumbUrlFront(item.path))}" loading="lazy" alt="${esc(item.name)}"></div>
       <div class="thumb-name" title="${esc(item.name)}">${esc(item.name)}</div>
       <div class="thumb-meta">${formatSize(item.size)}</div>
@@ -331,13 +361,14 @@ async function renderDir(abs) {
       ${trashCardControls(item)}
       ${flControls(item)}
       ${copyControls(item)}
-      <div class="thumb-box"><img src="${esc(fsCoverUrlFront(item.path, vsid, defpw))}" loading="lazy" alt="${esc(item.name)}"></div>
+      ${explorerControls(item)}
+      <div class="thumb-box"><img src="${esc(fsCoverUrlFront(item.path, vsid, defpw))}" loading="lazy" alt="${esc(item.name)}">${encBadge(item, true)}</div>
       <div class="thumb-name" title="${esc(item.name)}">${esc(item.name)}</div>
       <div class="thumb-meta">${formatSize(item.size)}</div>
     </div>`).join('');
     const allCards = imageCards + zipCards;
     body = `<div class="thumb-head">图片/压缩包 · ${thumbsCount} 项<span>仅当前目录 · 点击缩略图查看原图或打开压缩包</span></div>
-      ${folders.length ? `<div class="folder-chips">${folders.map((item) => `<span class="folder-chip" data-action="dir" data-path="${esc(item.path)}">${esc(item.name)}${trashChipControls({ ...item, dir: true })}${flControls({ ...item, dir: true })}</span>`).join('')}</div>` : ''}
+      ${folders.length ? `<div class="folder-chips">${folders.map((item) => `<span class="folder-chip" data-action="dir" data-path="${esc(item.path)}">${esc(item.name)}${trashChipControls({ ...item, dir: true })}${flControls({ ...item, dir: true })}${dirListControls({ ...item, dir: true })}${explorerControls({ ...item, dir: true })}</span>`).join('')}</div>` : ''}
       <div class="thumb-grid">${allCards || '<div class="thumb-empty">当前目录没有图片或压缩包，可切换到列表视图</div>'}</div>`;
   } else {
     const rows = data.items.map((item) => {
@@ -351,7 +382,7 @@ async function renderDir(abs) {
         : `<span class="icon ${icon}"></span>`;
       return `<tr data-action="${action}" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
         ${trashRowStart(item)}
-        <td><span class="file-name">${thumb}${esc(item.name)}${hint}${flControls(item)}${copyControls(item)}</span></td>
+        <td><span class="file-name">${thumb}${esc(item.name)}${hint}${encBadge(item)}${flControls(item)}${dirListControls(item)}${copyControls(item)}${explorerControls(item)}</span></td>
         <td class="file-size">${item.dir ? '文件夹' : formatSize(item.size)}</td>
         <td class="file-time">${formatTime(item.mtime)}</td>
         ${trashRowEnd(item)}
@@ -689,8 +720,26 @@ document.addEventListener('click', async (event) => {
     else addPickedFromItem(item);
     return;
   }
+  if (action === 'dl-add') {
+    openDirListForItem({ path: element.dataset.path, name: element.dataset.name });
+    return;
+  }
   if (action === 'cr-add') {
     openCopyRefForItem({ path: element.dataset.path, name: element.dataset.name });
+    return;
+  }
+  if (action === 'ex-open') {
+    try {
+      const result = await api('/api/explorer/open', {
+        method: 'POST',
+        body: JSON.stringify({ path: element.dataset.path }),
+      });
+      status(result.kind === 'dir'
+        ? `已在资源管理器打开 ${result.path}`
+        : `已在资源管理器中定位 ${result.path}`);
+    } catch (err) {
+      status(`打开资源管理器失败：${err.message}`, true);
+    }
     return;
   }
   const target = current();

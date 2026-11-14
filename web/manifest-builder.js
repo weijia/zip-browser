@@ -29,6 +29,17 @@ let lastScan = null;
 let preview = null;
 let tab = 'dirs';
 let copyDraft = null; // 正在编辑的网络副本引用（null = 新增）
+let dirDraft = null;  // 正在加入目录清单的目录（path + 层数选择）
+const dirSummaryCache = new Map(); // path -> 最近一次算出的目录体积（仅 UI 展示，不进选择集）
+
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (!value) return '0 B';
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 ** 3) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  return `${(value / 1024 ** 3).toFixed(1)} GB`;
+}
 
 function setStatus(text, bad = false) {
   const el = $('builderStatus');
@@ -44,22 +55,6 @@ async function ensureHostInfo() {
   return hostInfo;
 }
 
-function uniqueRoots(...lists) {
-  const seen = new Set();
-  const out = [];
-  for (const list of lists) {
-    for (const item of list || []) {
-      const path = typeof item === 'string' ? item : item?.path;
-      if (!path) continue;
-      const key = path.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(path);
-    }
-  }
-  return out;
-}
-
 function treeNodeHtml(node) {
   const dirSel = store.get('dirs');
   const fileSel = store.get('files');
@@ -71,7 +66,7 @@ function treeNodeHtml(node) {
       <button type="button" class="bt-expand" data-bt="expand" title="展开子目录">▸</button>
       <label class="bt-check"><input type="checkbox" data-bt="check" data-path="${esc(node.path)}" ${checked}> <span>${esc(node.name || node.path)}</span></label>
       ${tags}
-      <button type="button" class="bt-add ${inFiles ? 'active' : ''}" data-bt="add-fl" data-path="${esc(node.path)}" title="把该目录下的文件列表加入上传">${inFiles ? '已加入' : '+ 列表'}</button>
+      <button type="button" class="bt-add ${inFiles ? 'active' : ''}" data-bt="add-fl" data-path="${esc(node.path)}" title="把该目录下的文件加入文件列表选择集">${inFiles ? '已加入' : '+ 目录下文件'}</button>
     </div>
     <div class="bt-children hidden"></div>
   </div>`;
@@ -81,17 +76,32 @@ async function renderDirs() {
   const pane = $('builderDirs');
   if (!pane) return;
   const root = getCurrentDir();
-  const count = store.get('dirs').dirs.length;
+  const sel = store.get('dirs');
+  const rows = (sel.dirs || []).map((item) => {
+    const sum = dirSummaryCache.get(item.path) || lastScan?.summaries?.[item.path];
+    const size = sum
+      ? `${Number(sum.fileCount) || 0} 个文件 · ${formatBytes(sum.totalSize)} · 占用 ${formatBytes(sum.totalSizeOnDisk)}${sum.partial ? ' · 部分不可读' : ''}`
+      : '体积未计算（在目录行点「+ 目录清单」可计算）';
+    return `<div class="bl-row">
+      <span class="bl-path" title="${esc(item.path)}">${esc(item.path)}</span>
+      <span class="dl-size" title="整棵物理子树口径，与清单显示几层无关">${esc(size)}</span>
+      <button type="button" data-bt="dl-toggle" data-path="${esc(item.path)}" title="切换只加一层 / 含所有子目录">${item.recursive === false ? '仅本层' : '含子目录'}</button>
+      <button type="button" class="danger-text" data-bt="dl-remove" data-path="${esc(item.path)}">移除</button>
+    </div>`;
+  }).join('');
   if (!root) {
     pane.innerHTML = '<p class="builder-hint">请先进入一个磁盘目录，再从这里勾选要生成清单的子目录。</p>';
     return;
   }
-  pane.innerHTML = `<p class="builder-hint">从 <strong>${esc(root)}</strong> 开始勾选；展开子目录会按需读取一层，不会扫描整盘。已选 <strong>${count}</strong> 个目录。</p>
+  pane.innerHTML = `<p class="builder-hint">从 <strong>${esc(root)}</strong> 开始勾选；也可在文件浏览页的目录行点 <strong>+ 目录清单</strong>，选择只加一层或含所有子目录，并查看目录体积。展开子目录只按需读取一层。已选 <strong>${(sel.dirs || []).length}</strong> 个目录。</p>
+    <div class="bl-section-title">已选目录（${(sel.dirs || []).length}）</div>
+    <div class="bl-list">${rows || '<div class="bl-empty">尚未选择目录</div>'}</div>
+    <div class="bl-section-title">目录勾选树</div>
     <div class="bt-tree">${treeNodeHtml({ path: root, name: root.split(/[\\/]/).filter(Boolean).pop() || root, tags: [] })}</div>
     <div class="builder-options">
-      <label><input type="checkbox" id="builderOptRecursive" ${store.get('dirs').options.recursive ? 'checked' : ''}> 递归包含子目录</label>
-      <label><input type="checkbox" id="builderOptSize" ${store.get('dirs').options.includeSize ? 'checked' : ''}> 计算目录体积</label>
-      <label><input type="checkbox" id="builderOptMtime" ${store.get('dirs').options.includeMtime ? 'checked' : ''}> 记录 mtime</label>
+      <label><input type="checkbox" id="builderOptRecursive" ${sel.options.recursive ? 'checked' : ''}> 递归包含子目录（仅对未单独指定层数的目录生效）</label>
+      <label><input type="checkbox" id="builderOptSize" ${sel.options.includeSize ? 'checked' : ''}> 计算目录体积</label>
+      <label><input type="checkbox" id="builderOptMtime" ${sel.options.includeMtime ? 'checked' : ''}> 记录 mtime</label>
     </div>`;
 }
 
@@ -130,7 +140,7 @@ function renderFiles() {
   const copyRows = copyEntries.map(([path, refs]) => refs.map((ref) => copyRowHtml(path, ref)).join('')).join('');
   const total = copyEntries.reduce((sum, [, refs]) => sum + refs.length, 0);
   const root = getCurrentDir();
-  pane.innerHTML = `<p class="builder-hint">「哪些目录下的文件列表要上传」完全由你决定：在目录清单里点 <strong>+ 列表</strong>，或在文件浏览页的目录行点同名按钮。</p>
+  pane.innerHTML = `<p class="builder-hint">「哪些目录下的文件列表要上传」完全由你决定：在目录清单里点 <strong>+ 目录下文件</strong>，或在文件浏览页的目录行/文件行点 <strong>+ 目录下文件</strong> / <strong>+ 该文件</strong>。</p>
     <div class="bl-section-title">已选目录（${(sel.dirs || []).length}）</div>
     <div class="bl-list">${dirRows || '<div class="bl-empty">尚未选择目录</div>'}</div>
     <div class="bl-section-title">手工加入的文件（${(sel.files || []).length}）</div>
@@ -141,6 +151,101 @@ function renderFiles() {
     <div class="bl-list cr-list">${copyRows || '<div class="bl-empty">还没有预留引用；在文件浏览页的文件行点「+ 副本」，或点上面「按路径添加」</div>'}</div>
     ${root ? `<div class="bl-section-title">当前目录快捷加入</div>
       <button type="button" class="bt-add" data-bt="add-fl" data-path="${esc(root)}">+ 把 ${esc(root)} 加入文件列表</button>` : ''}`;
+}
+
+/* ---------------- 目录清单弹窗（一层 / 递归 + 整棵子树体积） ---------------- */
+
+function closeDirListModal() {
+  $('dirListModal')?.classList.add('hidden');
+  dirDraft = null;
+}
+
+function dirListSummaryHtml(sum) {
+  const partial = sum.partial
+    ? ' · <span class="dl-warn">部分目录不可读，数值可能偏小</span>' : '';
+  return `<strong>${Number(sum.fileCount) || 0}</strong> 个文件 · 逻辑大小 <strong>${formatBytes(sum.totalSize)}</strong> · 占用 <strong>${formatBytes(sum.totalSizeOnDisk)}</strong>${partial}`;
+}
+
+/** 体积口径照 dir-struct-gen：整棵物理子树，与清单里显示几层无关。 */
+async function loadDirSummary() {
+  if (!dirDraft) return;
+  const path = dirDraft.path;
+  const box = $('dirListSummary');
+  const children = $('dirListChildren');
+  const err = $('dirListError');
+  if (box) box.textContent = '正在扫描整棵子树以计算体积…';
+  if (children) children.innerHTML = '';
+  if (err) err.textContent = '';
+  try {
+    const scan = await api('/api/mft/scan', {
+      method: 'POST',
+      body: JSON.stringify({
+        paths: [{ path, recursive: false, sizeFull: true }],
+        maxFiles: 1,
+        timeoutMs: 20_000,
+      }),
+    });
+    const root = (scan.roots || [])[0];
+    if (!root) throw new Error('扫描没有返回该目录');
+    const sum = {
+      fileCount: Number(root.fileCount) || 0,
+      totalSize: Number(root.totalSize) || 0,
+      totalSizeOnDisk: Number(root.totalSizeOnDisk) || 0,
+      partial: Boolean(root.sizePartial),
+    };
+    dirSummaryCache.set(path, sum);
+    if (dirDraft?.path !== path) return; // 期间换了目录，丢弃过期结果
+    if (box) box.innerHTML = dirListSummaryHtml(sum);
+    const subs = root.children || [];
+    if (children) {
+      const rows = subs.slice(0, 12).map((item) => `<div class="bl-row">
+        <span class="bl-path">${esc(item.name)}</span>
+        <span class="dl-size">${Number(item.fileCount) || 0} 个文件 · ${formatBytes(item.totalSize)}</span>
+      </div>`).join('');
+      children.innerHTML = `<div class="bl-section-title">一层子目录（${subs.length}）</div>
+        <div class="bl-list dl-children-list">${rows || '<div class="bl-empty">没有子目录</div>'}</div>
+        ${subs.length > 12 ? '<p class="builder-hint">仅列出前 12 个；生成清单后可查看完整子树。</p>' : ''}`;
+    }
+  } catch (error) {
+    if (dirDraft?.path !== path) return;
+    if (box) box.textContent = '体积计算失败';
+    if (err) err.textContent = `无法计算目录体积：${error.message}`;
+  }
+}
+
+/** 文件浏览页目录行「+ 目录清单」入口：只打开弹窗，不写选择集、不上传。 */
+export function openDirListForItem(item) {
+  if (!store || !item?.path) return;
+  const sel = store.get('dirs');
+  const existing = (sel.dirs || []).find(
+    (entry) => String(entry.path).toLowerCase() === String(item.path).toLowerCase(),
+  );
+  dirDraft = { path: item.path, recursive: existing ? existing.recursive !== false : false };
+  const input = $('dirListPath');
+  if (input) input.value = item.path;
+  const one = $('dirListOne');
+  const all = $('dirListAll');
+  if (one) one.checked = !dirDraft.recursive;
+  if (all) all.checked = dirDraft.recursive;
+  const save = $('dirListSave');
+  if (save) save.textContent = existing ? '更新目录清单' : '加入目录清单';
+  const err = $('dirListError');
+  if (err) err.textContent = '';
+  $('dirListModal')?.classList.remove('hidden');
+  void loadDirSummary();
+}
+
+function saveDirList() {
+  if (!dirDraft) return;
+  const path = dirDraft.path;
+  const recursive = $('dirListAll')?.checked === true;
+  let sel = store.get('dirs');
+  sel = removeDirSelection(sel, path); // 已存在时先移除，允许改层数
+  sel = addDirSelection(sel, path, recursive);
+  store.set('dirs', sel);
+  closeDirListModal();
+  setStatus(`已把 ${path} 加入目录清单（${recursive ? '含所有子目录' : '仅本层'}）；点「重新扫描并生成」写入 struct v2`);
+  render();
 }
 
 function openCopyRefModal(draft = {}) {
@@ -286,19 +391,41 @@ async function expandNode(nodeEl) {
   }
 }
 
+/**
+ * struct 目录逐项带层数选择（对应 dir-struct-gen 的「⊕ 含子目录」）；
+ * 只在文件列表选择集里出现的目录保持字符串形式，沿用全局 recursive，不改变 file-list 口径。
+ */
+function scanRootEntries(dirSel, fileSel) {
+  const entries = (dirSel.dirs || []).map((item) => ({
+    path: item.path,
+    recursive: item.recursive !== false,
+    sizeFull: true, // struct 节点始终按整棵物理子树报体积
+  }));
+  const known = new Set(entries.map((item) => String(item.path).toLowerCase()));
+  for (const item of fileSel.dirs || []) {
+    if (!item?.path || known.has(String(item.path).toLowerCase())) continue;
+    known.add(String(item.path).toLowerCase());
+    entries.push(item.path);
+  }
+  return entries;
+}
+
 async function doScan(paths = null, fileSelection = null) {
   const dirSel = store.get('dirs');
   const fileSel = fileSelection || store.get('files');
-  const roots = paths || uniqueRoots(dirSel.dirs, fileSel.dirs);
+  const roots = paths || scanRootEntries(dirSel, fileSel);
   if (!roots.length) {
-    setStatus('请先勾选至少一个目录，或用「+ 列表」加入文件列表目录', true);
+    setStatus('请先勾选至少一个目录，或用「+ 目录下文件」加入文件列表目录', true);
     return null;
   }
-  setStatus(`正在扫描 ${roots.length} 个目录…`);
+  setStatus(`正在扫描 ${roots.length} 个目录（含整棵子树的体积统计）…`);
   try {
     const scan = await api('/api/mft/scan', {
       method: 'POST',
-      body: JSON.stringify({ paths: roots, recursive: dirSel.options.recursive !== false }),
+      body: JSON.stringify({
+        paths: roots,
+        recursive: dirSel.options.recursive !== false,
+      }),
     });
     lastScan = scan;
     await ensureHostInfo();
@@ -412,6 +539,17 @@ async function onAction(action, element) {
       break;
     }
     case 'add-fl': toggleFileDir(path); break;
+    case 'dl-toggle': {
+      const sel = store.get('dirs');
+      store.set('dirs', {
+        ...sel,
+        dirs: (sel.dirs || []).map((item) => (String(item.path).toLowerCase() === String(path).toLowerCase()
+          ? { ...item, recursive: item.recursive === false } : item)),
+      });
+      render();
+      break;
+    }
+    case 'dl-remove': store.set('dirs', removeDirSelection(store.get('dirs'), path)); render(); break;
     case 'fl-remove': store.set('files', removeFileDirSelection(store.get('files'), path)); render(); break;
     case 'fp-remove': store.set('files', removePickedFile(store.get('files'), path)); render(); break;
     case 'cr-new': openCopyRefModal({}); break;
@@ -543,6 +681,13 @@ export function initManifestBuilder(options = {}) {
   $('builderCopy')?.addEventListener('click', () => void onAction('copy', { dataset: {} }));
   $('builderDownload')?.addEventListener('click', () => void onAction('download', { dataset: {} }));
   $('builderUpload')?.addEventListener('click', () => void onAction('upload', { dataset: {} }));
+  $('dirListSave')?.addEventListener('click', saveDirList);
+  $('dirListCancel')?.addEventListener('click', closeDirListModal);
+  $('dirListClose')?.addEventListener('click', closeDirListModal);
+  $('dirListRefresh')?.addEventListener('click', () => void loadDirSummary());
+  $('dirListModal')?.addEventListener('click', (event) => {
+    if (event.target?.id === 'dirListModal') closeDirListModal();
+  });
   $('copyRefSave')?.addEventListener('click', saveCopyRef);
   $('copyRefCancel')?.addEventListener('click', closeCopyRefModal);
   $('copyRefClose')?.addEventListener('click', closeCopyRefModal);
@@ -556,5 +701,5 @@ export function initManifestBuilder(options = {}) {
   document.querySelectorAll('[data-builder-tab]').forEach((btn) => {
     btn.addEventListener('click', () => void onAction('tab', btn));
   });
-  return { openBuilder, addPickedFromItem, addFileListDir };
+  return { openBuilder, addPickedFromItem, addFileListDir, openDirListForItem };
 }

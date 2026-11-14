@@ -1,7 +1,9 @@
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { HOST, PORT, TOKEN, WEB_DIR, ROOT_DIR } from './config.js';
+import os from 'node:os';
+import { HOST, PORT, TOKEN, ACCESS_CODE, WEB_DIR, ROOT_DIR } from './config.js';
+import { basicAuthAccepted, isLoopbackRequest, sendAccessChallenge } from './access.js';
 import { json, fail, readJson, requireToken, sendBuffer, HttpError } from './util.js';
 import { mimeOf } from './mime.js';
 import {
@@ -20,6 +22,7 @@ import { handleThumb } from './thumb.js';
 import { getVersionInfo } from './version.js';
 import { getHostInfo } from './hostinfo.js';
 import { trashPaths } from './trash-service.js';
+import { openInExplorer } from './explorer-service.js';
 import { scanPaths, listTreeLevel, readMtimes } from './manifest-scan.js';
 import {
   createVault,
@@ -67,12 +70,26 @@ async function serveVendor(res, pathname) {
   res.end(buffer);
 }
 
+function escHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[char]));
+}
+
+function bindHintText() {
+  const local = HOST === '127.0.0.1' || HOST === '::1' || HOST === 'localhost';
+  const suffix = ACCESS_CODE ? ' · 已启用访问码' : '';
+  if (local) return `仅监听 127.0.0.1${suffix}`;
+  return `监听 ${HOST}${suffix || ' · 未启用访问码'}`;
+}
+
 async function serveIndex(res) {
   const source = await fs.readFile(path.join(WEB_DIR, 'index.html'), 'utf8');
   const version = JSON.stringify(await getVersionInfo()).replace(/</g, '\\u003c');
   const body = Buffer.from(source
     .replace('__ZIP_BROWSER_TOKEN__', TOKEN)
-    .replace('__ZIP_BROWSER_VERSION__', version));
+    .replace('__ZIP_BROWSER_VERSION__', version)
+    .replace('__ZIP_BROWSER_HOST__', () => escHtml(bindHintText())));
   res.writeHead(200, {
     'Content-Type': 'text/html; charset=utf-8',
     'Content-Length': body.length,
@@ -121,6 +138,7 @@ async function handleApi(req, res, url) {
     const body = await readJson(req);
     return json(res, 200, await scanPaths(body.paths, {
       recursive: body.recursive !== false,
+      sizeFull: body.sizeFull === true,
       timeoutMs: Number(body.timeoutMs) || undefined,
       maxFiles: Number(body.maxFiles) || undefined,
     }));
@@ -134,6 +152,12 @@ async function handleApi(req, res, url) {
   if (req.method === 'POST' && pathname === '/api/trash') {
     const body = await readJson(req);
     return json(res, 200, await trashPaths({ dir: body.dir, paths: body.paths }));
+  }
+
+  // 只调起系统资源管理器（GUI），不读写文件内容、不执行用户提供的命令。
+  if (req.method === 'POST' && pathname === '/api/explorer/open') {
+    const body = await readJson(req);
+    return json(res, 200, await openInExplorer(body));
   }
 
   if (req.method === 'GET' && pathname === '/api/download') {
@@ -226,6 +250,16 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${HOST}:${PORT}`);
     const pathname = url.pathname;
 
+    // 本机探活端点：不含任何本地信息，仅回环可访问，且豁免访问码（start.bat 用它判断服务已启动）。
+    if (req.method === 'GET' && pathname === '/health') {
+      if (!isLoopbackRequest(req)) throw new HttpError(404, 'not found');
+      return json(res, 200, { ok: true });
+    }
+    // 访问码放在最外层：连 /thumb /fs /zip 这些不校验 token 的静态资源也要过。
+    if (ACCESS_CODE && !basicAuthAccepted(req.headers.authorization, ACCESS_CODE)) {
+      return sendAccessChallenge(res);
+    }
+
     if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
       return await serveIndex(res);
     }
@@ -255,9 +289,32 @@ server.on('clientError', (err, socket) => {
   socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
 });
 
+function lanUrls() {
+  const out = [];
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const item of list || []) {
+      if ((item.family === 'IPv4' || item.family === 4) && !item.internal) {
+        out.push(`http://${item.address}:${PORT}/`);
+      }
+    }
+  }
+  return out;
+}
+
 server.listen(PORT, HOST, async () => {
   const info = await getVersionInfo().catch(() => null);
   const label = info ? ` v${info.version} (${info.sha})` : '';
+  const local = HOST === '127.0.0.1' || HOST === '::1' || HOST === 'localhost';
   console.log(`本地文件浏览器${label}已启动: http://${HOST}:${PORT}/`);
-  console.log('浏览 + 删除到回收站 · 仅监听 127.0.0.1 · Ctrl+C 停止');
+  if (!local) {
+    const urls = lanUrls();
+    console.log(`局域网访问地址: ${urls.length ? urls.join('  ') : '(未发现局域网 IPv4)'}`);
+  }
+  if (ACCESS_CODE) {
+    console.log('已启用访问码认证（Basic Auth，用户名任意）· 请仅在可信网络使用 · Ctrl+C 停止');
+  } else if (local) {
+    console.log('浏览 + 删除到回收站 · 仅监听 127.0.0.1 · Ctrl+C 停止');
+  } else {
+    console.log('警告: 已监听外部地址但未设置 ZIP_BROWSER_ACCESS_CODE，任何能连上的机器都可浏览本机磁盘 · Ctrl+C 停止');
+  }
 });

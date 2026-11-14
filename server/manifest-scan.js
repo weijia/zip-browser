@@ -139,8 +139,13 @@ async function scanDir(abs, depth, opts, visited) {
   return node;
 }
 
-/** 精简树：去掉 files（单独返回），保留 struct 需要的字段。 */
-function serializeTree(node) {
+/**
+ * 精简树：去掉 files（单独返回），保留 struct 需要的字段。
+ * emitDepth 控制「清单里出现几层子目录」，不影响体积统计：
+ *   Infinity = 整棵子树；1 = 只输出根的直接子目录（每个子目录的 children 为空）。
+ * 体积一律按整棵物理子树算（dir-struct-gen 口径），靠 sizeFull 让扫描仍下钻。
+ */
+function serializeTree(node, depth = 0, emitDepth = Infinity) {
   return {
     path: node.path,
     name: node.name,
@@ -151,7 +156,9 @@ function serializeTree(node) {
     fileCount: node.summary.fileCount,
     totalSize: node.summary.totalSize,
     totalSizeOnDisk: node.summary.totalSizeOnDisk,
-    children: node.children.map(serializeTree),
+    children: depth < emitDepth
+      ? node.children.map((child) => serializeTree(child, depth + 1, emitDepth))
+      : [],
   };
 }
 
@@ -160,22 +167,29 @@ function collectSummaries(node, out) {
   for (const child of node.children) collectSummaries(child, out);
 }
 
-function collectFiles(node, out) {
+/** 文件列表只收「清单展示层」的文件：仅本层时不把子孙目录的文件算进来。 */
+function collectFiles(node, out, depth = 0, emitDepth = Infinity) {
   for (const file of node.files) out.push(file);
-  for (const child of node.children) collectFiles(child, out);
+  if (depth + 1 < emitDepth) {
+    for (const child of node.children) collectFiles(child, out, depth + 1, emitDepth);
+  }
 }
 
 /**
  * 一次扫描多个用户勾选的根目录。
+ * paths 元素可以是字符串（用全局 recursive），也可以是 { path, recursive }（逐目录覆盖，
+ * 对应 dir-struct-gen 的「⊕ 含子目录」开关）。
+ * sizeFull=true 时即使某目录只要一层，也递归扫完子孙以算出整棵子树体积。
  * @returns {{roots:Array, summaries:object, files:object, status:object}}
  *   files[path] 为该根下按路径去重排序后的文件列表；status[path] 带 incomplete/truncated。
  */
 export async function scanPaths(paths, {
-  recursive = true, timeoutMs = DEFAULT_TIMEOUT_MS, maxFiles = MAX_FILES_PER_DIR,
+  recursive = true, sizeFull = false, timeoutMs = DEFAULT_TIMEOUT_MS,
+  maxFiles = MAX_FILES_PER_DIR,
 } = {}) {
   const list = Array.isArray(paths) ? paths.slice(0, 100) : [];
   const deadline = Date.now() + Math.max(1000, Math.min(timeoutMs, 120_000));
-  const opts = {
+  const baseOpts = {
     expired: () => Date.now() > deadline,
     maxDepth: MAX_SCAN_DEPTH,
     descend: recursive,
@@ -185,13 +199,22 @@ export async function scanPaths(paths, {
   const files = {};
   const status = {};
   for (const raw of list) {
-    const abs = normalizeLocalPath(raw);
+    const entry = raw && typeof raw === 'object' ? raw : { path: raw };
+    const abs = normalizeLocalPath(entry.path);
     assertAllowed(abs);
+    const wantRecursive = typeof entry.recursive === 'boolean'
+      ? entry.recursive
+      : recursive !== false;
+    const emitDepth = wantRecursive ? Infinity : 1;
+    // 体积口径与展示层数解耦：只要一层也要把整棵子树走一遍才能报准 totalSize。
+    // sizeFull 可逐根覆盖，避免「struct 要算体积」连带把 file-list 的根也递归扫一遍。
+    const rootSizeFull = typeof entry.sizeFull === 'boolean' ? entry.sizeFull : sizeFull;
+    const opts = { ...baseOpts, descend: wantRecursive || rootSizeFull, emitDepth };
     const node = await scanDir(abs, 0, opts, new Set());
-    roots.push(serializeTree(node));
+    roots.push(serializeTree(node, 0, emitDepth));
     collectSummaries(node, summaries);
     const gathered = [];
-    collectFiles(node, gathered);
+    collectFiles(node, gathered, 0, emitDepth);
     const seen = new Set();
     const unique = [];
     for (const file of gathered) {

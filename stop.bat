@@ -10,7 +10,7 @@ echo  Stopping Local ZIP Browser ...
 taskkill /FI "WINDOWTITLE eq ZipBrowserServer*" /T /F >nul 2>nul
 if errorlevel 1 (
   echo  [i] No launcher window found. The server may have been started with "npm start".
-  netstat -ano | findstr /r /c:"127.0.0.1:%PORT% .*LISTENING" >nul 2>nul
+  netstat -ano | findstr /r /c:"127.0.0.1:%PORT% .*LISTENING" /c:"0.0.0.0:%PORT% .*LISTENING" >nul 2>nul
   if not errorlevel 1 (
     echo  [i] Port %PORT% is still listening. Close that console window manually.
   ) else (
