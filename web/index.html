@@ -186,6 +186,18 @@
   </div>
 </div>
 
+<!-- 手机端：一行只留一个「⋯」按钮，点开后把该行原有操作搬到这里（由 JS 填充）。 -->
+<div id="rowMenuModal" class="modal hidden">
+  <div class="modal-card row-menu-card">
+    <div class="modal-head">
+      <h2 id="rowMenuTitle">更多操作</h2>
+      <button id="rowMenuClose" type="button" class="modal-x" title="关闭">×</button>
+    </div>
+    <p id="rowMenuSub" class="row-menu-sub"></p>
+    <div id="rowMenuList" class="row-menu-list"></div>
+  </div>
+</div>
+
 <div id="trashModal" class="modal hidden">
   <div class="modal-card trash-card">
     <div class="modal-head">

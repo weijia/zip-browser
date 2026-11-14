@@ -43,6 +43,57 @@ let viewMode = 'list';
 const state = { index: 0, depth: 0, target: { kind: 'drives' } };
 let crumbTargets = [];
 
+// 手机端行操作菜单：把一行里被 CSS 收起的按钮原样搬到底部面板，
+// 复用原有 data-action 事件委托，不复制任何业务逻辑。
+let rowMenuHost = null;
+function closeRowMenu() {
+  $('rowMenuModal')?.classList.add('hidden');
+  rowMenuHost = null;
+}
+function openRowMenu(button) {
+  const modal = $('rowMenuModal');
+  const list = $('rowMenuList');
+  const title = $('rowMenuTitle');
+  const sub = $('rowMenuSub');
+  if (!modal || !list || !title || !sub) return;
+  const host = button.closest('tr, .thumb-card, .folder-chip');
+  if (!host) return;
+  rowMenuHost = host;
+  title.textContent = button.dataset.name || '更多操作';
+  sub.textContent = button.dataset.dir === '1' ? '文件夹' : '文件';
+  const labels = {
+    'trash-one': '删除到回收站',
+    'trash-card-x': '删除到回收站',
+    'trash-chip-x': '删除到回收站',
+  };
+  const html = [];
+  for (const source of host.querySelectorAll('button[data-action]')) {
+    // 「⋯」本身与手机端隐藏的「打开位置」不进菜单。
+    if (source.classList.contains('row-menu-btn') || source.classList.contains('ex-open')) continue;
+    const clone = source.cloneNode(true);
+    clone.classList.add('row-menu-option');
+    clone.textContent = labels[source.dataset.action] || source.textContent.trim();
+    html.push(clone.outerHTML);
+  }
+  const box = host.querySelector('.trash-check');
+  if (box) {
+    html.push(`<button type="button" class="row-menu-option" data-action="row-menu-select">${box.checked ? '✓ 已选中 · 点此取消' : '选中以批量删除'}</button>`);
+  }
+  list.innerHTML = html.join('') || '<p class="row-menu-empty">没有可用操作</p>';
+  modal.classList.remove('hidden');
+}
+function initRowMenu() {
+  const modal = $('rowMenuModal');
+  if (!modal) return;
+  modal.addEventListener('click', (event) => {
+    if (event.target === modal || event.target?.closest?.('#rowMenuClose')) { closeRowMenu(); return; }
+    const option = event.target?.closest?.('#rowMenuList button[data-action]');
+    // 「选中以批量删除」要留在面板里切换状态，其余选项点完即关。
+    if (option && option.dataset.action !== 'row-menu-select') closeRowMenu();
+  });
+}
+initRowMenu();
+
 // 手机端外壳：顶栏「更多」下拉 + 侧栏抽屉。窄屏才显示（CSS 控制），
 // 按钮 DOM 不复制，原有事件绑定全部保留；可选链兼容精简 DOM 环境。
 let closeMobileChrome = () => {};
@@ -85,12 +136,12 @@ function initMobileChrome() {
     if (target.closest('#sidebar')) setSide(false);
   });
   window.addEventListener('resize', () => {
-    if (window.innerWidth > 720) { setMenu(false); setSide(false); }
+    if (window.innerWidth > 720) { setMenu(false); setSide(false); closeRowMenu(); }
   });
   window.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') { setMenu(false); setSide(false); }
+    if (event.key === 'Escape') { setMenu(false); setSide(false); closeRowMenu(); }
   });
-  closeMobileChrome = () => { setMenu(false); setSide(false); };
+  closeMobileChrome = () => { setMenu(false); setSide(false); closeRowMenu(); };
 }
 initMobileChrome();
 
@@ -173,6 +224,14 @@ function explorerControls(item) {
   return `<button type="button" class="ex-open" data-action="ex-open"
     data-path="${esc(item.path)}" data-name="${esc(item.name)}"
     title="在 Windows 资源管理器中打开${item.dir ? '该目录' : '该文件所在位置并选中它'}">打开位置</button>`;
+}
+
+// 手机端每个目录/文件项只显示这一个按钮；点开后把该行原有操作搬到底部面板。
+// 桌面端由 CSS 隐藏，行内按钮与事件绑定完全不变。
+function rowMenuButton(item) {
+  return `<button type="button" class="row-menu-btn" data-action="row-menu"
+    data-name="${esc(item.name)}" data-dir="${item.dir ? '1' : ''}"
+    aria-label="${esc(item.name)} 的更多操作" title="更多操作">⋯</button>`;
 }
 
 function status(text, bad = false) {
@@ -401,6 +460,7 @@ async function renderDir(abs) {
     const folders = data.items.filter((item) => item.dir);
     const imageCards = images.map((item) => `<div class="thumb-card" data-action="file" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
       ${trashCardControls(item)}
+      ${rowMenuButton(item)}
       ${flControls(item)}
       ${copyControls(item)}
       ${explorerControls(item)}
@@ -410,6 +470,7 @@ async function renderDir(abs) {
     </div>`).join('');
     const zipCards = zips.map((item) => `<div class="thumb-card" data-action="zip" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
       ${trashCardControls(item)}
+      ${rowMenuButton(item)}
       ${flControls(item)}
       ${copyControls(item)}
       ${explorerControls(item)}
@@ -419,7 +480,7 @@ async function renderDir(abs) {
     </div>`).join('');
     const allCards = imageCards + zipCards;
     body = `<div class="thumb-head">图片/压缩包 · ${thumbsCount} 项<span>仅当前目录 · 点击缩略图查看原图或打开压缩包</span></div>
-      ${folders.length ? `<div class="folder-chips">${folders.map((item) => `<span class="folder-chip" data-action="dir" data-path="${esc(item.path)}">${esc(item.name)}${trashChipControls({ ...item, dir: true })}${flControls({ ...item, dir: true })}${dirListControls({ ...item, dir: true })}${explorerControls({ ...item, dir: true })}</span>`).join('')}</div>` : ''}
+      ${folders.length ? `<div class="folder-chips">${folders.map((item) => `<span class="folder-chip" data-action="dir" data-path="${esc(item.path)}">${esc(item.name)}${trashChipControls({ ...item, dir: true })}${flControls({ ...item, dir: true })}${dirListControls({ ...item, dir: true })}${explorerControls({ ...item, dir: true })}${rowMenuButton({ ...item, dir: true })}</span>`).join('')}</div>` : ''}
       <div class="thumb-grid">${allCards || '<div class="thumb-empty">当前目录没有图片或压缩包，可切换到列表视图</div>'}</div>`;
   } else {
     const rows = data.items.map((item) => {
@@ -433,7 +494,7 @@ async function renderDir(abs) {
         : `<span class="icon ${icon}"></span>`;
       return `<tr data-action="${action}" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
         ${trashRowStart(item)}
-        <td><span class="file-name">${thumb}${esc(item.name)}${hint}${encBadge(item)}${flControls(item)}${dirListControls(item)}${copyControls(item)}${explorerControls(item)}</span></td>
+        <td><span class="file-name">${thumb}${esc(item.name)}${hint}${encBadge(item)}${flControls(item)}${dirListControls(item)}${copyControls(item)}${explorerControls(item)}${rowMenuButton(item)}</span></td>
         <td class="file-size">${item.dir ? '文件夹' : formatSize(item.size)}</td>
         <td class="file-time">${formatTime(item.mtime)}</td>
         ${trashRowEnd(item)}
@@ -759,6 +820,18 @@ document.addEventListener('click', async (event) => {
   // 行内勾选/删除控件优先处理，否则 closest 会落到带 data-action 的行上触发导航
   if (action.startsWith('trash-')) {
     await handleTrashAction(action, element, event);
+    return;
+  }
+  if (action === 'row-menu') {
+    openRowMenu(element);
+    return;
+  }
+  if (action === 'row-menu-select') {
+    const box = rowMenuHost?.querySelector('.trash-check');
+    if (box) {
+      box.click(); // 触发原有 trash-check 分支，保持批量选择集同步
+      element.textContent = box.checked ? '✓ 已选中 · 点此取消' : '选中以批量删除';
+    }
     return;
   }
   if (action === 'fl-add') {

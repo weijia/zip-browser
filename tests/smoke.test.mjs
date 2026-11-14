@@ -2392,3 +2392,45 @@ test('mobile layout: responsive CSS, menu/drawer markup and touch zoom', async (
   assert.ok(page.includes('touch-action:none'));
   assert.ok(page.includes('name="viewport"'));
 });
+
+test('mobile row actions collapse into a single button with an option sheet', async () => {
+  const css = await fs.readFile(path.join(ROOT, 'web', 'style.css'), 'utf8');
+  const html = await fs.readFile(path.join(ROOT, 'web', 'index.html'), 'utf8');
+  const app = await fs.readFile(path.join(ROOT, 'web', 'app.js'), 'utf8');
+
+  // 桌面端「⋯」必须隐藏，行内按钮全部保留。
+  assert.ok(css.includes('.row-menu-btn { display: none; }'), 'the ⋯ button is desktop-hidden');
+  assert.ok(!/\.file-name > button:not\(\.row-menu-btn\)[\s\S]*?\{[^}]*display: none/.test(
+    css.split('@media (max-width: 720px)')[0]), 'no mobile hiding rule leaks into desktop CSS');
+  const mobileCss = css.split('@media (max-width: 720px)')[1] || '';
+  for (const text of [
+    '.file-name > button:not(.row-menu-btn)',
+    '.thumb-card > button:not(.row-menu-btn)',
+    '.folder-chip > button:not(.row-menu-btn)',
+    '.file-table td.trash-col-action',
+    '.trash-card-controls',
+    '.row-menu-btn { display: inline-flex',
+    '#rowMenuModal .modal-card',
+    'min-height: 46px',
+  ]) {
+    assert.ok(mobileCss.includes(text), `mobile CSS must contain ${text}`);
+  }
+
+  for (const id of ['rowMenuModal', 'rowMenuTitle', 'rowMenuSub', 'rowMenuList', 'rowMenuClose']) {
+    assert.ok(html.includes(`id="${id}"`), `index.html must contain #${id}`);
+  }
+
+  for (const text of [
+    'function rowMenuButton(', 'function openRowMenu(', 'function closeRowMenu(',
+    'function initRowMenu(', 'data-action="row-menu"', "action === 'row-menu'",
+    "action === 'row-menu-select'", 'cloneNode(true)',
+    "source.classList.contains('ex-open')", 'closeRowMenu()',
+    '删除到回收站', '选中以批量删除',
+  ]) {
+    assert.ok(app.includes(text), `app.js must contain ${text}`);
+  }
+  // 列表行、图片卡片、压缩包卡片、目录 chip 都要挂上「⋯」。
+  const calls = app.match(/\$\{rowMenuButton\(/g) || [];
+  assert.equal(calls.length, 4, 'all four item renderers must include the ⋯ button');
+  assert.ok(app.includes('${rowMenuButton({ ...item, dir: true })}'), 'folder chips pass dir=true');
+});

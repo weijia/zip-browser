@@ -164,6 +164,22 @@ input[type="password"] { width: 100%; padding: 8px 10px; }
 .modal-actions.inline { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .modal-actions.inline button { min-width: 64px; }
 
+/* 手机端行操作菜单：桌面隐藏「⋯」，选项由 app.js 把行内按钮搬进来。 */
+.row-menu-btn { display: none; }
+#rowMenuModal { z-index: 50; }
+#rowMenuModal .modal-card { width: min(420px, 94vw); }
+#rowMenuModal .row-menu-sub { font-size: 11px; color: var(--text-3); margin: 0 0 12px; word-break: break-all; }
+.row-menu-list { display: flex; flex-direction: column; gap: 8px; }
+.row-menu-option {
+  display: block; width: 100%; min-height: 44px; margin: 0;
+  padding: 10px 12px; font-size: 13px; text-align: left; vertical-align: baseline;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: #fff; color: var(--text); cursor: pointer;
+}
+.row-menu-option:hover { background: var(--bg-hover); border-color: var(--accent); }
+.row-menu-list [data-action^="trash-"] { color: #a32d2d; border-color: #e7c4c4; }
+.row-menu-empty { font-size: 12px; color: var(--text-3); }
+
 /* 收藏同步（v2 清单）设置面板 */
 #syncModal .modal-card { width: min(620px, 94vw); max-height: 88vh; overflow-y: auto; }
 #syncModal .modal-card code { font: 11px/1.5 ui-monospace, Consolas, monospace; background: var(--bg-soft); padding: 1px 4px; border-radius: 4px; }
@@ -531,5 +547,36 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
     width: auto; min-width: 0; max-width: none; transform: none; flex-wrap: wrap;
   }
   .toast-sub { white-space: normal; }
+
+  /* 一个目录/文件项只留一个「⋯」：其余操作按钮收进底部选项面板。
+     列表行左侧的批量勾选框是绝对定位、不占高度，保留原样。 */
+  .row-menu-btn { display: inline-flex; align-items: center; justify-content: center; }
+  .file-name > button:not(.row-menu-btn),
+  .thumb-card > button:not(.row-menu-btn),
+  .folder-chip > button:not(.row-menu-btn),
+  .file-table td.trash-col-action,
+  .trash-card-controls { display: none !important; }
+  .file-table tr { padding-right: 48px; }
+  .file-name .row-menu-btn {
+    position: absolute; right: 8px; top: 8px; z-index: 3;
+    width: 34px; min-width: 34px; min-height: 34px; padding: 0;
+    font-size: 19px; line-height: 1;
+  }
+  .thumb-card .row-menu-btn {
+    position: absolute; top: 5px; right: 5px; z-index: 3;
+    width: 34px; min-width: 34px; min-height: 34px; padding: 0;
+    font-size: 19px; line-height: 1; border-radius: 8px;
+    background: rgba(255, 255, 255, .92);
+  }
+  .folder-chip .row-menu-btn { min-height: 30px; padding: 0 9px; font-size: 16px; }
+  #rowMenuModal .modal-card {
+    width: 100%; max-width: none; max-height: 82dvh; overflow-y: auto;
+    border-radius: 16px 16px 0 0; border-bottom: 0;
+    padding: 16px 14px calc(16px + env(safe-area-inset-bottom));
+  }
+  .row-menu-option {
+    display: block; width: 100%; min-height: 46px; margin: 0;
+    padding: 10px 12px; font-size: 14px; text-align: left; vertical-align: baseline;
+  }
 }
 
