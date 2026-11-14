@@ -283,6 +283,7 @@ export function buildV2Export({
     files.push({
       path: `struct/${base}.json`,
       kind: 'shard',
+      volumeKey: volume.key,
       json: {
         volumeId,
         name: drive || '（未命名卷）',

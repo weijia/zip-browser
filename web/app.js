@@ -9,6 +9,8 @@ import {
 import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.js';
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
 import { initManifestSync, scheduleSync } from './manifest-sync.js';
+import { createSelectionStore } from './manifest-selection.js';
+import { initManifestBuilder, addPickedFromItem, addFileListDir } from './manifest-builder.js';
 import {
   initTrash, resetTrashSelection, trashToolbarHtml,
   trashHeadStart, trashHeadEnd, trashRowStart, trashRowEnd,
@@ -74,6 +76,15 @@ function formatTime(ms) {
   const date = new Date(ms);
   const pad = (n) => String(n).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+// 「+ 列表」：目录加入文件列表选择集的 dirs，文件加入 files（手工挑选片）。
+function flControls(item) {
+  const dir = Boolean(item.dir);
+  return `<button type="button" class="fl-add" data-action="fl-add"
+    data-path="${esc(item.path)}" data-name="${esc(item.name)}" data-dir="${dir ? '1' : ''}"
+    data-size="${Number(item.size) || 0}" data-mtime="${Number(item.mtime) || 0}"
+    title="${dir ? '把该目录下的文件列表加入上传选择集' : '把该文件加入文件列表选择集'}">+ 列表</button>`;
 }
 
 function status(text, bad = false) {
@@ -302,19 +313,21 @@ async function renderDir(abs) {
     const folders = data.items.filter((item) => item.dir);
     const imageCards = images.map((item) => `<div class="thumb-card" data-action="file" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
       ${trashCardControls(item)}
+      ${flControls(item)}
       <div class="thumb-box"><img src="${esc(localThumbUrlFront(item.path))}" loading="lazy" alt="${esc(item.name)}"></div>
       <div class="thumb-name" title="${esc(item.name)}">${esc(item.name)}</div>
       <div class="thumb-meta">${formatSize(item.size)}</div>
     </div>`).join('');
     const zipCards = zips.map((item) => `<div class="thumb-card" data-action="zip" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
       ${trashCardControls(item)}
+      ${flControls(item)}
       <div class="thumb-box"><img src="${esc(fsCoverUrlFront(item.path, vsid, defpw))}" loading="lazy" alt="${esc(item.name)}"></div>
       <div class="thumb-name" title="${esc(item.name)}">${esc(item.name)}</div>
       <div class="thumb-meta">${formatSize(item.size)}</div>
     </div>`).join('');
     const allCards = imageCards + zipCards;
     body = `<div class="thumb-head">图片/压缩包 · ${thumbsCount} 项<span>仅当前目录 · 点击缩略图查看原图或打开压缩包</span></div>
-      ${folders.length ? `<div class="folder-chips">${folders.map((item) => `<span class="folder-chip" data-action="dir" data-path="${esc(item.path)}">${esc(item.name)}${trashChipControls({ ...item, dir: true })}</span>`).join('')}</div>` : ''}
+      ${folders.length ? `<div class="folder-chips">${folders.map((item) => `<span class="folder-chip" data-action="dir" data-path="${esc(item.path)}">${esc(item.name)}${trashChipControls({ ...item, dir: true })}${flControls({ ...item, dir: true })}</span>`).join('')}</div>` : ''}
       <div class="thumb-grid">${allCards || '<div class="thumb-empty">当前目录没有图片或压缩包，可切换到列表视图</div>'}</div>`;
   } else {
     const rows = data.items.map((item) => {
@@ -328,7 +341,7 @@ async function renderDir(abs) {
         : `<span class="icon ${icon}"></span>`;
       return `<tr data-action="${action}" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
         ${trashRowStart(item)}
-        <td><span class="file-name">${thumb}${esc(item.name)}${hint}</span></td>
+        <td><span class="file-name">${thumb}${esc(item.name)}${hint}${flControls(item)}</span></td>
         <td class="file-size">${item.dir ? '文件夹' : formatSize(item.size)}</td>
         <td class="file-time">${formatTime(item.mtime)}</td>
         ${trashRowEnd(item)}
@@ -654,6 +667,18 @@ document.addEventListener('click', async (event) => {
     await handleTrashAction(action, element, event);
     return;
   }
+  if (action === 'fl-add') {
+    const item = {
+      path: element.dataset.path,
+      name: element.dataset.name,
+      size: Number(element.dataset.size) || 0,
+      mtime: Number(element.dataset.mtime) || 0,
+      dir: element.dataset.dir === '1',
+    };
+    if (item.dir) addFileListDir(item.path);
+    else addPickedFromItem(item);
+    return;
+  }
   const target = current();
   const dir = target.kind === 'dir' ? target.path : (target.dir || target.zipDir);
   try {
@@ -727,6 +752,9 @@ window.addEventListener('hashchange', () => {
   restore().catch(showError);
 });
 
+const selectionStore = createSelectionStore();
+selectionStore.init().catch((err) => console.warn('selection store unavailable', err));
+
 initAnnotations({
   navigate, openZipBookmark, status,
   // 收藏（含多标签页同步过来的变更）一变，就把 v2 清单重导一次。
@@ -737,6 +765,18 @@ initAnnotations({
 
 initManifestSync({
   getSnapshot: () => getAnnotationStore()?.snapshot() || null,
+  getFileSelection: () => selectionStore.get('files'),
+});
+
+initManifestBuilder({
+  api,
+  status,
+  store: selectionStore,
+  getSnapshot: () => getAnnotationStore()?.snapshot() || null,
+  getCurrentDir: () => {
+    const target = current();
+    return target.kind === 'dir' ? target.path : (target.dir || target.zipDir || '');
+  },
 });
 
 initTrash({

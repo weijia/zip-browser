@@ -20,6 +20,7 @@ import { handleThumb } from './thumb.js';
 import { getVersionInfo } from './version.js';
 import { getHostInfo } from './hostinfo.js';
 import { trashPaths } from './trash-service.js';
+import { scanPaths, listTreeLevel, readMtimes } from './manifest-scan.js';
 import {
   createVault,
   unlockVault,
@@ -110,6 +111,23 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && pathname === '/api/list') {
     const abs = normalizeLocalPath(url.searchParams.get('path') || '');
     return json(res, 200, await listDirectory(abs));
+  }
+
+  // 清单生成：物理扫描只在用户显式点「重新扫描并生成」时触发。
+  if (req.method === 'GET' && pathname === '/api/mft/tree') {
+    return json(res, 200, await listTreeLevel(url.searchParams.get('path') || ''));
+  }
+  if (req.method === 'POST' && pathname === '/api/mft/scan') {
+    const body = await readJson(req);
+    return json(res, 200, await scanPaths(body.paths, {
+      recursive: body.recursive !== false,
+      timeoutMs: Number(body.timeoutMs) || undefined,
+      maxFiles: Number(body.maxFiles) || undefined,
+    }));
+  }
+  if (req.method === 'POST' && pathname === '/api/mft/mtimes') {
+    const body = await readJson(req);
+    return json(res, 200, { mtimes: await readMtimes(body.paths) });
   }
 
   // 唯一的写操作：把当前目录的直接子项送进 Windows 回收站（可还原），不做永久删除。
@@ -218,7 +236,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && pathname.startsWith('/vendor/')) {
       return await serveVendor(res, pathname);
     }
-    if (req.method === 'GET' && ['/app.js', '/vault.js', '/style.css', '/location.js', '/update-checker.js', '/annotations-store.js', '/annotations-ui.js', '/image-viewer.js', '/manifest-export.js', '/manifest-sync.js', '/trash-ui.js'].includes(pathname)) {
+    if (req.method === 'GET' && ['/app.js', '/vault.js', '/style.css', '/location.js', '/update-checker.js', '/annotations-store.js', '/annotations-ui.js', '/image-viewer.js', '/manifest-export.js', '/manifest-sync.js', '/manifest-selection.js', '/manifest-payload.js', '/manifest-builder.js', '/file-list-export.js', '/zip-writer.js', '/trash-ui.js'].includes(pathname)) {
       return await serveStatic(res, pathname);
     }
     if (pathname.startsWith('/api/')) return await handleApi(req, res, url);

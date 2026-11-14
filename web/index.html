@@ -16,6 +16,7 @@
     <button id="bookmarksBtn" type="button" title="打开书签面板">书签 <span id="bookmarkCount" class="anno-count">0</span></button>
     <button id="tagsBtn" type="button" title="按标签筛选目录">标签 <span id="tagCount" class="anno-count">0</span></button>
     <button id="syncBtn" type="button" title="把收藏同步为目录结构清单 v2">同步收藏</button>
+    <button id="builderBtn" type="button" title="勾选目录生成 v2 清单与文件列表">清单生成</button>
     <label class="encoding">文件名编码
       <select id="encoding">
         <option value="">自动</option>
@@ -98,6 +99,34 @@
     <p class="modal-note">需要「含远端后端」的 app-data 数据组；只有本地后端时导出会被禁用，避免假同步。</p>
     <div class="modal-actions">
       <button id="syncNowBtn" type="button" class="primary">立即导出</button>
+    </div>
+  </div>
+</div>
+
+<div id="builderModal" class="modal hidden">
+  <div class="modal-card builder-card">
+    <div class="modal-head">
+      <h2>清单生成 · 目录结构 v2 / 文件列表</h2>
+      <button id="builderClose" type="button" class="modal-x" title="关闭">×</button>
+    </div>
+    <div class="builder-tabs">
+      <button type="button" data-builder-tab="dirs" class="active">目录清单</button>
+      <button type="button" data-builder-tab="files">文件列表</button>
+      <button type="button" data-builder-tab="preview">预览</button>
+      <button type="button" data-builder-tab="diag">诊断 / 反向加载</button>
+    </div>
+    <div id="builderBody" class="builder-body">
+      <div id="builderDirs" class="builder-pane"></div>
+      <div id="builderFiles" class="builder-pane hidden"></div>
+      <div id="builderPreview" class="builder-pane hidden"></div>
+      <div id="builderDiag" class="builder-pane hidden"></div>
+    </div>
+    <div id="builderStatus" class="sync-status" data-state="idle">勾选目录后点「重新扫描并生成」</div>
+    <div class="modal-actions builder-actions">
+      <button id="builderScan" type="button" class="primary">重新扫描并生成</button>
+      <button id="builderCopy" type="button">复制 JSON</button>
+      <button id="builderDownload" type="button">下载 ZIP</button>
+      <button id="builderUpload" type="button">上传到同步组</button>
     </div>
   </div>
 </div>

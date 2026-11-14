@@ -1116,17 +1116,19 @@ test('v2 sync writes host index, shard and file-tags into a fake app-data group'
     assert.equal(result.ok, true);
     sync.cancelScheduledSync(); // 连接建立时会自动排一次同步，这里只验证显式调用
     const stats = await sync.syncNow();
-    assert.equal(stats.shardCount, 1);
+    assert.equal(stats.bookmarkShardCount, 1);
     assert.equal(stats.revision, 1);
 
-    const hostPath = '/struct/zip-browser.HARNESS-PC.json';
-    const shardPath = '/struct/zip-browser.HARNESS-PC.vid-harness.json';
+    // 定稿：唯一主机索引 struct/<host>.json；书签分片固定名带 .bookmarks。
+    const hostPath = '/struct/HARNESS-PC.json';
+    const shardPath = '/struct/zip-browser.HARNESS-PC.vid-harness.bookmarks.json';
     const tagPath = '/file-tags/vid-harness.json';
     assert.ok(written.has(hostPath), `missing ${hostPath}`);
     assert.ok(written.has(shardPath), `missing ${shardPath}`);
     assert.ok(written.has(tagPath), `missing ${tagPath}`);
     assert.equal(written.get(hostPath).version, 2);
-    assert.deepEqual(written.get(hostPath).mounts[0].files, ['zip-browser.HARNESS-PC.vid-harness']);
+    assert.equal(written.get(hostPath).generator, 'fluentos-dir-struct-gen');
+    assert.deepEqual(written.get(hostPath).mounts[0].files, ['zip-browser.HARNESS-PC.vid-harness.bookmarks']);
     assert.equal(written.get(shardPath).volumeId, 'vid-harness');
     assert.deepEqual(written.get(shardPath).children.map((n) => n.name), ['Work']);
     assert.deepEqual(written.get(tagPath).tags['C:/Work'].sort(), ['书签', '项目'].sort());
@@ -1190,7 +1192,7 @@ test('v2 sync prefixes app_data/folders for repo-root backends', async () => {
     sync.initManifestSync({ getSnapshot: () => ({ tags: {}, paths: {}, bookmarks: [] }) });
     sync.cancelScheduledSync();
     await sync.syncNow();
-    assert.ok(written.has('/app_data/folders/struct/zip-browser.GITEE-PC.json'),
+    assert.ok(written.has('/app_data/folders/struct/GITEE-PC.json'),
       'repo-root backends must write under app_data/folders/struct');
   } finally {
     sync.cancelScheduledSync();
@@ -1390,5 +1392,291 @@ test('trash UI confirms, batches 10 at a time and refreshes', async () => {
     assert.match(statuses.at(-1).text, /已把 12 项移入回收站/);
   } finally {
     globalThis.document = savedDocument;
+  }
+});
+
+/* ---------------- 清单生成 / 文件列表（v2 + file-list） ---------------- */
+
+test('file-list mirrors original directory paths and falls back for unsafe or deep paths', async () => {
+  const fle = await import('../web/file-list-export.js');
+  assert.equal(fle.mirrorPathFor('C:/Photos/2024', 'A401-6B8F').path,
+    'file-list/A401-6B8F/C/Photos/2024/files.json');
+  assert.equal(fle.mirrorPathFor('D:/工作/报表', 'A401-6B8F').path,
+    'file-list/A401-6B8F/D/工作/报表/files.json');
+  assert.equal(fle.mirrorPathFor('C:/A/B', 'Richard::C:').path,
+    'file-list/Richard__C_/C/A/B/files.json');
+  assert.equal(fle.safeSegment('.git'), '.git', 'leading dots must survive');
+  assert.equal(fle.safeSegment('a:b'), 'a_b');
+  assert.equal(fle.safeSegment('   '), '');
+  assert.equal(fle.fnv1a64Hex('C:/photos'), fle.fnv1a64Hex('C:/photos'));
+  assert.notEqual(fle.fnv1a64Hex('C:/photos'), fle.fnv1a64Hex('C:/PHOTOS'));
+  const deep = ['C:'].concat(Array.from({ length: 30 }, (_, i) => `d${i}`)).join('/');
+  const fallback = fle.mirrorPathFor(deep, 'A401-6B8F');
+  assert.equal(fallback.fallback, true);
+  assert.match(fallback.dirKey, /-[0-9a-f]{12}$/);
+  assert.match(fallback.path, /^file-list\/A401-6B8F\/[A-Za-z0-9_.-]+\.json$/);
+  assert.equal(fle.removedDoc('C:/A', 'PC').removed, true);
+});
+
+test('file-list docs dedupe, merge tags, truncate and group picked files per volume', async () => {
+  const fle = await import('../web/file-list-export.js');
+  const scan = {
+    files: {
+      'C:\\Work': [
+        { path: 'C:\\Work\\a.txt', name: 'a.txt', size: 5, sizeOnDisk: 4096, mtime: 123 },
+        { path: 'C:\\Work\\A.TXT', name: 'A.TXT', size: 5, sizeOnDisk: 4096, mtime: 123 },
+        { path: 'C:\\Work\\b.txt', name: 'b.txt', size: 7, sizeOnDisk: 4096, mtime: 456 },
+        { path: 'C:\\Work\\c.txt', name: 'c.txt', size: 9, sizeOnDisk: 4096, mtime: 789 },
+      ],
+    },
+    status: { 'C:\\Work': { incomplete: false, truncated: false, total: 4 } },
+  };
+  const built = fle.buildFileListDocs({
+    selection: {
+      dirs: [{ path: 'C:\\Work', recursive: true }],
+      files: [{ path: 'zip:C:/a.zip#inner/x.png', name: 'x.png', size: 3, mtime: 9 }],
+    },
+    scan,
+    host: 'Richard',
+    volumes: { C: 'vid-c' },
+    tagsByRel: { 'C:/Work/a.txt': ['旅行'] },
+    now: 1000,
+    revision: 2,
+    maxFiles: 2,
+  });
+  assert.equal(built.files.length, 2);
+  const doc = built.files[0];
+  assert.equal(doc.path, 'file-list/vid-c/C/Work/files.json');
+  assert.equal(doc.json.fileCount, 2, 'maxFiles truncates');
+  assert.equal(doc.json.truncated, true);
+  assert.equal(doc.json.volumeId, 'vid-c');
+  assert.equal(doc.json.source, 'Richard');
+  assert.equal(doc.json.part.revision, 2);
+  assert.deepEqual(doc.json.files.map((f) => f.path), ['C:/Work/a.txt', 'C:/Work/b.txt']);
+  assert.deepEqual(doc.json.files[0].tags, ['旅行']);
+  assert.equal(built.files[1].path, 'file-list/vid-c/_picked.json');
+  assert.equal(built.files[1].json.files[0].archive, true);
+  assert.equal(fle.fileListSignature(doc.json), fle.fileListSignature({ ...doc.json, part: { revision: 99 } }));
+});
+
+test('selection helpers normalize windows paths and keep two independent sets', async () => {
+  const sel = await import('../web/manifest-selection.js');
+  let dirs = sel.addDirSelection(sel.emptyDirSelection(), 'C://Work//2024');
+  assert.equal(dirs.dirs[0].path, 'C:\\Work\\2024');
+  assert.equal(sel.isDirSelected(dirs, 'c:\\work\\2024'), true);
+  dirs = sel.addDirSelection(dirs, 'C:\\WORK\\2024');
+  assert.equal(dirs.dirs.length, 1, 'case-insensitive dedupe');
+  let files = sel.addFileDirSelection(sel.emptyFileSelection(), 'D:\\Photos');
+  files = sel.addPickedFile(files, { path: 'zip:C:/a.zip#x.png', name: 'x.png', size: 1 });
+  assert.equal(files.dirs.length, 1);
+  assert.equal(files.files[0].archive, true);
+  assert.equal(sel.removeFileDirSelection(files, 'd:\\photos').dirs.length, 0);
+});
+
+test('v2 scan shards, unified host index and bookmark renaming', async () => {
+  const mp = await import('../web/manifest-payload.js');
+  const scan = {
+    roots: [{
+      path: 'C:\\Work\\2024', name: '2024', type: 'folder', tags: ['node'],
+      children: [], fileCount: 2, totalSize: 20, totalSizeOnDisk: 8192,
+      sizePartial: false, mtime: 999,
+    }],
+    files: {}, status: {}, summaries: {},
+  };
+  const shards = mp.buildScanShards({ scan, host: 'PC', volumes: { C: 'vid-c' }, now: 1000, revision: 1 });
+  assert.equal(shards.files.length, 1);
+  assert.match(shards.files[0].path, /^struct\/vid-c\.1000\.json$/);
+  assert.deepEqual(shards.files[0].json.children.map((n) => n.name), ['Work']);
+  const work = shards.files[0].json.children[0].children[0];
+  assert.deepEqual(work.tags, ['node']);
+  assert.equal(work.totalSize, 20);
+  const bookmarks = mp.renameBookmarkShards([{
+    path: 'struct/zip-browser.PC.vid-c.json', kind: 'shard', volumeKey: 'vid-c', json: { volumeId: 'vid-c' },
+  }], 'PC');
+  assert.equal(bookmarks[0].path, 'struct/zip-browser.PC.vid-c.bookmarks.json');
+  const index = mp.buildHostIndex({
+    host: 'PC', volumes: shards.volumes, scanShards: shards.files,
+    bookmarkBases: [{ volumeKey: 'vid-c', base: bookmarks[0].base }],
+    remoteShards: { 'vid-c': ['vid-c.900'] }, now: 1000,
+  });
+  assert.equal(index.path, 'struct/PC.json');
+  assert.equal(index.json.version, 2);
+  assert.deepEqual(index.json.mounts[0].files,
+    ['vid-c.1000', 'vid-c.900', 'zip-browser.PC.vid-c.bookmarks'].sort());
+});
+
+test('zip writer produces a structurally valid store-only archive', async () => {
+  const zip = await import('../web/zip-writer.js');
+  const bytes = zip.makeZip([
+    { name: 'struct/PC.json', content: '{"version":2}' },
+    { name: 'file-list/vid/C/A/files.json', content: '{"files":[]}' },
+  ]);
+  const view = new DataView(bytes.buffer);
+  assert.equal(view.getUint32(0, true), 0x04034b50, 'local header signature');
+  assert.equal(view.getUint32(bytes.length - 22, true), 0x06054b50, 'EOCD signature');
+  assert.equal(view.getUint16(bytes.length - 12, true), 2, 'two entries');
+  assert.equal(view.getUint16(8, true), 0, 'store method');
+  assert.equal(zip.crc32(new TextEncoder().encode('{"version":2}')), view.getUint32(14, true));
+});
+
+/** 复用的同步组 harness：记录写入路径、目录与次数，并在结束时还原全局对象。 */
+function syncHarness({ backends, hostInfo } = {}) {
+  const written = new Map();
+  const writes = [];
+  const madeDirs = new Set();
+  const fakeFs = {
+    promises: {
+      readFile: async (file) => {
+        if (!written.has(file)) throw new Error('ENOENT');
+        return JSON.stringify(written.get(file));
+      },
+      writeFile: async (file, text) => {
+        written.set(file, JSON.parse(text));
+        writes.push(file);
+      },
+      mkdir: async (file) => { madeDirs.add(file); },
+      readdir: async () => [],
+      unlink: async (file) => { written.delete(file); },
+    },
+  };
+  const makeEl = () => ({
+    dataset: {}, textContent: '', title: '',
+    classList: { add() {}, remove() {} },
+    addEventListener() {}, appendChild() {}, setAttribute() {},
+  });
+  const elements = new Map();
+  const elFor = (id) => {
+    if (!elements.has(id)) elements.set(id, makeEl());
+    return elements.get(id);
+  };
+  const configurator = {
+    ...makeEl(),
+    getConnection: () => ({
+      groupType: 'data-sync',
+      dataGroup: {
+        fs: fakeFs,
+        listBackends: () => backends || [{ type: 'RemoteStorage', options: { basePath: 'app_data/folders/' } }],
+        listDeclaredBackends: () => [],
+      },
+    }),
+  };
+  const store = new Map();
+  const saved = {
+    window: globalThis.window, document: globalThis.document,
+    customElements: globalThis.customElements, localStorage: globalThis.localStorage,
+    fetch: globalThis.fetch,
+  };
+  globalThis.window = { __LOCAL_TOKEN__: 'harness-token' };
+  globalThis.document = { getElementById: elFor, createElement: () => configurator };
+  globalThis.customElements = { get: () => ({}) };
+  globalThis.localStorage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, value),
+  };
+  globalThis.fetch = async () => ({ ok: true, json: async () => hostInfo || { host: 'PC', volumes: { C: 'vid-c' } } });
+  return { written, writes, madeDirs, store, restore: () => Object.assign(globalThis, saved) };
+}
+
+test('syncScanNow writes scan shard, unified index and mirrored file-list, idempotently', async () => {
+  const harness = syncHarness({ hostInfo: { host: 'HARNESS', volumes: { C: 'vid-x' } } });
+  let sync;
+  try {
+    sync = await import('../web/manifest-sync.js?harness=scan');
+    sync.initManifestSync({
+      getSnapshot: () => ({ tags: {}, paths: {}, bookmarks: [] }),
+      getFileSelection: () => ({ dirs: [], files: [] }),
+    });
+    sync.cancelScheduledSync();
+    const scan = {
+      roots: [{
+        path: 'C:\\Work', name: 'Work', type: 'folder', tags: ['node'], children: [],
+        fileCount: 1, totalSize: 5, totalSizeOnDisk: 4096, sizePartial: false, mtime: 123,
+      }],
+      summaries: {},
+      files: { 'C:\\Work': [{ path: 'C:\\Work\\a.txt', name: 'a.txt', size: 5, sizeOnDisk: 4096, mtime: 123 }] },
+      status: { 'C:\\Work': { incomplete: false, truncated: false, total: 1 } },
+    };
+    const selection = { dirs: [{ path: 'C:\\Work', recursive: true }], files: [] };
+    const stats = await sync.syncScanNow(scan, { fileSelection: selection });
+    assert.equal(stats.scanShardCount, 1);
+    assert.equal(stats.fileListCount, 1);
+    assert.ok(harness.written.has('/struct/HARNESS.json'));
+    assert.ok([...harness.written.keys()].some((key) => /^\/struct\/vid-x\.\d+\.json$/.test(key)));
+    assert.ok(harness.written.has('/file-list/vid-x/C/Work/files.json'));
+    assert.ok(harness.madeDirs.has('/file-list/vid-x/C/Work'), 'mirror directories are created');
+    const doc = harness.written.get('/file-list/vid-x/C/Work/files.json');
+    assert.equal(doc.files[0].path, 'C:/Work/a.txt');
+    assert.equal(doc.volumeId, 'vid-x');
+    assert.equal(doc.source, 'HARNESS');
+    const before = harness.writes.filter((p) => p === '/file-list/vid-x/C/Work/files.json').length;
+    assert.equal(before, 1);
+    await sync.syncScanNow(scan, { fileSelection: selection });
+    assert.equal(harness.writes.filter((p) => p === '/file-list/vid-x/C/Work/files.json').length, 1,
+      'unchanged file-list content must not be rewritten');
+  } finally {
+    sync?.cancelScheduledSync();
+    harness.restore();
+  }
+});
+
+test('mft scan APIs walk a temporary directory and report sizes/tags/mtime', async () => {
+  const tmp = await fs.mkdtemp(path.join(ROOT, 'tests', 'mft-'));
+  try {
+    await fs.mkdir(path.join(tmp, 'sub'));
+    await fs.writeFile(path.join(tmp, 'a.txt'), 'hello');
+    await fs.writeFile(path.join(tmp, 'sub', 'b.txt'), 'world!');
+    await fs.writeFile(path.join(tmp, 'package.json'), '{}');
+    const headers = { 'X-Local-Token': TEST_TOKEN };
+    // /api/list 会把该目录登记为「本次会话已浏览」，之后 mft 下钻才被允许。
+    const listed = await fetch(`${BASE}/api/list?path=${encodeURIComponent(tmp)}`, { headers });
+    assert.equal(listed.status, 200);
+    const listData = await listed.json();
+    assert.ok(listData.tags.includes('node'), 'auto tags come from direct child names');
+
+    const treeRes = await fetch(`${BASE}/api/mft/tree?path=${encodeURIComponent(tmp)}`, { headers });
+    assert.equal(treeRes.status, 200);
+    const tree = await treeRes.json();
+    assert.deepEqual(tree.children.map((item) => item.name), ['sub']);
+    assert.ok(tree.tags.includes('node'));
+
+    const scanRes = await fetch(`${BASE}/api/mft/scan`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: [tmp], recursive: true }),
+    });
+    assert.equal(scanRes.status, 200);
+    const scan = await scanRes.json();
+    const key = Object.keys(scan.files)[0];
+    assert.equal(scan.files[key].length, 3);
+    assert.equal(scan.status[key].incomplete, false);
+    assert.ok(scan.summaries[key].totalSize >= 13);
+    assert.ok(scan.roots[0].tags.includes('node'));
+    assert.equal(scan.files[key].every((file) => Number.isFinite(file.mtime)), true);
+
+    const noToken = await fetch(`${BASE}/api/mft/tree?path=${encodeURIComponent(tmp)}`);
+    assert.equal(noToken.status, 403);
+    const outside = await fetch(`${BASE}/api/mft/scan`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: ['Z:\\not-browsed'] }),
+    });
+    assert.equal(outside.status, 403, 'unbrowsed roots are rejected');
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('manifest builder UI, new modules and token-protected mft routes are served', async () => {
+  const html = await (await fetch(BASE)).text();
+  assert.match(html, /id="builderBtn"/);
+  assert.match(html, /id="builderModal"/);
+  assert.match(html, /data-builder-tab="files"/);
+  assert.match(html, /清单生成/);
+  for (const name of [
+    'manifest-builder.js', 'manifest-selection.js', 'manifest-payload.js',
+    'file-list-export.js', 'zip-writer.js', 'manifest-sync.js',
+  ]) {
+    const response = await fetch(`${BASE}/${name}`);
+    assert.equal(response.status, 200, `${name} must be served`);
   }
 });

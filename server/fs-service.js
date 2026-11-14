@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { HttpError } from './util.js';
 import { isStaticAllowed, isArchiveName } from './mime.js';
+import { detectTags } from './tag-rules.js';
 
 const execFileAsync = promisify(execFile);
 const PS_COMMAND = 'Get-CimInstance Win32_LogicalDisk | Select-Object DeviceID,VolumeName,Size,FreeSpace,DriveType | ConvertTo-Json -Compress';
@@ -168,7 +169,8 @@ export async function listDirectory(abs) {
   }
   items.sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name, 'zh-CN'));
   allowDirectory(abs);
-  return { path: abs, items };
+  // 自动标签口径与 dir-struct-gen 一致：只看该目录的直接子项名，零额外 IO。
+  return { path: abs, items, tags: detectTags(entries.map((entry) => entry.name)) };
 }
 
 export async function findIndexFile(abs) {
