@@ -383,3 +383,153 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
 .dl-warn { color: #a32d2d; }
 .dl-children-list { max-height: 170px; }
 .dl-size { flex: 0 1 260px; min-width: 0; font-size: 10px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ===== 手机浏览器：响应式适配，同一套页面，桌面端不受影响 ===== */
+/* 这三个控件只在窄屏出现；.hidden 仍用 !important 控制遮罩显隐。 */
+.more-btn, .side-toggle, .side-backdrop { display: none; }
+
+/* 触屏没有 hover：依赖 tr:hover 才完全显示的删除按钮必须常显。 */
+@media (hover: none) {
+  .trash-one, .file-table tr:hover .trash-one { opacity: 1; }
+}
+
+@media (max-width: 720px) {
+  /* 移动浏览器地址栏会让 100vh 跳动；dvh 不支持时回退 100%。 */
+  html, body { height: 100%; height: 100dvh; }
+  .topbar { position: relative; padding: 8px 12px; gap: 8px; }
+  .brand { font-size: 13px; }
+  .more-btn {
+    display: inline-block; margin-left: auto; min-height: 36px;
+    padding: 6px 12px; font-size: 13px; white-space: nowrap;
+  }
+  .top-actions {
+    display: none; position: absolute; top: 100%; left: 8px; right: 8px;
+    flex-direction: column; align-items: stretch; gap: 6px; z-index: 45;
+    padding: 10px; border: 1px solid var(--border); border-radius: 10px;
+    background: #fff; box-shadow: 0 10px 30px rgba(15, 23, 42, .18);
+    max-height: 72dvh; overflow-y: auto;
+  }
+  .top-actions.open { display: flex; }
+  .top-actions > button { width: 100%; min-height: 42px; text-align: left; font-size: 13px; }
+  .encoding { justify-content: space-between; min-height: 42px; font-size: 13px; }
+  .encoding select { font-size: 16px; max-width: 62%; }
+
+  .toolbar { padding: 6px 10px; gap: 6px; }
+  .side-toggle { display: inline-block; min-height: 36px; padding: 4px 10px; font-size: 15px; }
+  .toolbar button { min-height: 36px; }
+  .crumbs { flex-wrap: nowrap; overflow-x: auto; white-space: nowrap; scrollbar-width: thin; }
+  .mode { display: none; }
+
+  /* 侧栏变抽屉：脱离文档流，stage 独占宽度。 */
+  .workspace { display: block; }
+  .sidebar {
+    position: fixed; top: 0; left: 0; bottom: 0; width: min(84vw, 320px);
+    max-width: 320px; z-index: 41; transform: translateX(-102%);
+    transition: transform .22s ease; box-shadow: 8px 0 28px rgba(15, 23, 42, .2);
+    padding: calc(14px + env(safe-area-inset-top)) 10px calc(14px + env(safe-area-inset-bottom));
+    border-right: 1px solid var(--border);
+  }
+  .sidebar.open { transform: translateX(0); }
+  .side-backdrop { display: block; position: fixed; inset: 0; z-index: 40; background: rgba(20, 24, 30, .35); }
+  .side-item { padding: 10px 9px; font-size: 13px; }
+  .side-tree summary { padding: 8px 6px; font-size: 13px; }
+  .stage { height: 100%; padding: 12px 12px 24px; }
+
+  /* 文件表格 → 卡片列表：每行两行（名称+元信息 / 操作按钮），勾选框绝对定位。 */
+  .file-table, .file-table tbody { display: block; width: 100%; }
+  .file-table thead { display: none; }
+  .file-table tr {
+    display: block; position: relative; margin: 0 0 8px;
+    padding: 10px 12px 10px 38px; border: 1px solid var(--border);
+    border-radius: var(--radius); background: #fff;
+  }
+  .file-table tr:hover td { background: transparent; }
+  .file-table td { display: inline; border: 0; padding: 0; font-size: 12px; }
+  .file-table td:nth-of-type(2) { display: block; }
+  .file-table td.trash-col-check {
+    display: block; position: absolute; left: 10px; top: 12px; width: 22px;
+  }
+  .file-table td.trash-col-action { display: block; margin-top: 8px; }
+  .file-table td.file-size, .file-table td.file-time {
+    display: inline-block; margin: 4px 12px 0 0; font-size: 11px; color: var(--text-3);
+  }
+  .file-name { flex-wrap: wrap; gap: 6px; }
+  .file-thumb { width: 30px; height: 30px; }
+  .tag { margin-left: 0; font-size: 11px; padding: 2px 8px; }
+  .trash-check { width: 18px; height: 18px; }
+
+  /* 触摸目标：所有行内小按钮放大到 ≥34px，「打开位置」在手机端隐藏
+     （它调起的是主机上的资源管理器，手机上看不到效果）。 */
+  button { min-height: 36px; padding: 7px 12px; font-size: 13px; }
+  .fl-add, .cr-add-btn, .dl-add, .trash-one, .trash-card-x, .trash-chip-x, .bt-add {
+    margin: 0 4px 4px 0; min-height: 34px; padding: 4px 10px; font-size: 12px;
+    vertical-align: middle;
+  }
+  .ex-open, .thumb-card .ex-open, .folder-chip .ex-open { display: none; }
+  .trash-toolbar { gap: 8px; }
+  .trash-hint { flex: 1 1 100%; line-height: 1.5; }
+  .view-switch button { min-height: 36px; }
+
+  .drive-grid { grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)); gap: 8px; }
+  .thumb-grid { grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); gap: 8px; }
+  .thumb-box { height: 96px; }
+  .thumb-head { flex-wrap: wrap; }
+  .thumb-card .fl-add {
+    display: block; width: calc(100% - 16px); margin: 6px 8px 2px; text-align: center;
+  }
+  .thumb-card .cr-add-btn, .trash-card-controls { min-height: 30px; }
+  .folder-chips { gap: 6px; }
+  .folder-chip { display: inline-flex; flex-wrap: wrap; align-items: center; padding: 6px 10px; }
+  .folder-chip .fl-add, .folder-chip .dl-add, .trash-chip-x { margin-left: 3px; }
+
+  /* 弹窗改成底部 sheet，全宽、可滚动、避开 iPhone 底部安全区。 */
+  .modal { align-items: flex-end; }
+  .modal-card,
+  #vaultModal .modal-card,
+  #syncModal .modal-card,
+  #builderModal .modal-card,
+  #copyRefModal .modal-card,
+  #trashModal .modal-card,
+  #dirListModal .modal-card {
+    width: 100%; max-width: none; max-height: 92dvh; overflow-y: auto;
+    border-radius: 16px 16px 0 0; border-bottom: 0;
+    padding: 16px 14px calc(16px + env(safe-area-inset-bottom));
+  }
+  .modal-actions { flex-wrap: wrap; gap: 8px; }
+  .modal-actions button { flex: 1 1 42%; min-height: 42px; }
+  #builderModal .modal-card, #trashModal .modal-card { overflow: hidden; }
+  #builderModal .builder-body, #trashModal .trash-list { max-height: none; min-height: 0; }
+  #builderModal .builder-actions { flex: 0 0 auto; }
+  .builder-tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .builder-tabs button { flex: 0 0 auto; min-height: 36px; }
+  .builder-options { flex-direction: column; gap: 8px; }
+  .bp-grid { grid-template-columns: 1fr; }
+  .bt-row { gap: 8px; }
+  .bt-check { min-width: 0; }
+  .dl-options label { min-height: 36px; }
+  .bl-row { flex-wrap: wrap; }
+  .bl-path { flex: 1 1 100%; }
+  .sync-host { max-height: 40dvh; }
+
+  /* iOS Safari 对 <16px 的输入框会自动放大整页，必须显式设 16px。 */
+  input[type="text"], input[type="password"], select, textarea,
+  .cr-field input, .cr-field select, .anno-tag-input, .anno-rename-input { font-size: 16px; }
+  .anno-tag-input, .anno-rename-input { width: 100%; }
+  .anno-panel { width: 100%; max-width: 100%; }
+  .anno-tabs { overflow-x: auto; }
+  .anno-bar { gap: 6px; }
+
+  .viewer { min-height: 62dvh; height: 100%; }
+  .viewer-bar { flex-wrap: wrap; }
+  .viewer-url { flex: 1 1 100%; order: -1; }
+  .viewer iframe { min-height: 52dvh; }
+  .statusbar { padding: 6px 10px calc(6px + env(safe-area-inset-bottom)); }
+  .status-desc { display: none; }
+  .status-right { gap: 6px; }
+  .update-toast {
+    left: 12px; right: 12px; bottom: calc(12px + env(safe-area-inset-bottom));
+    width: auto; min-width: 0; max-width: none; transform: none; flex-wrap: wrap;
+  }
+  .toast-sub { white-space: normal; }
+}
+

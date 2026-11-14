@@ -25,6 +25,14 @@ body{background:#14171c;color:#e8ecf1;font:13px/1.5 -apple-system,BlinkMacSystem
 .iv-hint{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);padding:4px 12px;border-radius:99px;background:rgba(20,23,28,.78);color:#aab3c0;font-size:11px;pointer-events:none;white-space:nowrap}
 .iv-error{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#ff9b9b;font-size:14px;background:#14171c}
 .hidden{display:none!important}
+@media (max-width:720px){
+.iv-bar{flex-wrap:wrap;gap:6px;padding:8px}
+.iv-name{flex:1 1 100%;max-width:100%;font-size:12px}
+.iv-dims,.iv-grow{display:none}
+.iv-bar button,.iv-link{flex:1 1 auto;min-height:38px;padding:8px 9px;font-size:13px;text-align:center}
+.iv-zoom{min-width:64px;flex:0 0 auto}
+.iv-hint{width:92%;white-space:normal;text-align:center;font-size:10px;bottom:calc(8px + env(safe-area-inset-bottom))}
+}
 `;
 
 /**

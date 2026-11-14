@@ -14,6 +14,10 @@ function boot() {
   const zoomLabel = root.querySelector('#ivZoom');
   const dimsLabel = root.querySelector('#ivDims');
   const errorBox = root.querySelector('#ivError');
+  const hint = root.querySelector('.iv-hint');
+  if (hint && window.matchMedia?.('(hover: none) and (pointer: coarse)')?.matches) {
+    hint.textContent = '双指缩放 · 单指拖动 · 双击切换 1:1 / 适应';
+  }
 
   let scale = 1;
   let tx = 0;
@@ -111,9 +115,32 @@ function boot() {
   let dragging = false;
   let lastX = 0;
   let lastY = 0;
+  // 触摸：单指平移、双指捏合缩放。桌面端滚轮 / 按钮 / 双击路径完全不变。
+  const pointers = new Map();
+  let pinch = null;
+  const pointList = () => Array.from(pointers.values());
+  const distanceOf = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const centerOf = (pts) => ({ x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 });
+  const centerOffset = (center) => {
+    const rect = viewport.getBoundingClientRect();
+    return { cx: center.x - rect.left - rect.width / 2, cy: center.y - rect.top - rect.height / 2 };
+  };
 
   viewport.addEventListener('pointerdown', (event) => {
     if (event.button !== 0 || !ready) return;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointers.size === 2) {
+      const pts = pointList();
+      pinch = {
+        startDistance: Math.max(1, distanceOf(pts[0], pts[1])),
+        startScale: scale,
+        center: centerOf(pts),
+      };
+      dragging = false;
+      viewport.classList.remove('dragging');
+      return;
+    }
+    if (pointers.size > 2) return;
     dragging = true;
     lastX = event.clientX;
     lastY = event.clientY;
@@ -123,6 +150,20 @@ function boot() {
   });
 
   viewport.addEventListener('pointermove', (event) => {
+    if (!pointers.has(event.pointerId)) return;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pinch && pointers.size >= 2) {
+      const pts = pointList();
+      const center = centerOf(pts);
+      const { cx, cy } = centerOffset(center);
+      // 先跟随双指中心平移，再以新中心为锚点缩放，避免画面跳动。
+      tx += center.x - pinch.center.x;
+      ty += center.y - pinch.center.y;
+      const nextDistance = Math.max(1, distanceOf(pts[0], pts[1]));
+      zoomTo(pinch.startScale * (nextDistance / pinch.startDistance), cx, cy);
+      pinch.center = center;
+      return;
+    }
     if (!dragging) return;
     tx += event.clientX - lastX;
     ty += event.clientY - lastY;
@@ -131,13 +172,24 @@ function boot() {
     apply();
   });
 
-  const stopDrag = () => {
-    dragging = false;
-    viewport.classList.remove('dragging');
+  const endPointer = (event) => {
+    pointers.delete(event.pointerId);
+    if (pinch && pointers.size < 2) {
+      pinch = null;
+      const rest = pointList()[0];
+      // 抬起一指后继续单指拖动，重置基准防止跳变。
+      if (rest) { dragging = true; lastX = rest.x; lastY = rest.y; }
+    }
+    if (pointers.size === 0) {
+      dragging = false;
+      viewport.classList.remove('dragging');
+    } else if (!pinch && !dragging) {
+      viewport.classList.remove('dragging');
+    }
   };
-  viewport.addEventListener('pointerup', stopDrag);
-  viewport.addEventListener('pointercancel', stopDrag);
-  viewport.addEventListener('lostpointercapture', stopDrag);
+  viewport.addEventListener('pointerup', endPointer);
+  viewport.addEventListener('pointercancel', endPointer);
+  viewport.addEventListener('lostpointercapture', endPointer);
 
   viewport.addEventListener('dblclick', (event) => {
     if (!ready) return;
@@ -189,6 +241,7 @@ function boot() {
     get rotation() { return rotation; },
     get fitted() { return fitted; },
     get ready() { return ready; },
+    get pointerCount() { return pointers.size; },
     get natural() { return { width: naturalWidth, height: naturalHeight }; },
     fit, actual, rotate, zoomBy, zoomTo,
   };

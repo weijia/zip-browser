@@ -10,7 +10,9 @@
 <body>
 <header class="topbar">
   <div class="brand"><span class="brand-mark"></span><span>本地文件浏览器</span></div>
-  <div class="top-actions">
+  <!-- 窄屏：top-actions 整体变成下拉菜单，按钮 DOM 不复制，事件绑定全部保留。 -->
+  <button id="moreBtn" type="button" class="more-btn" aria-expanded="false" aria-controls="topActions" title="展开更多功能">更多 ▾</button>
+  <div id="topActions" class="top-actions">
     <button id="vaultBtn" type="button" title="打开密码库（KeePass）">密码库</button>
     <button id="defPwBtn" type="button" title="设置缺省解压密码：打开不知道密码的加密压缩包时会先用它尝试">缺省密码</button>
     <button id="bookmarksBtn" type="button" title="打开书签面板">书签 <span id="bookmarkCount" class="anno-count">0</span></button>
@@ -29,6 +31,7 @@
 </header>
 
 <div class="toolbar">
+  <button id="sideToggle" type="button" class="side-toggle" aria-expanded="false" aria-controls="sidebar" title="打开目录 / 文件树">☰</button>
   <button id="back" type="button" title="后退">←</button>
   <button id="forward" type="button" title="前进">→</button>
   <div id="crumbs" class="crumbs"></div>
@@ -39,6 +42,7 @@
   <aside id="sidebar" class="sidebar"></aside>
   <main id="stage" class="stage"></main>
 </div>
+<div id="sideBackdrop" class="side-backdrop hidden" aria-hidden="true"></div>
 
 <div id="modal" class="modal hidden">
   <div class="modal-card">
@@ -204,7 +208,7 @@
   <span id="statusText">正在连接本地服务…</span>
   <span class="status-right">
     <span id="appVersion" class="version-badge" title="读取版本信息…">v…</span>
-    <span>浏览 · 删除到回收站 · <span id="bindHint">__ZIP_BROWSER_HOST__</span></span>
+    <span><span class="status-desc">浏览 · 删除到回收站 · </span><span id="bindHint">__ZIP_BROWSER_HOST__</span></span>
   </span>
 </footer>
 

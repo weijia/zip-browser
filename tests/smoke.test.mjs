@@ -2353,3 +2353,42 @@ test('launch/stop scripts work with a non-loopback bind and probe /health', asyn
     `require('http').get('${BASE}/health',r=>{let s='';r.on('data',d=>s+=d);r.on('end',()=>process.exit(r.statusCode===200&&s.includes('ok')?0:1))}).on('error',()=>process.exit(1))`],
     { stdio: 'ignore' });
 });
+
+test('mobile layout: responsive CSS, menu/drawer markup and touch zoom', async () => {
+  const css = await fs.readFile(path.join(ROOT, 'web', 'style.css'), 'utf8');
+  const html = await fs.readFile(path.join(ROOT, 'web', 'index.html'), 'utf8');
+  const app = await fs.readFile(path.join(ROOT, 'web', 'app.js'), 'utf8');
+  const viewer = await fs.readFile(path.join(ROOT, 'web', 'image-viewer.js'), 'utf8');
+
+  assert.match(css, /@media \(max-width: 720px\)/);
+  assert.ok(css.includes('.more-btn, .side-toggle, .side-backdrop { display: none; }'),
+    'new mobile-only controls must stay hidden on desktop');
+  for (const text of [
+    '.top-actions.open { display: flex; }',
+    '.sidebar.open { transform: translateX(0); }',
+    '.file-table thead { display: none; }',
+    '.ex-open, .thumb-card .ex-open, .folder-chip .ex-open { display: none; }',
+    'font-size: 16px',
+    'env(safe-area-inset-bottom)',
+    '@media (hover: none)',
+  ]) {
+    assert.ok(css.includes(text), `style.css must contain ${text}`);
+  }
+
+  for (const id of ['moreBtn', 'topActions', 'sideToggle', 'sideBackdrop']) {
+    assert.ok(html.includes(`id="${id}"`), `index.html must contain #${id}`);
+  }
+  assert.ok(html.includes('class="status-desc"'));
+  for (const text of ['initMobileChrome', 'closeMobileChrome()', "target.closest('#topActions')"]) {
+    assert.ok(app.includes(text), `app.js must contain ${text}`);
+  }
+
+  // 图片查看器：双指缩放 + 触摸设备提示文案，桌面滚轮/双击路径保留。
+  assert.ok(viewer.includes('pinch') && viewer.includes('pointerCount'));
+  assert.ok(viewer.includes('(hover: none) and (pointer: coarse)'));
+  assert.ok(viewer.includes('wheel') && viewer.includes('dblclick'));
+  const page = renderImageViewer({ name: 'a.png', src: '/fs/x.png?raw=1' });
+  assert.match(page, /@media \(max-width:720px\)/);
+  assert.ok(page.includes('touch-action:none'));
+  assert.ok(page.includes('name="viewport"'));
+});

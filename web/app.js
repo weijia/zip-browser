@@ -43,6 +43,57 @@ let viewMode = 'list';
 const state = { index: 0, depth: 0, target: { kind: 'drives' } };
 let crumbTargets = [];
 
+// 手机端外壳：顶栏「更多」下拉 + 侧栏抽屉。窄屏才显示（CSS 控制），
+// 按钮 DOM 不复制，原有事件绑定全部保留；可选链兼容精简 DOM 环境。
+let closeMobileChrome = () => {};
+function initMobileChrome() {
+  const moreBtn = $('moreBtn');
+  const topActions = $('topActions');
+  const sideToggle = $('sideToggle');
+  const side = $('sidebar');
+  const backdrop = $('sideBackdrop');
+  const setMenu = (open) => {
+    topActions?.classList.toggle('open', open);
+    moreBtn?.setAttribute('aria-expanded', String(open));
+  };
+  const setSide = (open) => {
+    side?.classList.toggle('open', open);
+    backdrop?.classList.toggle('hidden', !open);
+    sideToggle?.setAttribute('aria-expanded', String(open));
+  };
+  moreBtn?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    setMenu(!topActions?.classList.contains('open'));
+    setSide(false);
+  });
+  sideToggle?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    setSide(!side?.classList.contains('open'));
+    setMenu(false);
+  });
+  backdrop?.addEventListener('click', () => setSide(false));
+  document.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!target?.closest) return;
+    if (target.closest('#moreBtn') || target.closest('#sideToggle')) return;
+    if (target.closest('#topActions')) {
+      // 只在点按钮后收起；编码下拉展开时不要关菜单。
+      if (target.closest('button')) setMenu(false);
+      return;
+    }
+    setMenu(false);
+    if (target.closest('#sidebar')) setSide(false);
+  });
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 720) { setMenu(false); setSide(false); }
+  });
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { setMenu(false); setSide(false); }
+  });
+  closeMobileChrome = () => { setMenu(false); setSide(false); };
+}
+initMobileChrome();
+
 function isImageName(name) {
   return IMAGE_EXT.has((String(name).match(/\.[^.]+$/) || [''])[0].toLowerCase());
 }
@@ -511,6 +562,8 @@ function renderPreview(target) {
 }
 
 async function render(target) {
+  // 导航 / 刷新 / 前进后退后自动收起手机端的菜单与抽屉。
+  closeMobileChrome();
   status('正在加载…');
   try {
     if (target.kind === 'drives') await renderDrives();
