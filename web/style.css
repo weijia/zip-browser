@@ -348,6 +348,11 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
 .bt-tag { font-size: 10px; color: #534ab7; background: #eeedfe; border-radius: 99px; padding: 1px 6px; }
 .bt-add { font-size: 11px; padding: 2px 8px; color: #0f6e56; background: #e1f5ee; border-color: #bfe6d8; border-radius: 99px; }
 .bt-add.active { color: #854f0b; background: #faeeda; border-color: #ead7b0; }
+.bt-size { flex: 0 1 auto; max-width: 240px; font-size: 10px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bt-size:empty { display: none; }
+.fl-size { flex: 0 0 auto; font-size: 10px; color: var(--text-3); white-space: nowrap; }
+.builder-totals { font-size: 11px; line-height: 1.7; color: var(--text-2); margin: 0 0 8px; padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-soft); }
+.builder-totals strong { color: var(--text); }
 .bt-empty, .bl-empty { font-size: 11px; color: var(--text-3); padding: 6px 0 6px 8px; }
 .bl-section-title { font-size: 12px; font-weight: 600; color: var(--text); margin: 14px 0 6px; }
 .bl-list { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-soft); max-height: 190px; overflow: auto; }
@@ -526,6 +531,7 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
   .bp-grid { grid-template-columns: 1fr; }
   .bt-row { gap: 8px; }
   .bt-check { min-width: 0; }
+  .bt-size { flex: 1 1 100%; max-width: none; }
   .dl-options label { min-height: 36px; }
   .bl-row { flex-wrap: wrap; }
   .bl-path { flex: 1 1 100%; }
@@ -585,6 +591,37 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
   .row-menu-option {
     display: block; width: 100%; min-height: 46px; margin: 0;
     padding: 10px 12px; font-size: 14px; text-align: left; vertical-align: baseline;
+  }
+
+  /* 手机端清单生成不再叠一层弹窗：铺成页面内面板，关闭后回到文件列表。 */
+  body.builder-inline { overflow: hidden; }
+  body.builder-inline header,
+  body.builder-inline .toolbar,
+  body.builder-inline .workspace,
+  body.builder-inline .statusbar,
+  body.builder-inline #sideBackdrop,
+  body.builder-inline #updateToast { display: none !important; }
+  body.builder-inline #builderModal {
+    position: static; inset: auto; display: block; padding: 0;
+    background: var(--bg); z-index: auto;
+  }
+  body.builder-inline #builderModal.hidden { display: none !important; }
+  body.builder-inline #builderModal .builder-card {
+    width: 100%; max-width: none; height: 100dvh; max-height: none;
+    padding: 0; border: 0; border-radius: 0; box-shadow: none;
+    overflow: hidden;
+  }
+  body.builder-inline #builderModal .modal-head {
+    flex: 0 0 auto; padding: 12px 14px; border-bottom: 1px solid var(--border);
+  }
+  body.builder-inline #builderModal .builder-tabs {
+    flex: 0 0 auto; margin: 0; padding: 8px 12px 0;
+  }
+  body.builder-inline #builderModal .builder-body { padding: 8px 14px 12px; }
+  body.builder-inline #builderModal .sync-status { margin: 8px 14px 0; }
+  body.builder-inline #builderModal .builder-actions {
+    flex: 0 0 auto; margin: 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border); background: #fff;
   }
 }
 
