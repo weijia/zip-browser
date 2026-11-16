@@ -438,6 +438,7 @@ async function runScanBatches(rawEntries, {
   onProgress = null,
   continueOnError = false,
   defaults = {},
+  hash = false,
 } = {}) {
   const entries = minimalScanEntries(rawEntries, defaults);
   const out = emptyScanResult();
@@ -451,6 +452,7 @@ async function runScanBatches(rawEntries, {
         body: JSON.stringify({
           paths: batch,
           timeoutMs,
+          ...(hash ? { hash: true } : {}),
         }),
       });
       mergeScanResult(out, part);
@@ -823,12 +825,18 @@ async function doScan(paths = null, fileSelection = null) {
   }
   const capturedSig = selectionSignature(dirSel, fileSel);
   const rootCount = entries.length;
+  const wantsHash = (fileSel?.dirs || []).length > 0
+    || (fileSel?.files || []).some((item) => {
+      const itemPath = typeof item === 'string' ? item : item?.path;
+      return Boolean(itemPath) && !String(itemPath).startsWith('zip:') && !item?.archive;
+    });
   clearTreeCacheFor(entries);
   setStatus(`正在扫描 ${rootCount} 个目录（每批最多 ${SCAN_BATCH_SIZE} 个，整棵子树体积单独计算）…`);
   try {
     const scan = await runScanBatches(entries, {
       timeoutMs: SCAN_BATCH_TIMEOUT_MS,
       defaults,
+      hash: wantsHash,
       onProgress: ({ done, total }) => {
         if (total) setStatus(`正在扫描 ${done}/${total} 个目录根…`);
       },

@@ -1,7 +1,9 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -15,7 +17,7 @@ const VERSION_STATE = path.join(ROOT, 'tests', '.version-state.test.json');
 
 let server;
 
-const { normalizeLocalPath, localPathToUrl, fsUrlToLocalPath } = await import('../server/fs-service.js');
+const { normalizeLocalPath, localPathToUrl, fsUrlToLocalPath, allowDirectory } = await import('../server/fs-service.js');
 const { normalizeEntryPath, openZip, unlockZip, readEntry, listZipEntries, closeZip } = await import('../server/zip-service.js');
 const { renderMarkdown } = await import('../server/markdown.js');
 const { renderImageViewer } = await import('../server/image-viewer.js');
@@ -1423,7 +1425,7 @@ test('file-list docs dedupe, merge tags, truncate and group picked files per vol
   const scan = {
     files: {
       'C:\\Work': [
-        { path: 'C:\\Work\\a.txt', name: 'a.txt', size: 5, sizeOnDisk: 4096, mtime: 123 },
+        { path: 'C:\\Work\\a.txt', name: 'a.txt', size: 5, sizeOnDisk: 4096, mtime: 123, hash: `sha256:${'a'.repeat(64)}` },
         { path: 'C:\\Work\\A.TXT', name: 'A.TXT', size: 5, sizeOnDisk: 4096, mtime: 123 },
         { path: 'C:\\Work\\b.txt', name: 'b.txt', size: 7, sizeOnDisk: 4096, mtime: 456 },
         { path: 'C:\\Work\\c.txt', name: 'c.txt', size: 9, sizeOnDisk: 4096, mtime: 789 },
@@ -1434,7 +1436,7 @@ test('file-list docs dedupe, merge tags, truncate and group picked files per vol
   const built = fle.buildFileListDocs({
     selection: {
       dirs: [{ path: 'C:\\Work', recursive: true }],
-      files: [{ path: 'zip:C:/a.zip#inner/x.png', name: 'x.png', size: 3, mtime: 9 }],
+      files: [{ path: 'zip:C:/a.zip#inner/x.png', name: 'x.png', size: 3, mtime: 9, crc32: '1A2B3C4D' }],
     },
     scan,
     host: 'Richard',
@@ -1451,12 +1453,22 @@ test('file-list docs dedupe, merge tags, truncate and group picked files per vol
   assert.equal(doc.json.truncated, true);
   assert.equal(doc.json.volumeId, 'vid-c');
   assert.equal(doc.json.source, 'Richard');
+  assert.equal(doc.json.version, 2);
   assert.equal(doc.json.part.revision, 2);
   assert.deepEqual(doc.json.files.map((f) => f.path), ['C:/Work/a.txt', 'C:/Work/b.txt']);
+  assert.equal(doc.json.files[0].hash, `sha256:${'a'.repeat(64)}`);
+  assert.equal(doc.json.files[1].hash, undefined);
   assert.deepEqual(doc.json.files[0].tags, ['旅行']);
   assert.equal(built.files[1].path, 'file-list/vid-c/_picked.json');
   assert.equal(built.files[1].json.files[0].archive, true);
+  assert.equal(built.files[1].json.files[0].crc32, '1a2b3c4d');
+  assert.equal(built.files[1].json.files[0].hash, undefined, 'zip 内条目不写内容 hash');
   assert.equal(fle.fileListSignature(doc.json), fle.fileListSignature({ ...doc.json, part: { revision: 99 } }));
+  assert.notEqual(
+    fle.fileListSignature(doc.json),
+    fle.fileListSignature({ ...doc.json, files: [{ ...doc.json.files[0], hash: `sha256:${'b'.repeat(64)}` }] }),
+    'hash 必须参与签名',
+  );
 });
 
 test('selection helpers normalize windows paths and keep two independent sets', async () => {
@@ -1517,6 +1529,40 @@ test('zip writer produces a structurally valid store-only archive', async () => 
   assert.equal(view.getUint16(bytes.length - 12, true), 2, 'two entries');
   assert.equal(view.getUint16(8, true), 0, 'store method');
   assert.equal(zip.crc32(new TextEncoder().encode('{"version":2}')), view.getUint32(14, true));
+});
+
+test('zip central directory exposes per-entry CRC-32 without extracting content', async () => {
+  const zip = await import('../web/zip-writer.js');
+  const service = await import('../server/zip-service.js');
+  const content = 'hello zip';
+  const bytes = zip.makeZip([{ name: 'inner/hello.txt', content }]);
+  const opened = await service.openZipTransient(bytes);
+  try {
+    assert.equal(opened.list.length, 1);
+    assert.equal(opened.list[0].path, 'inner/hello.txt');
+    assert.equal(opened.list[0].size, content.length);
+    assert.equal(opened.list[0].crc32, zip.crc32(new TextEncoder().encode(content)).toString(16).padStart(8, '0'));
+  } finally {
+    await opened.reader.close();
+  }
+});
+
+test('manifest scan optionally computes streamed file SHA-256 and marks hash failures separately', async () => {
+  const scanner = await import('../server/manifest-scan.js');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'zb-hash-'));
+  const content = 'hash me';
+  try {
+    await fs.writeFile(path.join(dir, 'a.txt'), content);
+    allowDirectory(dir);
+    const plain = await scanner.scanPaths([{ path: dir, recursive: false }], { timeoutMs: 10000 });
+    assert.equal(plain.files[dir][0].hash, undefined, '默认不计算 hash');
+    const hashed = await scanner.scanPaths([{ path: dir, recursive: false }], { hash: true, timeoutMs: 10000 });
+    assert.equal(hashed.files[dir][0].hash,
+      `sha256:${createHash('sha256').update(content).digest('hex')}`);
+    assert.equal(hashed.status[dir].hashPartial, false);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 /** 复用的同步组 harness：记录写入路径、目录与次数，并在结束时还原全局对象。 */

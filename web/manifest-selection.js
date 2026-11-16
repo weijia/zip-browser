@@ -40,6 +40,16 @@ function cleanPath(value) {
   return text.replace(/\//g, '\\').replace(/\\+/g, '\\');
 }
 
+/** ZIP 中央目录的 CRC-32 是 8 位十六进制；空、缺失或非数字都视为没有。 */
+export function cleanCrc32(value) {
+  if (value === null || value === undefined || value === '') return '';
+  const text = String(value).trim().toLowerCase();
+  if (/^[0-9a-f]{8}$/.test(text)) return text;
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < 0) return '';
+  return (num >>> 0).toString(16).padStart(8, '0');
+}
+
 function norm(value) {
   return cleanPath(value).toLowerCase();
 }
@@ -79,6 +89,7 @@ function cleanFileList(raw) {
       sizeOnDisk: Number(source?.sizeOnDisk) || 0,
       mtime: Number(source?.mtime) || 0,
       archive: path.startsWith('zip:') || Boolean(source?.archive),
+      crc32: cleanCrc32(source?.crc32),
     });
     if (out.length >= MAX_FILES) break;
   }

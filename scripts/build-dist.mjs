@@ -66,7 +66,11 @@ const manifest = {
 await fs.writeFile(path.join(STAGE, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 
 // tar 保留顶层目录 zip-browser-web/，OpenList 解压后可直接映射到 public/zb。
-execFileSync('tar', ['-czf', TARBALL, '-C', OUT, 'zip-browser-web'], { stdio: 'inherit' });
+// Windows 上 tar 在 System32，且不一定在 PATH 里，直接给绝对路径。
+const TAR = process.platform === 'win32'
+  ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe')
+  : 'tar';
+execFileSync(TAR, ['-czf', TARBALL, '-C', OUT, 'zip-browser-web'], { stdio: 'inherit' });
 
 const size = (await fs.stat(TARBALL)).size;
 console.log(`dist: ${path.relative(ROOT, TARBALL)} (${size} bytes, ${files.length} files)`);

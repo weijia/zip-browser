@@ -141,6 +141,7 @@ async function handleApi(req, res, url) {
       sizeFull: body.sizeFull === true,
       timeoutMs: Number(body.timeoutMs) || undefined,
       maxFiles: Number(body.maxFiles) || undefined,
+      hash: body.hash === true,
     }));
   }
   if (req.method === 'POST' && pathname === '/api/mft/mtimes') {

@@ -388,6 +388,9 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
 /* 目录清单（struct）快捷按钮与「在资源管理器打开」 */
 .dl-add { margin-left: 6px; font-size: 11px; line-height: 1.4; padding: 1px 7px; color: #0f6e56; background: #e1f5ee; border: 1px solid #bfe6d8; border-radius: 99px; cursor: pointer; vertical-align: middle; }
 .dl-add:hover { background: #cdeee2; }
+.dir-size-cell { min-width: 128px; white-space: normal; line-height: 1.45; }
+.dir-size-cell.size-pending { color: var(--text-3); }
+.dir-size-cell.size-known { color: var(--text); }
 .ex-open { margin-left: 6px; font-size: 11px; line-height: 1.4; padding: 1px 7px; color: #5f4b8b; background: #f2eefb; border: 1px solid #ddd3f0; border-radius: 99px; cursor: pointer; vertical-align: middle; }
 .ex-open:hover { background: #e7dffa; }
 .thumb-card .dl-add, .folder-chip .dl-add, .folder-chip .ex-open { position: relative; z-index: 2; }
@@ -431,7 +434,7 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
     padding: 10px; border: 1px solid var(--border); border-radius: 10px;
     background: #fff; box-shadow: 0 10px 30px rgba(15, 23, 42, .18);
     max-height: calc(100vh - var(--menu-top, 56px) - 8px);
-    max-height: calc(100dvh - var(--menu-top, 56px) - 8px); overflow-y: auto;
+    overflow-y: auto;
     overscroll-behavior: contain;
   }
   .top-actions.open { display: flex; }
@@ -516,7 +519,7 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
   #copyRefModal .modal-card,
   #trashModal .modal-card,
   #dirListModal .modal-card {
-    width: 100%; max-width: none; max-height: 92dvh; overflow-y: auto;
+    width: 100%; max-width: none; max-height: 92dvh; max-height: 92vh; overflow-y: auto;
     border-radius: 16px 16px 0 0; border-bottom: 0;
     padding: 16px 14px calc(16px + env(safe-area-inset-bottom));
   }

@@ -32,7 +32,7 @@ function isPosixHost() {
 
 function trashHintText(batch) {
   const text = hostLabels().trashHint;
-  return text ? `${text}，每批最多 ${batch} 项` : `删除会移入 Windows 回收站，可还原；仅限本地固定磁盘，每批最多 ${batch} 项`;
+  return text ? `${text}，每批最多 ${batch} 项` : `删除会移入 Windows 回收站，可还原；仅限本地固定磁盘，每批最多 ${batch} 项；勾选目录也可直接看体积`;
 }
 
 export function initTrash(options) {

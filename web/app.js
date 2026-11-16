@@ -124,12 +124,24 @@ function closeRowMenu() {
   $('rowMenuModal')?.classList.add('hidden');
   rowMenuHost = null;
 }
+function viewportHeight() {
+  // Android WebView 对 dvh 的支持不稳定，个别版会把 100dvh 算成 0；
+  // 菜单高度一律用运行时像素，避免样式里算出 0 高度只剩一条边。
+  const vv = window.visualViewport;
+  return Math.max(0, Math.round(
+    (vv && vv.height) || window.innerHeight || document.documentElement.clientHeight || 0,
+  ));
+}
+
 function openRowMenu(button) {
   const modal = $('rowMenuModal');
   const list = $('rowMenuList');
   const title = $('rowMenuTitle');
   const sub = $('rowMenuSub');
   if (!modal || !list || !title || !sub) return;
+  const card = modal.querySelector('.modal-card');
+  const vh = viewportHeight();
+  if (card) card.style.maxHeight = `${Math.max(240, Math.round(vh * 0.92))}px`;
   const host = button.closest('tr, .thumb-card, .folder-chip');
   if (!host) return;
   rowMenuHost = host;
@@ -183,6 +195,9 @@ function initMobileChrome() {
     if (!topbar) return;
     const bottom = Math.max(0, Math.round(topbar.getBoundingClientRect().bottom));
     topActions.style.setProperty('--menu-top', `${bottom}px`);
+    // 不用 dvh：Android WebView 里 dvh 可能为 0，会把菜单压成一条边。
+    const room = viewportHeight() - bottom - 8;
+    topActions.style.maxHeight = `${Math.max(160, Math.round(room))}px`;
   };
   const setMenu = (open) => {
     if (open) positionMenu();
@@ -218,7 +233,13 @@ function initMobileChrome() {
     if (target.closest('#sidebar')) setSide(false);
   });
   window.addEventListener('resize', () => {
-    if (window.innerWidth > 720) { setMenu(false); setSide(false); closeRowMenu(); }
+    if (window.innerWidth > 720) { setMenu(false); setSide(false); closeRowMenu(); return; }
+    if (topActions?.classList.contains('open')) positionMenu();
+    const rowMenu = $('rowMenuModal');
+    if (rowMenu && !rowMenu.classList.contains('hidden')) {
+      const card = rowMenu.querySelector('.modal-card');
+      if (card) card.style.maxHeight = `${Math.max(240, Math.round(viewportHeight() * 0.92))}px`;
+    }
   });
   window.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') { setMenu(false); setSide(false); closeRowMenu(); }
@@ -263,6 +284,147 @@ function formatTime(ms) {
   const date = new Date(ms);
   const pad = (n) => String(n).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function sizeText(bytes) {
+  return Number(bytes) > 0 ? formatSize(bytes) : '0 B';
+}
+
+// 页面上直接查目录体积：勾选目录行时按需排队，
+// 一次请求批量算多个目录，结果回填到该行「大小」列，不需要打开清单生成面板。
+const dirSizeCache = new Map(); // path -> summary | 'pending' | 'error'
+const dirSizeQueue = new Set();
+let dirSizeTimer = null;
+let dirSizeRunning = false;
+
+function pathKey(value) {
+  return String(value ?? '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+function pickDirSummary(data, path) {
+  const wanted = pathKey(path);
+  const summaries = data.summaries || {};
+  for (const [key, value] of Object.entries(summaries)) {
+    if (pathKey(key) === wanted) return value;
+  }
+  const roots = Array.isArray(data.roots) ? data.roots : [];
+  for (const root of roots) {
+    if (pathKey(root.path) === wanted) return root;
+  }
+  return null;
+}
+
+function dirSizeDetail(info) {
+  const files = Number(info.fileCount) || 0;
+  const partial = Boolean(info.partial || info.incomplete || info.sizePartial);
+  return `${files.toLocaleString('zh-CN')} 个文件 · 逻辑大小 ${sizeText(info.totalSize)} · 占用 ${sizeText(info.totalSizeOnDisk)}${partial ? ' · 部分不可读' : ''}`;
+}
+
+function dirSizeCompact(info) {
+  const files = Number(info.fileCount) || 0;
+  return `${files.toLocaleString('zh-CN')} 个文件 · ${sizeText(info.totalSize)}`;
+}
+
+function updateDirSizeDisplays(path, notifyName) {
+  const value = dirSizeCache.get(path);
+  const elements = Array.from(document.querySelectorAll('[data-size-path]'))
+    .filter((element) => element.dataset.sizePath === path);
+  for (const element of elements) {
+    if (value === 'pending') {
+      element.textContent = '计算中…';
+      element.title = '正在递归统计目录体积';
+      element.classList.add('size-pending');
+    } else if (value === 'error') {
+      element.textContent = '大小读取失败';
+      element.title = '目录体积读取失败，可稍后重试';
+      element.classList.remove('size-pending');
+    } else if (value && typeof value === 'object') {
+      element.textContent = dirSizeCompact(value);
+      element.title = dirSizeDetail(value);
+      element.classList.remove('size-pending');
+      element.classList.add('size-known');
+    }
+  }
+  if (value && typeof value === 'object' && notifyName) {
+    status(`${notifyName}：${dirSizeDetail(value)}`);
+  } else if (value === 'error' && notifyName) {
+    status(`${notifyName}：目录体积读取失败`, true);
+  }
+}
+
+function applyDirSizeCache() {
+  for (const [path, value] of dirSizeCache.entries()) {
+    if (value && typeof value === 'object') updateDirSizeDisplays(path);
+  }
+}
+
+async function flushDirSizeQueue() {
+  if (dirSizeRunning || !dirSizeQueue.size) return;
+  const paths = Array.from(dirSizeQueue).slice(0, 40);
+  for (const path of paths) dirSizeQueue.delete(path);
+  dirSizeRunning = true;
+  try {
+    const data = await api('/api/mft/scan', {
+      method: 'POST',
+      body: JSON.stringify({
+        paths: paths.map((path) => ({ path, recursive: true, sizeFull: true })),
+        recursive: true,
+        sizeFull: true,
+        timeoutMs: 60_000,
+      }),
+    });
+    for (const path of paths) {
+      const summary = pickDirSummary(data, path);
+      if (!summary) {
+        dirSizeCache.set(path, 'error');
+      } else {
+        dirSizeCache.set(path, {
+          fileCount: Number(summary.fileCount) || 0,
+          totalSize: Number(summary.totalSize) || 0,
+          totalSizeOnDisk: Number(summary.totalSizeOnDisk) || 0,
+          partial: Boolean(summary.partial || summary.incomplete || summary.sizePartial),
+        });
+      }
+      updateDirSizeDisplays(path, dirSizeNotify.get(path));
+      dirSizeNotify.delete(path);
+    }
+  } catch (err) {
+    for (const path of paths) {
+      dirSizeCache.set(path, 'error');
+      updateDirSizeDisplays(path, dirSizeNotify.get(path));
+      dirSizeNotify.delete(path);
+    }
+    status(`目录体积读取失败：${err.message || err}`, true);
+  } finally {
+    dirSizeRunning = false;
+    if (dirSizeQueue.size) scheduleDirSizeFlush();
+  }
+}
+
+const dirSizeNotify = new Map(); // path -> name，勾选目录触发时回写状态栏
+
+function scheduleDirSizeFlush() {
+  if (dirSizeTimer) clearTimeout(dirSizeTimer);
+  dirSizeTimer = setTimeout(() => {
+    dirSizeTimer = null;
+    flushDirSizeQueue();
+  }, 160);
+}
+
+function requestDirSize(path, name, notify = false) {
+  if (!path) return;
+  const cached = dirSizeCache.get(path);
+  if (cached && typeof cached === 'object') {
+    updateDirSizeDisplays(path, name);
+    return;
+  }
+  if (cached !== 'pending') {
+    dirSizeCache.set(path, 'pending');
+    dirSizeQueue.add(path);
+  }
+  if (notify) dirSizeNotify.set(path, name || path);
+  updateDirSizeDisplays(path);
+  scheduleDirSizeFlush();
 }
 
 // 加密归档标记：后端列目录时只读头尾探测，encrypted === true 才显示；
@@ -634,7 +796,7 @@ async function renderDir(abs) {
       return `<tr data-action="${action}" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
         ${trashRowStart(item)}
         <td><span class="file-name">${thumb}${esc(item.name)}${hint}${encBadge(item)}${flControls(item)}${dirListControls(item)}${copyControls(item)}${explorerControls(item)}${rowMenuButton(item)}</span></td>
-        <td class="file-size">${item.dir ? '文件夹' : formatSize(item.size)}</td>
+        <td class="file-size${item.dir ? ' dir-size-cell' : ''}"${item.dir ? ` data-size-path="${esc(item.path)}"` : ''}>${item.dir ? '文件夹' : formatSize(item.size)}</td>
         <td class="file-time">${formatTime(item.mtime)}</td>
         ${trashRowEnd(item)}
       </tr>`;
@@ -642,7 +804,9 @@ async function renderDir(abs) {
     body = `<table class="file-table"><thead><tr>${trashHeadStart()}<th>名称</th><th style="width:110px">大小</th><th style="width:150px">修改时间</th>${trashHeadEnd()}</tr></thead>
       <tbody>${rows || '<tr><td colspan="5" class="empty">此目录为空</td></tr>'}</tbody></table>`;
   }
-  stage.innerHTML = `<h2 class="stage-title">${esc(abs)}</h2>${switcher}${trashToolbarHtml()}${body}`;
+  // 当前路径只由顶部面包屑显示；这里不再重复一条完整路径标题。
+  stage.innerHTML = `${switcher}${trashToolbarHtml()}${body}`;
+  applyDirSizeCache();
   const upper = parentOf(abs);
   const dirs = data.items.filter((item) => item.dir);
   const sidebarRoot = LABELS.sidebarRoot || LABELS.root || '此电脑';
@@ -1043,6 +1207,12 @@ document.addEventListener('click', async (event) => {
   } catch (err) {
     showError(err);
   }
+});
+
+document.addEventListener('change', (event) => {
+  const box = event.target.closest?.('.trash-check');
+  if (!box || !box.checked || box.dataset.dir !== 'true') return;
+  requestDirSize(box.dataset.path, box.dataset.name, true);
 });
 
 $('back').addEventListener('click', () => {

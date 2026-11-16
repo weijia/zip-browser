@@ -8,6 +8,7 @@ import {
   sanitizeKey, hostRelativePath, driveOfHostRelative,
   volumeIdOf, volumeKeyFor,
 } from './manifest-export.js';
+import { cleanCrc32 } from './manifest-selection.js';
 
 export const MAX_SEGMENTS = 24;
 export const MAX_PATH_CHARS = 512;
@@ -86,7 +87,7 @@ export function mirrorPathFor(rel, volumeKey) {
 /** 取消选择时写的空片（后端不支持 unlink 时用；读取侧忽略 removed:true）。 */
 export function removedDoc(rel, host, now = Date.now()) {
   return {
-    version: 1,
+    version: 2,
     generator: FILE_LIST_GENERATOR,
     source: String(host || 'pc'),
     dir: rel,
@@ -134,14 +135,20 @@ export function applyCopyRefs(doc, copiesByRel = {}) {
   return doc;
 }
 
-/** 幂等签名：路径/大小/mtime/完整性标记 + 网络副本引用；不变则零写入。 */
+/** 只认完整 SHA-256；扫描超时/失败时文件没有 hash，不能把半成品写进片。 */
+function normalizeHash(value) {
+  const text = String(value ?? '').trim().toLowerCase();
+  return /^sha256:[0-9a-f]{64}$/.test(text) ? text : '';
+}
+
+/** 幂等签名：路径/大小/mtime/hash/CRC + 完整性标记 + 网络副本引用；不变则零写入。 */
 export function fileListSignature(doc) {
   const rows = (doc.files || [])
     .map((file) => {
       const copies = (file.copies || [])
         .map((ref) => `${ref.id}\0${ref.kind}\0${ref.value}\0${ref.label ?? ''}\0${ref.note ?? ''}\0${ref.addedAt ?? ''}`)
         .join('\n');
-      return `${file.path}\0${file.size ?? ''}\0${file.mtime ?? ''}\0${copies}`;
+      return `${file.path}\0${file.size ?? ''}\0${file.mtime ?? ''}\0${file.hash ?? ''}\0${file.crc32 ?? ''}\0${copies}`;
     })
     .join('\n');
   return fnv1a64Hex([
@@ -162,6 +169,7 @@ function normalizeFile(raw, tagsByRel) {
   const rel = hostRelativePath(raw?.path);
   if (!rel) return null;
   const tags = Array.isArray(tagsByRel?.[rel]) ? tagsByRel[rel].filter((t) => typeof t === 'string') : [];
+  const hash = normalizeHash(raw?.hash);
   return {
     path: rel,
     name: raw.name || rel.split('/').pop(),
@@ -170,6 +178,7 @@ function normalizeFile(raw, tagsByRel) {
     mtime: Number(raw.mtime) || 0,
     tags,
     archive: false,
+    ...(hash ? { hash } : {}),
   };
 }
 
@@ -189,7 +198,7 @@ function uniqueSorted(list) {
 
 function baseDoc({ host, volumeId, letter, dir, recursive, now, revision }) {
   return {
-    version: 1,
+    version: 2,
     generator: FILE_LIST_GENERATOR,
     source: host,
     volumeId,
@@ -284,6 +293,8 @@ export function buildFileListDocs({
     const volumeKey = volumeKeyFor(drive || zipRel || '', safeHost, volumes);
     const volumeId = volumeIdOf(drive || zipRel || '', volumes) || volumeKey;
     const group = picked.get(volumeKey) || { volumeId, files: [] };
+    const hash = isZip ? '' : normalizeHash(raw.hash);
+    const crc32 = isZip ? cleanCrc32(raw.crc32) : '';
     group.files.push({
       path: rel,
       name: raw.name || rel.split(/[/#]/).pop(),
@@ -292,6 +303,8 @@ export function buildFileListDocs({
       mtime: Number(raw.mtime) || 0,
       tags: Array.isArray(raw.tags) ? raw.tags : [],
       archive: isZip,
+      ...(hash ? { hash } : {}),
+      ...(crc32 ? { crc32 } : {}),
     });
     picked.set(volumeKey, group);
   }

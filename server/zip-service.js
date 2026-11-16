@@ -58,6 +58,12 @@ export function listZipEntries(id) {
   return { id, path: session.zipPath, encrypted: session.encrypted, entries: session.list };
 }
 
+function crc32Hex(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < 0) return '';
+  return (num >>> 0).toString(16).padStart(8, '0');
+}
+
 function parseEntries(entries) {
   const map = new Map();
   const list = [];
@@ -72,12 +78,20 @@ function parseEntries(entries) {
     if (!entryPath) continue;
     const dir = Boolean(entry.directory) || raw.endsWith('/');
     const size = Number(entry.uncompressedSize || 0);
+    // ZIP 中央目录自带每个条目的 CRC-32；只读这个字段，不解压。AES 加密包可能没有。
+    const crc32 = dir ? '' : crc32Hex(entry.crc32);
     if (dir) {
       if (!map.has(entryPath)) map.set(entryPath, { entry: null, dir: true, size: 0 });
     } else {
-      map.set(entryPath, { entry, dir: false, size });
+      map.set(entryPath, { entry, dir: false, size, crc32 });
     }
-    list.push({ path: entryPath, dir, size, encrypted: Boolean(entry.encrypted) });
+    list.push({
+      path: entryPath,
+      dir,
+      size,
+      encrypted: Boolean(entry.encrypted),
+      ...(crc32 ? { crc32 } : {}),
+    });
   }
   const encrypted = list.some((item) => item.encrypted && !item.dir);
   return { map, list, encrypted };

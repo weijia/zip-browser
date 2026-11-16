@@ -10,6 +10,8 @@
 // 读不到的分支标记 incomplete 且绝不记成 0。
 
 import fs from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { HttpError } from './util.js';
 import { normalizeLocalPath, isPathAllowed } from './fs-service.js';
@@ -18,8 +20,77 @@ import { detectTags } from './tag-rules.js';
 export const MAX_SCAN_DEPTH = 24;
 export const MAX_FILES_PER_DIR = 20000;
 const CONCURRENCY = 8;
+const HASH_CONCURRENCY = 4;
+const HASH_CACHE_MAX = 100_000;
 const DEFAULT_TIMEOUT_MS = 20_000;
 const SKIP_NAMES = new Set(['.dir-struct-id']);
+
+// 只缓存成功计算出的完整内容 hash；key 带 size/mtime，文件一变就失效。
+// 这是进程内缓存，不落盘；远端 file-list 里已经有最终 hash，不依赖它持久化。
+const hashCache = new Map();
+
+function hashCacheKey(abs, size, mtime) {
+  return `${String(abs).toLowerCase()}\0${Number(size) || 0}\0${Number(mtime) || 0}`;
+}
+
+function recallHash(key) {
+  const value = hashCache.get(key);
+  if (value === undefined) return '';
+  hashCache.delete(key);
+  hashCache.set(key, value);
+  return value;
+}
+
+function rememberHash(key, value) {
+  if (hashCache.size >= HASH_CACHE_MAX) {
+    const oldest = hashCache.keys().next().value;
+    if (oldest !== undefined) hashCache.delete(oldest);
+  }
+  hashCache.set(key, value);
+}
+
+/** 流式 SHA-256，避免把大文件整体读进内存。 */
+function sha256File(abs) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash('sha256');
+    const stream = createReadStream(abs);
+    stream.on('error', reject);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('end', () => resolve(`sha256:${hash.digest('hex')}`));
+  });
+}
+
+/** 固定并发上限，避免 hash 把磁盘队列打满。 */
+function createLimiter(limit) {
+  let active = 0;
+  const queue = [];
+  const pump = () => {
+    while (active < limit && queue.length) {
+      const job = queue.shift();
+      active += 1;
+      Promise.resolve()
+        .then(job.fn)
+        .then(job.resolve, job.reject)
+        .finally(() => {
+          active -= 1;
+          pump();
+        });
+    }
+  };
+  return (fn) => new Promise((resolve, reject) => {
+    queue.push({ fn, resolve, reject });
+    pump();
+  });
+}
+
+async function hashFile(abs, stat) {
+  const key = hashCacheKey(abs, stat?.size, stat?.mtime);
+  const cached = recallHash(key);
+  if (cached) return cached;
+  const value = await sha256File(abs);
+  rememberHash(key, value);
+  return value;
+}
 
 function assertAllowed(abs) {
   if (!isPathAllowed(abs)) {
@@ -97,10 +168,29 @@ async function scanDir(abs, depth, opts, visited) {
       else if (dirent.isFile()) files.push({ name: dirent.name, full });
     }
     let partial = false;
-    const results = await mapLimit(files, CONCURRENCY, async (file) => {
+    const results = await mapLimit(files, opts.hash ? 2 : CONCURRENCY, async (file) => {
       if (opts.expired()) return null;
       try {
-        return { ...file, stat: await statPair(file.full) };
+        const stat = await statPair(file.full);
+        const row = {
+          path: file.full,
+          name: file.name,
+          size: stat.size,
+          sizeOnDisk: stat.sizeOnDisk,
+          mtime: stat.mtime,
+        };
+        if (opts.hash) {
+          if (opts.expired()) {
+            row.hashError = 'scan timeout';
+          } else {
+            try {
+              row.hash = await opts.hashLimit(() => hashFile(file.full, stat));
+            } catch (err) {
+              row.hashError = String(err?.message || err || 'hash failed').slice(0, 160);
+            }
+          }
+        }
+        return { ...file, stat, row };
       } catch {
         return null;
       }
@@ -108,19 +198,16 @@ async function scanDir(abs, depth, opts, visited) {
     let fileCount = 0;
     let totalSize = 0;
     let totalSizeOnDisk = 0;
+    let hashFailed = false;
     for (const result of results) {
       if (!result) { partial = true; continue; }
-      node.files.push({
-        path: result.full,
-        name: result.name,
-        size: result.stat.size,
-        sizeOnDisk: result.stat.sizeOnDisk,
-        mtime: result.stat.mtime,
-      });
+      node.files.push(result.row);
+      if (result.row.hashError) hashFailed = true;
       fileCount += 1;
-      totalSize += result.stat.size;
-      totalSizeOnDisk += result.stat.sizeOnDisk;
+      totalSize += result.row.size;
+      totalSizeOnDisk += result.row.sizeOnDisk;
     }
+    node.hashPartial = hashFailed;
     if (opts.descend) {
       const subs = await mapLimit(dirs, CONCURRENCY, (dir) => scanDir(dir.full, depth + 1, opts, visited));
       for (const sub of subs) {
@@ -130,6 +217,7 @@ async function scanDir(abs, depth, opts, visited) {
         totalSizeOnDisk += sub.summary.totalSizeOnDisk;
         if (sub.incomplete) { node.incomplete = true; partial = true; }
         if (sub.summary.partial) partial = true;
+        if (sub.hashPartial) node.hashPartial = true;
       }
     }
     node.summary = { fileCount, totalSize, totalSizeOnDisk, partial: partial || node.incomplete };
@@ -185,14 +273,17 @@ function collectFiles(node, out, depth = 0, emitDepth = Infinity) {
  */
 export async function scanPaths(paths, {
   recursive = true, sizeFull = false, timeoutMs = DEFAULT_TIMEOUT_MS,
-  maxFiles = MAX_FILES_PER_DIR,
+  maxFiles = MAX_FILES_PER_DIR, hash = false,
 } = {}) {
   const list = Array.isArray(paths) ? paths.slice(0, 100) : [];
   const deadline = Date.now() + Math.max(1000, Math.min(timeoutMs, 120_000));
+  const hashLimit = hash ? createLimiter(HASH_CONCURRENCY) : null;
   const baseOpts = {
     expired: () => Date.now() > deadline,
     maxDepth: MAX_SCAN_DEPTH,
     descend: recursive,
+    hash: hash === true,
+    hashLimit,
   };
   const roots = [];
   const summaries = {};
@@ -227,6 +318,7 @@ export async function scanPaths(paths, {
     const truncated = unique.length > maxFiles;
     files[abs] = truncated ? unique.slice(0, maxFiles) : unique;
     status[abs] = { incomplete: node.incomplete, truncated, total: unique.length };
+    if (hash) status[abs].hashPartial = node.hashPartial === true;
   }
   return { roots, summaries, files, status };
 }
