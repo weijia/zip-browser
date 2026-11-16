@@ -21,7 +21,18 @@ import { copyRefsByRel, copyRefTotals } from './manifest-selection.js';
 
 // 与 dir-struct-gen 共用同步组命名空间，两个生成器写同一个远端数据组。
 const APP_ID = 'dir-struct-gen';
-const TOKEN = window.__LOCAL_TOKEN__;
+
+function apiUrlOf(url) {
+  return typeof window !== 'undefined' && window.ZB ? window.ZB.url(url) : String(url || '');
+}
+
+function authHeaders() {
+  if (typeof window !== 'undefined' && window.ZB_HOST?.auth === 'bearer') {
+    const token = localStorage.getItem('zb-token');
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+  return { 'X-Local-Token': window.__LOCAL_TOKEN__ };
+}
 const REV_KEY = 'zip-browser:manifest-revision';
 const KNOWN_KEY = 'zip-browser:manifest-volumes';
 const LAST_KEY = 'zip-browser:manifest-last';
@@ -311,7 +322,10 @@ async function writeExport(fp, composed, host, now) {
 async function commonContext() {
   const fp = appFs?.promises || appFs;
   if (!fp || prefix === null) throw new Error(blockReason || '同步组未就绪');
-  const response = await fetch('/api/hostinfo', { headers: { 'X-Local-Token': TOKEN } });
+  const response = await fetch(apiUrlOf('/api/hostinfo'), {
+    headers: authHeaders(),
+    credentials: typeof window !== 'undefined' && window.ZB_HOST?.auth === 'bearer' ? 'same-origin' : undefined,
+  });
   if (!response.ok) throw new Error(`读取本机信息失败：HTTP ${response.status}`);
   return { fp, hostInfo: await response.json() };
 }

@@ -22,6 +22,19 @@ function $ (id) {
   return document.getElementById(id);
 }
 
+function hostLabels() {
+  return (typeof window !== 'undefined' && window.ZB_HOST?.labels) || {};
+}
+
+function isPosixHost() {
+  return typeof window !== 'undefined' && Boolean(window.ZB?.posix);
+}
+
+function trashHintText(batch) {
+  const text = hostLabels().trashHint;
+  return text ? `${text}，每批最多 ${batch} 项` : `删除会移入 Windows 回收站，可还原；仅限本地固定磁盘，每批最多 ${batch} 项`;
+}
+
 export function initTrash(options) {
   deps = options;
   document.addEventListener('keydown', (event) => {
@@ -54,7 +67,7 @@ export function trashToolbarHtml() {
   return `<div class="trash-toolbar">
     <label class="trash-all-label"><input type="checkbox" id="trashAll" data-action="trash-all"> 全选</label>
     <button id="trashSelectedBtn" type="button" class="trash-selected-btn" data-action="trash-selected" disabled>删除选中（<span id="trashCount">0</span>）</button>
-    <span class="trash-hint">删除会移入 Windows 回收站，可还原；仅限本地固定磁盘，每批最多 ${TRASH_BATCH} 项</span>
+    <span class="trash-hint">${esc(trashHintText(TRASH_BATCH))}</span>
   </div>`;
 }
 
@@ -113,7 +126,7 @@ async function executeTrash() {
   updateToolbar();
   const results = [];
   try {
-    if (!dir) throw new Error('当前不在磁盘目录，无法删除');
+    if (!dir) throw new Error(isPosixHost() ? '当前不在目录内，无法删除' : '当前不在磁盘目录，无法删除');
     for (let offset = 0; offset < items.length; offset += TRASH_BATCH) {
       const chunk = items.slice(offset, offset + TRASH_BATCH);
       // eslint-disable-next-line no-await-in-loop -- 分批必须串行，且每批失败即停
@@ -127,7 +140,9 @@ async function executeTrash() {
     const ok = results.filter((row) => row.ok).length;
     const failed = results.filter((row) => !row.ok);
     if (ok) {
-      deps.status(`已把 ${ok} 项移入回收站${failed.length ? `，${failed.length} 项失败：${failed[0].error || '未知原因'}` : '，可在 Windows 回收站还原'}`,
+      deps.status(isPosixHost()
+        ? `已删除 ${ok} 项${failed.length ? `，${failed.length} 项失败：${failed[0].error || '未知原因'}` : '（删除由服务端按存储能力执行）'}`
+        : `已把 ${ok} 项移入回收站${failed.length ? `，${failed.length} 项失败：${failed[0].error || '未知原因'}` : '，可在 Windows 回收站还原'}`,
         failed.length > 0);
     } else {
       deps.status(`删除未成功：${failed[0]?.error || '回收站没有接受这些项目'}`, true);

@@ -1,7 +1,7 @@
-// 密码库（KeePass 风格）：状态管理 + zen-fs-config 持久化 + 服务端 /api/vault/* 调用 + 弹窗 UI。
-// 加密 zip 的密码从这里挑；解锁后自动把用过的密码按 zip 路径指纹存进库。
-// 注意：KDBX 加解密在服务端完成（kdbxweb+hash-wasm），主密码只在「解锁」时一次性发给本机服务。
-
+// 密码库（KeePass 格式）。
+// server 模式：KDBX 由本机 Node 服务解密（/api/vault/*），主密码只发给本机服务；
+// browser 模式：kdbxweb + hash-wasm 在浏览器内加解密，库文件只存本地/配置同步组。
+const BROWSER_MODE = typeof window !== 'undefined' && window.ZB_HOST?.vaultMode === 'browser';
 const TOKEN = window.__LOCAL_TOKEN__;
 const APP_ID = 'zip-browser';
 const VAULT_KEY = '/vault';
@@ -12,12 +12,25 @@ const DEF_LOCAL = 'zip-browser:defaultpw:v1';
 
 let repo = null;
 let vaultData = null;        // base64 字符串，null 表示还没有库
-let sessionId = null;
+let sessionId = null;        // server 模式的会话
+let db = null;               // browser 模式已解锁的 Kdbx 实例
 let entries = [];
 let autoLockTimer = null;
 let stateCb = null;
 let pickerResolve = null;    // openVaultForPassword 的回调
 let defaultPassword = null;  // 缺省解压密码（明文，本地）
+
+function apiUrlOf(url) {
+  return typeof window !== 'undefined' && window.ZB ? window.ZB.url(url) : String(url || '');
+}
+
+function authHeaders() {
+  if (typeof window !== 'undefined' && window.ZB_HOST?.auth === 'bearer') {
+    const token = localStorage.getItem('zb-token');
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+  return { 'X-Local-Token': TOKEN };
+}
 
 function fpFor(abs) {
   try {
@@ -49,9 +62,13 @@ function persist() {
 }
 
 async function callApi(path, body) {
-  const resp = await fetch(path, {
+  const resp = await fetch(apiUrlOf(path), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Local-Token': TOKEN },
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+    credentials: typeof window !== 'undefined' && window.ZB_HOST?.auth === 'bearer' ? 'same-origin' : undefined,
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await resp.json().catch(() => ({}));
@@ -59,10 +76,119 @@ async function callApi(path, body) {
   return data;
 }
 
+// ---- browser 模式：kdbxweb + hash-wasm（按需加载，standalone 不付这份体积） ----
+
+let kdbxLoading = null;
+function loadScriptOnce(name) {
+  if (!kdbxLoading) kdbxLoading = {};
+  if (!kdbxLoading[name]) {
+    kdbxLoading[name] = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = typeof window !== 'undefined' && window.ZB ? window.ZB.url(`/vendor/${name}`) : `vendor/${name}`;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error(`${name} 加载失败`));
+      document.head.appendChild(script);
+    });
+  }
+  return kdbxLoading[name];
+}
+
+async function ensureKdbx() {
+  if (!window.kdbxweb) await loadScriptOnce('kdbxweb.js');
+  if (!window.hashwasm) await loadScriptOnce('hash-wasm.js').catch(() => {});
+  const lib = window.kdbxweb;
+  if (!lib || typeof lib.Kdbx !== 'function') throw new Error('kdbxweb 未加载，无法读写密码库');
+  return lib;
+}
+
+let argon2Ready = false;
+function setupArgon2(lib) {
+  if (argon2Ready) return;
+  const hw = window.hashwasm;
+  if (!hw) return; // KDBX3 不需要 argon2；KDBX4 缺 hash-wasm 会在保存时报错
+  lib.CryptoEngine.setArgon2Impl((password, salt, memory, iterations, length, parallelism, type) => {
+    const fns = { 0: hw.argon2d, 1: hw.argon2i, 2: hw.argon2id };
+    const fn = fns[type] || hw.argon2id;
+    return fn({
+      password: new Uint8Array(password),
+      salt: new Uint8Array(salt),
+      parallelism,
+      iterations,
+      memorySize: memory,
+      hashLength: length,
+      outputType: 'binary',
+    });
+  });
+  argon2Ready = true;
+}
+
+function bytesToBase64(buffer) {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  let binary = '';
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(text) {
+  const binary = atob(text);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes.buffer;
+}
+
+function fieldText(entry, key) {
+  const value = entry.fields.get(key);
+  if (value == null) return '';
+  return typeof value.getText === 'function' ? value.getText() : String(value);
+}
+
+function fieldPassword(entry) {
+  const value = entry.fields.get('Password');
+  if (value == null) return '';
+  return typeof value.getText === 'function' ? value.getText() : String(value);
+}
+
+function entryId(entry) {
+  const uuid = entry.uuid;
+  if (!uuid) return Math.random().toString(36).slice(2);
+  if (typeof uuid === 'string') return uuid;
+  if (typeof uuid.toString === 'function') return uuid.toString();
+  return Math.random().toString(36).slice(2);
+}
+
+function collectEntries() {
+  entries = [];
+  if (!db) return entries;
+  for (const entry of db.groups[0].entries) {
+    entries.push({
+      id: entryId(entry),
+      title: fieldText(entry, 'Title'),
+      username: fieldText(entry, 'UserName'),
+      url: fieldText(entry, 'URL'),
+      ref: entry,
+    });
+  }
+  return entries;
+}
+
+function credentialsFor(lib, master) {
+  // kdbxweb 2.x 的构造函数接受 ProtectedValue；老版本示例里的 Credentials.createPassword 并不存在。
+  return new lib.KdbxCredentials(lib.ProtectedValue.fromString(String(master)));
+}
+
+async function saveDb() {
+  if (!db) throw new Error('密码库未解锁');
+  const buffer = await db.save();
+  vaultData = bytesToBase64(buffer);
+  persist();
+}
+
 function snapshot() {
   return {
     hasVault: !!vaultData,
-    locked: !sessionId,
+    locked: BROWSER_MODE ? !db : !sessionId,
     entries: entries.map((e) => ({ id: e.id, title: e.title, username: e.username, url: e.url })),
   };
 }
@@ -79,7 +205,8 @@ function stopAutoLock() {
   if (autoLockTimer) { clearTimeout(autoLockTimer); autoLockTimer = null; }
 }
 function scheduleLockOnHide() {
-  if (document.visibilityState === 'hidden' && sessionId) {
+  const unlocked = BROWSER_MODE ? db : sessionId;
+  if (document.visibilityState === 'hidden' && unlocked) {
     autoLockTimer = setTimeout(() => lock(), 60 * 1000);
   }
 }
@@ -107,13 +234,25 @@ export async function initVault(onState) {
     } catch { /* 没有就保持 null */ }
   }
   document.addEventListener('visibilitychange', scheduleLockOnHide);
-  window.addEventListener('beforeunload', () => { if (sessionId) lock(); });
+  window.addEventListener('beforeunload', () => {
+    if (BROWSER_MODE ? db : sessionId) lock();
+  });
   notify();
   updateDefPwButton();
   return snapshot();
 }
 
 export async function createVault(master) {
+  if (BROWSER_MODE) {
+    const lib = await ensureKdbx();
+    setupArgon2(lib);
+    db = lib.Kdbx.create(credentialsFor(lib, master), 'zip-browser');
+    entries = [];
+    await saveDb();
+    startAutoLock();
+    notify();
+    return true;
+  }
   const res = await callApi('/api/vault/create', { master });
   vaultData = res.data;
   sessionId = res.sessionId;
@@ -126,6 +265,21 @@ export async function createVault(master) {
 
 export async function unlockVault(master) {
   if (!vaultData) throw new Error('还没有密码库');
+  if (BROWSER_MODE) {
+    const lib = await ensureKdbx();
+    setupArgon2(lib);
+    try {
+      db = await lib.Kdbx.load(base64ToBytes(vaultData), credentialsFor(lib, master));
+    } catch {
+      db = null;
+      entries = [];
+      throw new Error('主密码不正确，或库文件已损坏');
+    }
+    collectEntries();
+    startAutoLock();
+    notify();
+    return true;
+  }
   const res = await callApi('/api/vault/unlock', { data: vaultData, master });
   sessionId = res.sessionId;
   entries = res.entries || [];
@@ -135,16 +289,23 @@ export async function unlockVault(master) {
 }
 
 export function lock() {
-  if (sessionId) {
+  if (!BROWSER_MODE && sessionId) {
     callApi('/api/vault/lock', { sessionId }).catch(() => {});
   }
   sessionId = null;
+  db = null;
   entries = [];
   stopAutoLock();
   notify();
 }
 
 export async function refreshEntries() {
+  if (BROWSER_MODE) {
+    if (!db) return entries;
+    collectEntries();
+    notify();
+    return entries;
+  }
   if (!sessionId) return entries;
   const res = await callApi('/api/vault/entries', { sessionId });
   entries = res.entries || [];
@@ -153,6 +314,22 @@ export async function refreshEntries() {
 }
 
 export async function saveZipPassword(abs, name, password) {
+  if (BROWSER_MODE) {
+    if (!db) return false;
+    const lib = await ensureKdbx();
+    setupArgon2(lib);
+    const fingerprint = fpFor(abs);
+    const hit = db.groups[0].entries.find((entry) => fieldText(entry, 'UserName') === fingerprint);
+    const entry = hit || db.createEntry(db.groups[0]);
+    entry.fields.set('Title', name);
+    entry.fields.set('UserName', fingerprint);
+    entry.fields.set('URL', abs);
+    entry.fields.set('Password', lib.ProtectedValue.fromString(password));
+    await saveDb();
+    collectEntries();
+    notify();
+    return true;
+  }
   if (!sessionId) return false;
   const res = await callApi('/api/vault/save', {
     sessionId,
@@ -165,15 +342,31 @@ export async function saveZipPassword(abs, name, password) {
 }
 
 export function findPasswordByPath(abs) {
-  if (!sessionId) return null;
+  const unlocked = BROWSER_MODE ? db : sessionId;
+  if (!unlocked) return null;
   const fp = fpFor(abs);
   const hit = entries.find((e) => e.username === fp);
   return hit ? hit.id : null;
 }
 
 export async function getPassword(entryId) {
+  if (BROWSER_MODE) {
+    const hit = entries.find((entry) => entry.id === entryId);
+    if (!hit || !hit.ref) throw new Error('条目不存在');
+    return fieldPassword(hit.ref);
+  }
   const res = await callApi('/api/vault/password', { sessionId, entryId });
   return res.password;
+}
+
+async function removeEntry(id) {
+  if (!BROWSER_MODE || !db) return;
+  const index = db.groups[0].entries.findIndex((entry) => entryId(entry) === id);
+  if (index < 0) return;
+  db.groups[0].entries.splice(index, 1);
+  await saveDb();
+  collectEntries();
+  notify();
 }
 
 // 打开密码库并让用户挑一个密码，挑选后调用 resolve(password)。
@@ -187,9 +380,9 @@ export function openVault() {
   showVaultModal(false);
 }
 
-// 供缩略图封面等场景读取当前密码库会话 id（未解锁返回 null）。
+// 供缩略图封面等场景读取当前密码库会话 id（未解锁或浏览器模式返回 null）。
 export function getVaultSessionId() {
-  return sessionId;
+  return BROWSER_MODE ? null : sessionId;
 }
 
 // ---- 缺省解压密码（独立于密码库） ----
@@ -402,10 +595,14 @@ function renderVault() {
   bodyEl.querySelectorAll('.vault-del').forEach((btn) => {
     btn.addEventListener('click', async () => {
       try {
-        const res = await callApi('/api/vault/delete', { sessionId, entryId: btn.dataset.id });
-        vaultData = res.data;
-        persist();
-        await refreshEntries();
+        if (BROWSER_MODE) {
+          await removeEntry(btn.dataset.id);
+        } else {
+          const res = await callApi('/api/vault/delete', { sessionId, entryId: btn.dataset.id });
+          vaultData = res.data;
+          persist();
+          await refreshEntries();
+        }
       } catch (e) { /* 忽略 */ }
     });
   });

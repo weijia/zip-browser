@@ -270,7 +270,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && pathname.startsWith('/vendor/')) {
       return await serveVendor(res, pathname);
     }
-    if (req.method === 'GET' && ['/app.js', '/vault.js', '/style.css', '/location.js', '/update-checker.js', '/annotations-store.js', '/annotations-ui.js', '/image-viewer.js', '/manifest-export.js', '/manifest-sync.js', '/manifest-selection.js', '/manifest-payload.js', '/manifest-builder.js', '/file-list-export.js', '/zip-writer.js', '/trash-ui.js'].includes(pathname)) {
+    if (req.method === 'GET' && ['/host.js', '/app.js', '/vault.js', '/style.css', '/location.js', '/update-checker.js', '/annotations-store.js', '/annotations-ui.js', '/image-viewer.js', '/manifest-export.js', '/manifest-sync.js', '/manifest-selection.js', '/manifest-payload.js', '/manifest-builder.js', '/file-list-export.js', '/zip-writer.js', '/trash-ui.js'].includes(pathname)) {
       return await serveStatic(res, pathname);
     }
     if (pathname.startsWith('/api/')) return await handleApi(req, res, url);

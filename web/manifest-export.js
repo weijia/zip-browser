@@ -25,14 +25,25 @@ export const FILE_PREFIX = 'zip-browser';
 const RESERVED_TAGS = new Set([BOOKMARK_TAG, ZIP_BOOKMARK_TAG]);
 const LOCAL_BACKEND_TYPES = new Set(['InMemory', 'IndexedDB']);
 
+function isPosixHost() {
+  return typeof window !== 'undefined' && Boolean(window.ZB?.posix);
+}
+
 /** RemoteStorage / Gitee 等文件名安全键，与 dir-struct-gen sanitizeKey 同规则。 */
 export function sanitizeKey(value) {
   return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '_');
 }
 
-/** 本机绝对路径 → host-relative（盘符 + / 分隔，保留原始大小写）。 */
+/** 本机绝对路径 → host-relative；POSIX 宿主用首段存储名当卷标识。 */
 export function hostRelativePath(abs) {
   if (typeof abs !== 'string' || !abs.trim()) return null;
+  if (isPosixHost()) {
+    const parts = abs.trim().replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '').split('/').filter(Boolean);
+    if (!parts.length) return null;
+    const drive = parts[0].toUpperCase();
+    const tail = parts.slice(1).join('/');
+    return `${drive}:${tail ? `/${tail}` : ''}`;
+  }
   const text = abs.trim().replace(/\//g, '\\').replace(/\\+/g, '\\');
   const match = /^([A-Za-z]):\\?(.*)$/.exec(text);
   if (!match) return null;
@@ -40,8 +51,12 @@ export function hostRelativePath(abs) {
   return `${match[1].toUpperCase()}:${tail ? `/${tail}` : ''}`;
 }
 
-/** host-relative 路径 → 盘符（如 'C:'）；伪路径返回 null。 */
+/** host-relative 路径 → 卷标识（Windows 盘符 / POSIX 存储名）。 */
 export function driveOfHostRelative(rel) {
+  if (isPosixHost()) {
+    const match = /^([^:/]+):/.exec(String(rel || ''));
+    return match ? `${match[1].toUpperCase()}:` : null;
+  }
   const match = /^([A-Za-z]):/.exec(String(rel || ''));
   return match ? `${match[1].toUpperCase()}:` : null;
 }
@@ -55,8 +70,14 @@ export function normalizeEntry(entry) {
     .join('/');
 }
 
-/** 卷稳定身份：优先 /api/hostinfo 读到的 volumeId，否则回退 <host>::<盘符>。 */
+/** 卷稳定身份：优先 /api/hostinfo 读到的 volumeId，否则回退 <host>::<卷标识>。 */
 export function volumeIdOf(drive, volumes = {}) {
+  if (isPosixHost()) {
+    const name = String(drive || '').replace(/:$/, '');
+    const upper = name.toUpperCase();
+    const value = volumes?.[upper] ?? volumes?.[name] ?? volumes?.[drive];
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+  }
   const letter = String(drive || '').charAt(0).toUpperCase();
   const value = volumes?.[letter] ?? volumes?.[drive];
   return typeof value === 'string' && value.trim() ? value.trim() : null;

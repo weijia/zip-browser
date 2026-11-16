@@ -20,8 +20,82 @@ import {
   trashCardControls, trashChipControls, handleTrashAction,
 } from './trash-ui.js';
 
+const HOST = (typeof window !== 'undefined' && window.ZB_HOST) || {};
+const BASE = String(HOST.basePath || '').replace(/\/+$/, '');
+const AUTH_MODE = HOST.auth === 'bearer';
+const POSIX = HOST.pathStyle === 'posix';
+const FEATURES = HOST.features || {};
+const LABELS = HOST.labels || {};
 const TOKEN = window.__LOCAL_TOKEN__;
 const $ = (id) => document.getElementById(id);
+
+function apiUrl(url) {
+  const value = String(url || '');
+  if (/^https?:/i.test(value)) return value;
+  if (value.startsWith('/') && BASE && !value.startsWith(`${BASE}/`)) return `${BASE}${value}`;
+  return value;
+}
+
+function withBase(url) {
+  return apiUrl(url);
+}
+
+function authHeaders() {
+  if (!AUTH_MODE) return { 'X-Local-Token': TOKEN };
+  const token = localStorage.getItem('zb-token');
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function loginRequired(err) {
+  return err && (err.name === 'AuthRequired' || err.status === 401);
+}
+
+function showLogin(message) {
+  const modal = $('loginModal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  const error = $('loginError');
+  if (error) {
+    error.textContent = message || '';
+    error.style.display = message ? '' : 'none';
+  }
+  setTimeout(() => $('loginUser')?.focus(), 30);
+}
+
+function hideLogin() {
+  $('loginModal')?.classList.add('hidden');
+}
+
+async function submitLogin() {
+  const username = ($('loginUser')?.value || '').trim();
+  const password = $('loginPass')?.value || '';
+  const error = $('loginError');
+  if (!username || !password) {
+    if (error) error.textContent = '请填写用户名和密码';
+    return;
+  }
+  try {
+    const response = await fetch(apiUrl('/api/login'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if (data.token) localStorage.setItem('zb-token', data.token);
+    const user = (data.user && (data.user.username || data.user.name)) || username;
+    localStorage.setItem('zb-user', user);
+    hideLogin();
+    location.reload();
+  } catch (err) {
+    if (error) {
+      error.textContent = `登录失败：${err.message}`;
+      error.style.display = '';
+    }
+  }
+}
+
 const stage = $('stage');
 const sidebar = $('sidebar');
 const crumbs = $('crumbs');
@@ -150,12 +224,12 @@ function isImageName(name) {
 }
 
 function localThumbUrlFront(abs) {
-  return localToUrl(abs).replace(/^\/fs\//, '/thumb/fs/');
+  return localToUrl(abs).replace(`${BASE}/fs`, `${BASE}/thumb/fs`);
 }
 
 // zip 封面缩略图：zip 内只有一个文件时用它的缩略图；加密时带 vsid/defpw 让服务端优先用记录的密码或缺省密码自动解密。
 function fsCoverUrlFront(abs, vsid, defpw) {
-  const base = localToUrl(abs).replace(/^\/fs\//, '/thumb/zipcover/fs/');
+  const base = localToUrl(abs).replace(`${BASE}/fs`, `${BASE}/thumb/zipcover/fs`);
   let url = vsid ? `${base}?vsid=${encodeURIComponent(vsid)}` : base;
   if (defpw) url += `${vsid ? '&' : '?'}defpw=${encodeURIComponent(defpw)}`;
   return url;
@@ -221,6 +295,7 @@ function dirListControls(item) {
 
 // 「打开位置」：调起 Windows 资源管理器；目录直接打开，文件在所在文件夹中选中。
 function explorerControls(item) {
+  if (!FEATURES.explorer) return '';
   return `<button type="button" class="ex-open" data-action="ex-open"
     data-path="${esc(item.path)}" data-name="${esc(item.name)}"
     title="在 Windows 资源管理器中打开${item.dir ? '该目录' : '该文件所在位置并选中它'}">打开位置</button>`;
@@ -240,11 +315,23 @@ function status(text, bad = false) {
 }
 
 async function api(url, options = {}) {
-  const headers = { 'X-Local-Token': TOKEN, ...(options.headers || {}) };
+  const headers = { ...authHeaders(), ...(options.headers || {}) };
   if (options.body) headers['Content-Type'] = 'application/json';
-  const response = await fetch(url, { ...options, headers });
+  const response = await fetch(apiUrl(url), {
+    ...options,
+    headers,
+    credentials: AUTH_MODE ? 'same-origin' : undefined,
+  });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(data.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    if (response.status === 401 && AUTH_MODE) {
+      error.name = 'AuthRequired';
+      showLogin(data.error === 'guest disabled' ? '该站点禁止游客访问，请登录' : '登录状态已失效，请重新登录');
+    }
+    throw error;
+  }
   return data;
 }
 
@@ -257,7 +344,7 @@ function syncLocation(push) {
   const hash = encodeLocation({
     t: compactTarget(state.target),
     view: viewMode,
-    enc: $('encoding').value,
+    enc: FEATURES.encoding ? $('encoding')?.value : undefined,
   });
   const payload = {
     index: state.index,
@@ -287,6 +374,7 @@ function navigate(target, push = true) {
 
 function applyEncoding(value) {
   const select = $('encoding');
+  if (!select || !FEATURES.encoding) return;
   if (typeof value === 'string' && Array.from(select.options).some((option) => option.value === value)) {
     select.value = value;
   }
@@ -294,7 +382,11 @@ function applyEncoding(value) {
 
 function absFromFsUrl(pathname) {
   try {
-    const pieces = pathname.replace(/^\/fs\//, '').split('/').filter(Boolean).map(decodeURIComponent);
+    const stripped = BASE && pathname.startsWith(`${BASE}/`) ? pathname.slice(BASE.length) : pathname;
+    if (!stripped.startsWith('/fs/')) return null;
+    const pieces = stripped.replace(/^\/fs\//, '').split('/').filter(Boolean).map(decodeURIComponent);
+    if (!pieces.length) return null;
+    if (POSIX) return `/${pieces.join('/')}`;
     const letter = pieces.shift();
     if (!letter || !/^[A-Za-z]$/.test(letter)) return null;
     return `${letter}:\\${pieces.join('\\')}`;
@@ -363,10 +455,16 @@ function showError(err) {
 }
 
 function localToUrl(abs) {
-  const match = /^([A-Za-z]):\\(.*)$/.exec(abs);
+  const value = String(abs || '');
+  if (POSIX) {
+    if (!value || value === '/') return `${BASE}/fs/`;
+    const parts = value.replace(/^\/+/, '').split('/').filter(Boolean).map(encodeURIComponent);
+    return `${BASE}/fs/${parts.join('/')}`;
+  }
+  const match = /^([A-Za-z]):\\(.*)$/.exec(value);
   if (!match) return '#';
   const parts = match[2] ? match[2].split('\\').filter(Boolean).map(encodeURIComponent) : [];
-  return `/fs/${match[1].toUpperCase()}/${parts.join('/')}`;
+  return `${BASE}/fs/${match[1].toUpperCase()}/${parts.join('/')}`;
 }
 
 function zipToUrl(id, entryPath) {
@@ -375,6 +473,16 @@ function zipToUrl(id, entryPath) {
 }
 
 function appendPathCrumbs(parts, abs) {
+  if (POSIX) {
+    const segments = String(abs || '').split('/').filter(Boolean);
+    if (!segments.length) return;
+    let acc = '';
+    for (const segment of segments) {
+      acc = `${acc}/${segment}`;
+      parts.push({ label: segment, target: { kind: 'dir', path: acc } });
+    }
+    return;
+  }
   const match = /^([A-Za-z]):\\(.*)$/.exec(abs || '');
   if (!match) return;
   let acc = `${match[1]}:\\`;
@@ -387,7 +495,8 @@ function appendPathCrumbs(parts, abs) {
 
 function renderCrumbs(target) {
   crumbTargets = [];
-  const parts = [{ label: '此电脑', target: { kind: 'drives' } }];
+  const rootLabel = LABELS.root || '此电脑';
+  const parts = [{ label: rootLabel, target: { kind: 'drives' } }];
 
   if (target.kind === 'dir' || (target.kind === 'preview' && target.scope === 'local')) {
     appendPathCrumbs(parts, target.kind === 'dir' ? target.path : target.dir);
@@ -409,15 +518,25 @@ function renderCrumbs(target) {
       : `<span class="crumb current">${label}</span>`;
     return `${index ? '<span class="crumb-sep">/</span>' : ''}${node}`;
   }).join('');
-  $('mode').textContent = target.kind === 'zip' ? '压缩包内' : (target.kind === 'preview' ? '文件预览' : '本地磁盘');
+  $('mode').textContent = target.kind === 'zip' ? '压缩包内' : (target.kind === 'preview' ? '文件预览' : (LABELS.mode || '本地磁盘'));
   const label = parts[parts.length - 1].label;
-  document.title = label === '此电脑' ? '本地文件浏览器' : `${label} · 本地文件浏览器`;
+  const siteTitle = HOST.siteTitle || '文件浏览器';
+  document.title = label === rootLabel ? siteTitle : `${label} · ${siteTitle}`;
 }
 
 async function renderDrives() {
   const { drives } = await api('/api/drives');
+  const mounts = HOST.drivesMode === 'mounts';
   const cards = drives.map((drive) => {
     const used = drive.total ? Math.round(((drive.total - drive.free) / drive.total) * 100) : 0;
+    if (mounts) {
+      const label = drive.label || drive.path || '存储';
+      return `<div class="drive-card" data-action="drive" data-path="${esc(drive.path)}" data-name="${esc(label)}">
+        <div class="drive-head"><span class="drive-letter"><span class="icon icon-dir"></span></span><span class="drive-name">${esc(label)}</span></div>
+        <div class="drive-bar"><div style="width:${used}%"></div></div>
+        <div class="drive-meta">${drive.total ? `${formatSize(drive.free)} 可用 / ${formatSize(drive.total)}` : '容量未知'} · ${esc(drive.kind || '存储')}<br><code>${esc(drive.path || '')}</code></div>
+      </div>`;
+    }
     const kindClass = drive.kind === '可移动' ? ' removable' : (drive.kind === '网络映射' ? ' network' : '');
     const label = drive.label || drive.kind;
     return `<div class="drive-card" data-action="drive" data-path="${esc(drive.path)}" data-name="${esc(label)}">
@@ -426,15 +545,27 @@ async function renderDrives() {
       <div class="drive-meta">${drive.total ? `${formatSize(drive.free)} 可用 / ${formatSize(drive.total)}` : '容量未知'} · ${esc(drive.kind)}</div>
     </div>`;
   }).join('');
-  stage.innerHTML = `<h2 class="stage-title">此电脑 · 磁盘（${drives.length}）</h2>
-    <div class="drive-grid">${cards || '<div class="empty">没有检测到可用磁盘</div>'}</div>
-    <p class="stage-hint">点击盘符进入目录；遇到 zip / 7z / rar / tar.gz 等压缩包可直接点开，加密压缩包会提示输入密码（可自动用缺省密码或密码库记录尝试）。进入目录后可用行内「删除」或勾选批量删除，把文件/文件夹移入 Windows 回收站（可还原）。</p>`;
-  sidebar.innerHTML = `<div class="side-title">此电脑</div>${drives.map((drive) =>
-    `<div class="side-item" data-action="drive" data-path="${esc(drive.path)}"><span class="icon icon-dir"></span>${drive.letter}: ${esc(drive.label || drive.kind)}</div>`
-  ).join('')}`;
+  const title = LABELS.drivesTitle || '此电脑 · 磁盘';
+  const unit = LABELS.drivesUnit || '磁盘';
+  const empty = LABELS.drivesEmpty || '没有检测到可用磁盘';
+  const hint = LABELS.drivesHint || '';
+  stage.innerHTML = `<h2 class="stage-title">${esc(title)}（${drives.length}）</h2>
+    <div class="drive-grid">${cards || `<div class="empty">${esc(empty)}</div>`}</div>
+    ${hint ? `<p class="stage-hint">${esc(hint)}</p>` : ''}`;
+  const sidebarRoot = LABELS.sidebarRoot || LABELS.root || '此电脑';
+  sidebar.innerHTML = `<div class="side-title">${esc(sidebarRoot)}</div>${drives.map((drive) => {
+    const label = mounts ? (drive.label || drive.path || '存储') : `${drive.letter}: ${drive.label || drive.kind}`;
+    return `<div class="side-item" data-action="drive" data-path="${esc(drive.path)}"><span class="icon icon-dir"></span>${esc(label)}</div>`;
+  }).join('')}`;
 }
 
 function parentOf(abs) {
+  if (POSIX) {
+    const segments = String(abs || '').split('/').filter(Boolean);
+    if (!segments.length) return null;
+    segments.pop();
+    return segments.length ? `/${segments.join('/')}` : null;
+  }
   const match = /^([A-Za-z]):\\(.*)$/.exec(abs);
   if (!match) return null;
   const segments = match[2].split('\\').filter(Boolean);
@@ -506,8 +637,9 @@ async function renderDir(abs) {
   stage.innerHTML = `<h2 class="stage-title">${esc(abs)}</h2>${switcher}${trashToolbarHtml()}${body}`;
   const upper = parentOf(abs);
   const dirs = data.items.filter((item) => item.dir);
+  const sidebarRoot = LABELS.sidebarRoot || LABELS.root || '此电脑';
   sidebar.innerHTML = `<div class="side-title">当前目录</div>
-    ${upper ? `<div class="side-item" data-action="dir" data-path="${esc(upper)}">↰ 上一级</div>` : '<div class="side-item" data-action="crumb" data-index="0">↰ 此电脑</div>'}
+    ${upper ? `<div class="side-item" data-action="dir" data-path="${esc(upper)}">↰ 上一级</div>` : `<div class="side-item" data-action="crumb" data-index="0">↰ ${esc(sidebarRoot)}</div>`}
     ${dirs.map((item) => `<div class="side-item" data-action="dir" data-path="${esc(item.path)}"><span class="icon icon-dir"></span>${esc(item.name)}</div>`).join('')}
     ${dirs.length ? '' : '<div class="side-empty">没有子文件夹</div>'}`;
 }
@@ -549,10 +681,10 @@ function viewerHtml(url, target) {
     <div class="viewer-bar">
       <span class="viewer-url" id="viewerUrl">${esc(url)}</span>
       ${zipSwitch}
-      <button type="button" data-action="viewer-new" data-url="${esc(url)}">新窗口打开</button>
+      <button type="button" data-action="viewer-new" data-url="${esc(withBase(url))}">新窗口打开</button>
       <button type="button" data-action="viewer-home">返回入口</button>
     </div>
-    <iframe id="frame" src="${esc(url)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+    <iframe id="frame" src="${esc(withBase(url))}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
   </div>`;
 }
 
@@ -567,7 +699,8 @@ function syncFrameLocation(href) {
     return;
   }
   if (parsed.origin !== location.origin) return;
-  const path = `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  const basePath = BASE && parsed.pathname.startsWith(`${BASE}/`) ? parsed.pathname.slice(BASE.length) : parsed.pathname;
+  const path = `${basePath}${parsed.search}${parsed.hash}`;
   if (target.kind === 'zip') {
     if (!path.startsWith(`/zip/${target.id}/`) || target.current === path) return;
     target.current = path;
@@ -576,7 +709,7 @@ function syncFrameLocation(href) {
       button.classList.toggle('primary', (button.dataset.view === 'thumbs') === thumbs);
     });
   } else {
-    if (!path.startsWith('/fs/') || target.url === path) return;
+    if (!path.startsWith('/fs/') || target.url === path || target.url === withBase(path)) return;
     const abs = absFromFsUrl(parsed.pathname);
     target.url = path;
     if (abs) {
@@ -641,8 +774,9 @@ async function render(target) {
 
 async function downloadFile(abs, name) {
   status(`正在下载 ${name}…`);
-  const response = await fetch(`/api/download?path=${encodeURIComponent(abs)}`, {
-    headers: { 'X-Local-Token': TOKEN },
+  const response = await fetch(apiUrl(`/api/download?path=${encodeURIComponent(abs)}`), {
+    headers: authHeaders(),
+    credentials: AUTH_MODE ? 'same-origin' : undefined,
   });
   if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `HTTP ${response.status}`);
   const blob = await response.blob();
@@ -759,10 +893,10 @@ async function attemptDefaultThenAsk(id, name, abs) {
 
 async function openZipFile(abs, name, dir) {
   status(`正在读取 ${name}…`);
-  const encoding = $('encoding').value;
+  const encoding = FEATURES.encoding ? $('encoding')?.value : undefined;
   const info = await api('/api/zip/open', {
     method: 'POST',
-    body: JSON.stringify({ path: abs, encoding: encoding || undefined }),
+    body: JSON.stringify({ path: abs, ...(encoding ? { encoding } : {}) }),
   });
   if (info.needsPassword) {
     const ok = await attemptDefaultThenAsk(info.id, name, abs);
@@ -788,10 +922,10 @@ async function openZipBookmark({ zipPath, entry, label }) {
   status(`正在打开书签 ${label}…`);
   const name = winBasename(zipPath);
   const dir = winDirname(zipPath);
-  const encoding = $('encoding').value;
+  const encoding = FEATURES.encoding ? $('encoding')?.value : undefined;
   const info = await api('/api/zip/open', {
     method: 'POST',
-    body: JSON.stringify({ path: zipPath, encoding: encoding || undefined }),
+    body: JSON.stringify({ path: zipPath, ...(encoding ? { encoding } : {}) }),
   });
   if (info.needsPassword) {
     const ok = await attemptDefaultThenAsk(info.id, name, zipPath);
@@ -913,7 +1047,7 @@ $('forward').addEventListener('click', () => {
 
 $('refresh').addEventListener('click', () => render(current()));
 
-$('encoding').addEventListener('change', () => {
+$('encoding')?.addEventListener('change', () => {
   syncLocation(false);
   status('文件名编码设置将在下次打开压缩包时生效');
 });
@@ -999,5 +1133,56 @@ initVault((snap) => {
 $('vaultBtn').addEventListener('click', () => openVault());
 
 $('defPwBtn').addEventListener('click', () => openDefaultPasswordModal());
+
+function applyHostUi() {
+  const title = HOST.siteTitle || '文件浏览器';
+  const brand = $('brandTitle');
+  if (brand) brand.textContent = title;
+  if (!location.hash) document.title = title;
+
+  const encodingLabel = $('encoding')?.closest('label');
+  if (encodingLabel && !FEATURES.encoding) encodingLabel.classList.add('hidden');
+
+  const loginBtn = $('loginBtn');
+  if (loginBtn) {
+    // 已有登录态时（OpenList 在 index 注入 user）不再显示登录入口。
+    loginBtn.classList.toggle('hidden', !FEATURES.login || !!HOST.user);
+    if (HOST.user) loginBtn.title = `已登录：${HOST.user}`;
+  }
+  const adminBtn = $('adminBtn');
+  if (adminBtn) adminBtn.classList.toggle('hidden', !FEATURES.admin);
+
+  const bindHint = $('bindHint');
+  if (bindHint) bindHint.textContent = HOST.user || '';
+  const desc = $('statusDesc');
+  if (desc) desc.textContent = LABELS.trashStatus || '浏览 · ';
+
+  const warning = document.querySelector('#trashModal .trash-warning');
+  if (warning && LABELS.trashWarning) warning.textContent = LABELS.trashWarning;
+  const note = document.querySelector('#trashModal .modal-note');
+  if (note && LABELS.trashNote) note.textContent = LABELS.trashNote;
+  const confirm = $('trashConfirm');
+  if (confirm && LABELS.trashAction) confirm.textContent = LABELS.trashAction;
+}
+
+applyHostUi();
+
+$('loginBtn')?.addEventListener('click', () => showLogin(''));
+$('loginClose')?.addEventListener('click', hideLogin);
+$('loginCancel')?.addEventListener('click', hideLogin);
+$('loginSubmit')?.addEventListener('click', () => { submitLogin().catch(() => {}); });
+['loginUser', 'loginPass'].forEach((id) => {
+  $(id)?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submitLogin().catch(() => {});
+    }
+  });
+});
+$('adminBtn')?.addEventListener('click', () => {
+  // 管理后台挂在站点根，不在宿主前缀之下。
+  const root = String(BASE || '').replace(/\/zb$/, '');
+  window.open(`${root || ''}/@manage`, '_blank', 'noopener');
+});
 
 restore().catch(showError);

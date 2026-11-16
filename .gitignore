@@ -1,6 +1,9 @@
 # 依赖
 node_modules/
 
+# 发布打包产物
+build/
+
 # 运行时生成的版本状态（server/version.js 每次源码变更自动 +1，各机器独立）
 version.json
 

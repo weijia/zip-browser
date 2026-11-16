@@ -51,13 +51,25 @@ export function compactTarget(target) {
   return { k: 'drives' };
 }
 
+function isPosix() {
+  return typeof window !== 'undefined' && Boolean(window.ZB && window.ZB.posix);
+}
+
 export function winBasename(abs) {
-  const parts = String(abs || '').split(/[\\/]/).filter(Boolean);
-  return parts[parts.length - 1] || String(abs || '');
+  const value = String(abs || '').replace(/[\\/]+$/, '');
+  if (!value || value === '/') return '';
+  const parts = value.split(isPosix() ? '/' : /[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || value;
 }
 
 export function winDirname(abs) {
   const value = String(abs || '');
+  if (isPosix()) {
+    const clean = value.replace(/\/+$/, '');
+    if (!clean || clean === '/') return '/';
+    const index = clean.lastIndexOf('/');
+    return index <= 0 ? '/' : clean.slice(0, index);
+  }
   const index = value.lastIndexOf('\\');
   if (index <= 2) return value.slice(0, 3);
   return value.slice(0, index);

@@ -5,7 +5,13 @@
 const FIRST_CHECK_DELAY = 3000;
 const POLL_INTERVAL = 30 * 1000;
 
-const boot = window.__APP_VERSION__ || null;
+const HOST = (typeof window !== 'undefined' && window.ZB_HOST) || {};
+const OPENLIST = HOST.versionKind === 'openlist';
+const VERSION_URL = HOST.versionEndpoint || '/version.json';
+const rawBoot = window.__APP_VERSION__;
+const boot = typeof rawBoot === 'string'
+  ? { version: rawBoot || 'unknown' }
+  : (rawBoot || null);
 const $ = (id) => document.getElementById(id);
 const badge = $('appVersion');
 const toast = $('updateToast');
@@ -18,6 +24,13 @@ let latest = null;
 let badgeTimer = null;
 
 function versionTitle(info) {
+  if (OPENLIST) {
+    return [
+      `版本 v${info.version}`,
+      info.webVersion ? `前端版本 ${info.webVersion}` : '',
+      '点击可立即检查更新',
+    ].filter(Boolean).join('\n');
+  }
   return [
     `版本 v${info.version}`,
     `修订号 #${info.revision}`,
@@ -33,8 +46,8 @@ function renderBadge(info) {
   // 始终显示「本页面实际运行的版本」，不因为检测到新版就改数字
   badge.textContent = `v${boot.version}`;
   badge.title = versionTitle(boot)
-    + (info && info.buildId !== boot.buildId
-      ? `\n\n检测到新版本 v${info.version}（${info.buildTime}）`
+    + (info && info.version && info.version !== boot.version
+      ? `\n\n检测到新版本 v${info.version}`
       : '');
 }
 
@@ -57,31 +70,41 @@ function hideToast() {
 
 function showToast(current, next) {
   if (!toast) return;
-  const onlyServer = next.webBuildId === current.webBuildId
-    && next.serverBuildId !== current.serverBuildId;
-  $('updateTitle').textContent = onlyServer ? '服务端文件已更新' : `发现新版本 v${next.version}`;
-  $('updateSub').textContent = onlyServer
-    ? '刷新后若功能未生效，请重启本地服务'
-    : `当前 v${current.version} · 发布于 ${next.buildTime}`;
+  if (OPENLIST) {
+    $('updateTitle').textContent = `服务端已更新到 v${next.version}`;
+    $('updateSub').textContent = '刷新页面以加载新版本';
+  } else {
+    const onlyServer = next.webBuildId === current.webBuildId
+      && next.serverBuildId !== current.serverBuildId;
+    $('updateTitle').textContent = onlyServer ? '服务端文件已更新' : `发现新版本 v${next.version}`;
+    $('updateSub').textContent = onlyServer
+      ? '刷新后若功能未生效，请重启本地服务'
+      : `当前 v${current.version} · 发布于 ${next.buildTime}`;
+  }
   toast.classList.remove('hidden');
   updateAvailable = true;
-  shownBuildId = next.buildId;
+  shownBuildId = next.buildId || next.version;
 }
 
 async function check({ force = false, manual = false } = {}) {
   if (checking || (!force && document.hidden)) return;
   checking = true;
   try {
-    const response = await fetch(`/version.json?t=${Date.now()}`, { cache: 'no-store' });
+    const url = HOST.versionEndpoint && window.ZB
+      ? window.ZB.url(`${VERSION_URL}?t=${Date.now()}`)
+      : `${VERSION_URL}?t=${Date.now()}`;
+    const response = await fetch(url, { cache: 'no-store' });
     if (!response.ok) return;
     const info = await response.json();
-    if (!info || !info.buildId) return;
+    if (!info) return;
+    if (!OPENLIST && !info.buildId) return;
     latest = info;
     renderBadge(info);
-    if (boot && info.buildId !== boot.buildId) {
+    if (boot && info.version && info.version !== boot.version) {
+      const marker = info.buildId || info.version;
       // updateAvailable 守卫 + shownBuildId：同一版本只弹一次，版本再变才更新文案
-      const shouldNotify = !updateAvailable || shownBuildId !== info.buildId;
-      if (info.buildId !== dismissedBuildId && shouldNotify) {
+      const shouldNotify = !updateAvailable || shownBuildId !== marker;
+      if (marker !== dismissedBuildId && shouldNotify) {
         showToast(boot, info);
       }
     } else {

@@ -3,13 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>本地文件浏览器</title>
-<link rel="stylesheet" href="/style.css">
+<title>文件浏览器</title>
+<link rel="stylesheet" href="style.css">
 <script>window.__LOCAL_TOKEN__ = "__ZIP_BROWSER_TOKEN__"; window.__APP_VERSION__ = __ZIP_BROWSER_VERSION__;</script>
+<!-- 宿主配置：默认值见 host.js；OpenList 会在 <head> 内注入 window.ZB_HOST。 -->
+<script src="host.js"></script>
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><span class="brand-mark"></span><span>本地文件浏览器</span></div>
+  <div class="brand"><span class="brand-mark"></span><span id="brandTitle">本地文件浏览器</span></div>
   <!-- 窄屏：top-actions 整体变成下拉菜单，按钮 DOM 不复制，事件绑定全部保留。 -->
   <button id="moreBtn" type="button" class="more-btn" aria-expanded="false" aria-controls="topActions" title="展开更多功能">更多 ▾</button>
   <div id="topActions" class="top-actions">
@@ -26,6 +28,8 @@
         <option value="utf-8">UTF-8</option>
       </select>
     </label>
+    <button id="loginBtn" type="button" class="hidden" title="登录">登录</button>
+    <button id="adminBtn" type="button" class="hidden" title="管理后台">管理后台</button>
     <button id="refresh" type="button">刷新</button>
   </div>
 </header>
@@ -54,6 +58,23 @@
       <button id="modalVault" type="button" title="从密码库选择已保存的密码">从密码库选择</button>
       <button id="modalCancel" type="button">取消</button>
       <button id="modalOk" type="button" class="primary">打开</button>
+    </div>
+  </div>
+</div>
+
+<div id="loginModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2 id="loginTitle">登录</h2>
+      <button id="loginClose" type="button" class="modal-x" title="关闭">×</button>
+    </div>
+    <p id="loginNote" class="modal-note">登录后按账号权限浏览文件。</p>
+    <label class="cr-field">用户名<input id="loginUser" type="text" autocomplete="username" placeholder="用户名"></label>
+    <label class="cr-field">密码<input id="loginPass" type="password" autocomplete="current-password" placeholder="密码"></label>
+    <div id="loginError" class="modal-error"></div>
+    <div class="modal-actions">
+      <button id="loginCancel" type="button">取消</button>
+      <button id="loginSubmit" type="button" class="primary">登录</button>
     </div>
   </div>
 </div>
@@ -217,10 +238,10 @@
 
 <footer class="statusbar">
   <span class="status-dot"></span>
-  <span id="statusText">正在连接本地服务…</span>
+  <span id="statusText">正在连接…</span>
   <span class="status-right">
     <span id="appVersion" class="version-badge" title="读取版本信息…">v…</span>
-    <span><span class="status-desc">浏览 · 删除到回收站 · </span><span id="bindHint">__ZIP_BROWSER_HOST__</span></span>
+    <span><span id="statusDesc" class="status-desc">浏览 · 删除到回收站</span><span id="bindHint">__ZIP_BROWSER_HOST__</span></span>
   </span>
 </footer>
 
@@ -238,13 +259,13 @@
 <div id="annoBackdrop" class="anno-backdrop hidden"></div>
 <aside id="annoPanel" class="anno-panel hidden" aria-label="书签与标签"></aside>
 
-<!-- zen-fs-config 供 /annotations 与密码库使用；下面三个供同步组配置组件使用。顺序不可颠倒。 -->
-<script src="/vendor/zen-fs-config.js"></script>
-<script src="/vendor/zen-fs-remotestoragejs.global.js"></script>
-<script src="/vendor/zen-fs-gitee.global.js"></script>
-<script src="/vendor/zen-fs-config-ui.js"></script>
-<script type="module" src="/vault.js"></script>
-<script type="module" src="/app.js"></script>
-<script type="module" src="/update-checker.js"></script>
+<!-- zen-fs 配置组件；路径保持相对，便于部署在 /zb 这类子路径下。 -->
+<script src="vendor/zen-fs-config.js"></script>
+<script src="vendor/zen-fs-remotestoragejs.global.js"></script>
+<script src="vendor/zen-fs-gitee.global.js"></script>
+<script src="vendor/zen-fs-config-ui.js"></script>
+<script type="module" src="vault.js"></script>
+<script type="module" src="app.js"></script>
+<script type="module" src="update-checker.js"></script>
 </body>
 </html>
