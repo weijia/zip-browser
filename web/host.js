@@ -42,6 +42,7 @@
       encoding: true,
       admin: false,
       login: false,
+      remove: true,
     },
   };
 

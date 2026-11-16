@@ -63,7 +63,14 @@ function updateToolbar() {
   }
 }
 
+function canRemove() {
+  if (typeof window === 'undefined') return true;
+  const features = window.ZB_HOST?.features;
+  return !features || features.remove !== false;
+}
+
 export function trashToolbarHtml() {
+  if (!canRemove()) return '';
   return `<div class="trash-toolbar">
     <label class="trash-all-label"><input type="checkbox" id="trashAll" data-action="trash-all"> 全选</label>
     <button id="trashSelectedBtn" type="button" class="trash-selected-btn" data-action="trash-selected" disabled>删除选中（<span id="trashCount">0</span>）</button>
@@ -71,8 +78,8 @@ export function trashToolbarHtml() {
   </div>`;
 }
 
-export const trashHeadStart = () => '<th class="trash-col-check"></th>';
-export const trashHeadEnd = () => '<th class="trash-col-action"></th>';
+export const trashHeadStart = () => (canRemove() ? '<th class="trash-col-check"></th>' : '');
+export const trashHeadEnd = () => (canRemove() ? '<th class="trash-col-action"></th>' : '');
 
 function checkBoxHtml(item) {
   return `<input type="checkbox" class="trash-check" data-action="trash-check" data-path="${esc(item.path)}" data-name="${esc(item.name)}" data-dir="${item.dir ? 'true' : 'false'}" title="选择以批量删除">`;
@@ -82,15 +89,16 @@ function deleteButtonHtml(item, className = 'trash-one', label = '删除') {
   return `<button type="button" class="${className}" data-action="trash-one" data-path="${esc(item.path)}" data-name="${esc(item.name)}" data-dir="${item.dir ? 'true' : 'false'}" title="${esc(item.name)} · 删除到回收站">${label}</button>`;
 }
 
-export const trashRowStart = (item) => `<td class="trash-col-check">${checkBoxHtml(item)}</td>`;
-export const trashRowEnd = (item) => `<td class="trash-col-action">${deleteButtonHtml(item)}</td>`;
+export const trashRowStart = (item) => (canRemove() ? `<td class="trash-col-check">${checkBoxHtml(item)}</td>` : '');
+export const trashRowEnd = (item) => (canRemove() ? `<td class="trash-col-action">${deleteButtonHtml(item)}</td>` : '');
 
 export function trashCardControls(item) {
+  if (!canRemove()) return '';
   return `<div class="trash-card-controls">${checkBoxHtml(item)}${deleteButtonHtml(item, 'trash-card-x', '×')}</div>`;
 }
 
 export function trashChipControls(item) {
-  return deleteButtonHtml(item, 'trash-chip-x', '×');
+  return canRemove() ? deleteButtonHtml(item, 'trash-chip-x', '×') : '';
 }
 
 function openConfirm(items) {
