@@ -177,7 +177,15 @@ function initMobileChrome() {
   const sideToggle = $('sideToggle');
   const side = $('sidebar');
   const backdrop = $('sideBackdrop');
+  const positionMenu = () => {
+    if (!topActions) return;
+    const topbar = document.querySelector('.topbar');
+    if (!topbar) return;
+    const bottom = Math.max(0, Math.round(topbar.getBoundingClientRect().bottom));
+    topActions.style.setProperty('--menu-top', `${bottom}px`);
+  };
   const setMenu = (open) => {
+    if (open) positionMenu();
     topActions?.classList.toggle('open', open);
     moreBtn?.setAttribute('aria-expanded', String(open));
   };

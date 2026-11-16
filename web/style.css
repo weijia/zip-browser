@@ -418,12 +418,16 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
     display: inline-block; margin-left: auto; min-height: 36px;
     padding: 6px 12px; font-size: 13px; white-space: nowrap;
   }
+  /* 固定到顶栏下方，避免被 .workspace/.stage 的滚动层遮住或裁切。
+     菜单被打开时由 app.js 把 --menu-top 设成顶栏底边的实际位置。 */
   .top-actions {
-    display: none; position: absolute; top: 100%; left: 8px; right: 8px;
-    flex-direction: column; align-items: stretch; gap: 6px; z-index: 45;
+    display: none; position: fixed; top: var(--menu-top, 56px); left: 8px; right: 8px;
+    flex-direction: column; align-items: stretch; gap: 6px; z-index: 60;
     padding: 10px; border: 1px solid var(--border); border-radius: 10px;
     background: #fff; box-shadow: 0 10px 30px rgba(15, 23, 42, .18);
-    max-height: 72dvh; overflow-y: auto;
+    max-height: calc(100vh - var(--menu-top, 56px) - 8px);
+    max-height: calc(100dvh - var(--menu-top, 56px) - 8px); overflow-y: auto;
+    overscroll-behavior: contain;
   }
   .top-actions.open { display: flex; }
   .top-actions > button { width: 100%; min-height: 42px; text-align: left; font-size: 13px; }
