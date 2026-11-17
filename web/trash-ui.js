@@ -1,7 +1,7 @@
 /**
- * 删除到回收站（仅磁盘文件/文件夹，压缩包内部保持只读）。
- * 所有交互都从 app.js 的全局 click 代理以 data-action="trash-*" 转进来，
- * 避免行内控件触发「进入目录 / 打开文件」的导航。
+ * 行选择 + 批量动作（加入文件列表 / 加入目录清单 / 删除到回收站）。
+ * 勾选不再是「删除专用」：切换目录后选择仍然保留，删除只作用于当前目录。
+ * 所有交互都从 app.js 的全局 click 代理转进来，避免行内控件触发导航。
  */
 
 /** 与服务端 MAX_TRASH_BATCH 一致：一次请求最多 10 项，超出则分批串行执行。 */
@@ -31,8 +31,7 @@ function isPosixHost() {
 }
 
 function trashHintText(batch) {
-  const text = hostLabels().trashHint;
-  return text ? `${text}，每批最多 ${batch} 项` : `删除会移入 Windows 回收站，可还原；仅限本地固定磁盘，每批最多 ${batch} 项；勾选目录也可直接看体积`;
+  return `勾选后可加入文件列表或目录清单；删除仅限本目录、移入回收站，每批最多 ${batch} 项`;
 }
 
 export function initTrash(options) {
@@ -46,20 +45,55 @@ export function initTrash(options) {
 }
 
 export function resetTrashSelection() {
-  selected.clear();
+  // 切换目录时不再清空选择；只把当前行的勾选状态对齐到持久选择集。
+  for (const box of document.querySelectorAll('.trash-check')) {
+    box.checked = selected.has(box.dataset.path);
+  }
   updateToolbar();
 }
 
+export function selectedItems() {
+  return Array.from(selected.values());
+}
+
+export function clearSelection() {
+  selected.clear();
+  for (const box of document.querySelectorAll('.trash-check')) box.checked = false;
+  updateToolbar();
+}
+
+function sameDir(a, b) {
+  const norm = (value) => String(value || '').replace(/[\\/]+$/, '').toLowerCase();
+  return norm(a) === norm(b);
+}
+
+function currentSelection() {
+  const dir = deps?.getDir?.() || '';
+  return Array.from(selected.values()).filter((item) => sameDir(item.parent, dir));
+}
+
 function updateToolbar() {
-  const btn = $('trashSelectedBtn');
   const count = $('trashCount');
+  const currentCount = $('trashCurrentCount');
+  const dirCount = $('selectionDirCount');
+  const btn = $('trashSelectedBtn');
+  const addFiles = $('selectionAddFilesBtn');
+  const addDirs = $('selectionAddDirsBtn');
+  const clearBtn = $('selectionClearBtn');
   const all = $('trashAll');
+  const current = currentSelection();
+  const dirs = Array.from(selected.values()).filter((item) => item.dir).length;
   if (count) count.textContent = String(selected.size);
-  if (btn) btn.disabled = busy || selected.size === 0;
+  if (currentCount) currentCount.textContent = String(current.length);
+  if (dirCount) dirCount.textContent = String(dirs);
+  if (btn) btn.disabled = busy || !canRemove() || current.length === 0;
+  if (addFiles) addFiles.disabled = busy || selected.size === 0;
+  if (addDirs) addDirs.disabled = busy || dirs === 0;
+  if (clearBtn) clearBtn.disabled = busy || selected.size === 0;
   if (all) {
     const boxes = Array.from(document.querySelectorAll('.trash-check'));
-    all.checked = boxes.length > 0 && boxes.every((box) => box.checked);
-    all.indeterminate = selected.size > 0 && !all.checked;
+    all.checked = boxes.length > 0 && boxes.every((box) => selected.has(box.dataset.path));
+    all.indeterminate = !all.checked && boxes.some((box) => selected.has(box.dataset.path));
   }
 }
 
@@ -70,31 +104,34 @@ function canRemove() {
 }
 
 export function trashToolbarHtml() {
-  if (!canRemove()) return '';
   return `<div class="trash-toolbar">
     <label class="trash-all-label"><input type="checkbox" id="trashAll" data-action="trash-all"> 全选</label>
-    <button id="trashSelectedBtn" type="button" class="trash-selected-btn" data-action="trash-selected" disabled>删除选中（<span id="trashCount">0</span>）</button>
+    <span class="trash-selected-count">已选 <span id="trashCount">0</span> 项</span>
+    <button id="selectionAddFilesBtn" type="button" class="selection-add-btn" data-action="selection-add-files" title="把选中的目录按下一层子目录、选中的文件直接加入文件列表" disabled>+ 文件列表</button>
+    <button id="selectionAddDirsBtn" type="button" class="selection-add-btn" data-action="selection-add-dirs" title="把选中的目录加入目录清单" disabled>+ 目录清单（<span id="selectionDirCount">0</span>）</button>
+    ${canRemove() ? '<button id="trashSelectedBtn" type="button" class="trash-selected-btn" data-action="trash-selected" disabled>删除（<span id="trashCurrentCount">0</span>）</button>' : ''}
+    <button id="selectionClearBtn" type="button" class="selection-clear-btn" data-action="selection-clear" disabled>清空</button>
     <span class="trash-hint">${esc(trashHintText(TRASH_BATCH))}</span>
   </div>`;
 }
 
-export const trashHeadStart = () => (canRemove() ? '<th class="trash-col-check"></th>' : '');
+export const trashHeadStart = () => '<th class="trash-col-check"></th>';
 export const trashHeadEnd = () => (canRemove() ? '<th class="trash-col-action"></th>' : '');
 
 function checkBoxHtml(item) {
-  return `<input type="checkbox" class="trash-check" data-action="trash-check" data-path="${esc(item.path)}" data-name="${esc(item.name)}" data-dir="${item.dir ? 'true' : 'false'}" title="选择以批量删除">`;
+  const checked = selected.has(item.path) ? ' checked' : '';
+  return `<input type="checkbox" class="trash-check" data-action="trash-check" data-path="${esc(item.path)}" data-name="${esc(item.name)}" data-size="${Number(item.size) || 0}" data-mtime="${Number(item.mtime) || 0}" data-dir="${item.dir ? 'true' : 'false'}"${checked} title="选中这个条目，可批量加入文件列表 / 目录清单">`;
 }
 
 function deleteButtonHtml(item, className = 'trash-one', label = '删除') {
   return `<button type="button" class="${className}" data-action="trash-one" data-path="${esc(item.path)}" data-name="${esc(item.name)}" data-dir="${item.dir ? 'true' : 'false'}" title="${esc(item.name)} · 删除到回收站">${label}</button>`;
 }
 
-export const trashRowStart = (item) => (canRemove() ? `<td class="trash-col-check">${checkBoxHtml(item)}</td>` : '');
+export const trashRowStart = (item) => `<td class="trash-col-check">${checkBoxHtml(item)}</td>`;
 export const trashRowEnd = (item) => (canRemove() ? `<td class="trash-col-action">${deleteButtonHtml(item)}</td>` : '');
 
 export function trashCardControls(item) {
-  if (!canRemove()) return '';
-  return `<div class="trash-card-controls">${checkBoxHtml(item)}${deleteButtonHtml(item, 'trash-card-x', '×')}</div>`;
+  return `<div class="trash-card-controls">${checkBoxHtml(item)}${canRemove() ? deleteButtonHtml(item, 'trash-card-x', '×') : ''}</div>`;
 }
 
 export function trashChipControls(item) {
@@ -160,7 +197,8 @@ async function executeTrash() {
   } finally {
     busy = false;
     closeModal();
-    selected.clear();
+    // 只移除本批删除项，其他目录里的勾选继续保留。
+    for (const item of items) selected.delete(item.path);
     updateToolbar();
     // 无论成功失败都重列目录，以磁盘真实状态为准（回收站可能已删掉部分项）
     deps.refresh();
@@ -174,7 +212,10 @@ export async function handleTrashAction(action, element) {
       const item = {
         path: element.dataset.path,
         name: element.dataset.name,
+        size: Number(element.dataset.size) || 0,
+        mtime: Number(element.dataset.mtime) || 0,
         dir: element.dataset.dir === 'true',
+        parent: deps?.getDir?.() || '',
       };
       if (element.checked) selected.set(item.path, item);
       else selected.delete(item.path);
@@ -189,7 +230,10 @@ export async function handleTrashAction(action, element) {
         const item = {
           path: box.dataset.path,
           name: box.dataset.name,
+          size: Number(box.dataset.size) || 0,
+          mtime: Number(box.dataset.mtime) || 0,
           dir: box.dataset.dir === 'true',
+          parent: deps?.getDir?.() || '',
         };
         if (check) selected.set(item.path, item);
         else selected.delete(item.path);
@@ -206,12 +250,20 @@ export async function handleTrashAction(action, element) {
       return;
     }
     case 'trash-selected': {
-      if (!selected.size) return;
-      openConfirm(Array.from(selected.values()));
+      const items = currentSelection();
+      if (!items.length) {
+        deps.status('当前目录没有选中项；已选项目在其他目录，切换回去再删除', true);
+        return;
+      }
+      openConfirm(items);
       return;
     }
     case 'trash-confirm': {
       await executeTrash();
+      return;
+    }
+    case 'selection-clear': {
+      clearSelection();
       return;
     }
     case 'trash-cancel':

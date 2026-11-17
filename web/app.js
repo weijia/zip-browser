@@ -9,7 +9,7 @@ import {
 import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.js';
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
 import { initManifestSync, scheduleSync } from './manifest-sync.js';
-import { createSelectionStore, isDirSelected, isFileSelected } from './manifest-selection.js';
+import { createSelectionStore, isDirSelected, isFileSelected, addDirSelection } from './manifest-selection.js';
 import {
   initManifestBuilder, addPickedFromItem, addFileListDir, openCopyRefForItem,
   openDirListForItem, getCachedDirSummary,
@@ -18,6 +18,7 @@ import {
   initTrash, resetTrashSelection, trashToolbarHtml,
   trashHeadStart, trashHeadEnd, trashRowStart, trashRowEnd,
   trashCardControls, trashChipControls, handleTrashAction,
+  selectedItems, clearSelection,
 } from './trash-ui.js';
 
 const HOST = (typeof window !== 'undefined' && window.ZB_HOST) || {};
@@ -182,7 +183,7 @@ function openRowMenu(button) {
   }
   const box = host.querySelector('.trash-check');
   if (box) {
-    html.push(`<button type="button" class="row-menu-option" data-action="row-menu-select">${box.checked ? '✓ 已选中 · 点此取消' : '选中以批量删除'}</button>`);
+    html.push(`<button type="button" class="row-menu-option" data-action="row-menu-select">${box.checked ? '✓ 已选中 · 点此取消' : '选中这个条目'}</button>`);
   }
   list.innerHTML = html.join('') || '<p class="row-menu-empty">没有可用操作</p>';
   modal.classList.remove('hidden');
@@ -508,6 +509,40 @@ function manifestSelectionBadge(item) {
   if (item.dir && isDirSelected(dirSel, item.path)) return '<span class="tag tag-sel">已选清单</span>';
   return '';
 }
+
+// 批量选择后的两个动作：目录按“下一层子目录”加入文件列表；
+// 文件直接进文件列表；目录清单只接收目录。
+async function addSelectedToFileList() {
+  const items = selectedItems();
+  if (!items.length) return;
+  let count = 0;
+  for (const item of items) {
+    if (item.dir) {
+      await addFileListDir(item.path);
+    } else {
+      addPickedFromItem(item);
+    }
+    count += 1;
+  }
+  clearSelection();
+  status(`已把 ${count} 个选中项加入文件列表选择集`);
+}
+
+function addSelectedToDirList() {
+  const dirs = selectedItems().filter((item) => item.dir);
+  if (!dirs.length) {
+    status('选中的项目里没有目录；目录清单只能加入目录', true);
+    return;
+  }
+  const current = selectionStore.get('dirs');
+  const recursive = current.options.recursive !== false;
+  let next = current;
+  for (const item of dirs) next = addDirSelection(next, item.path, recursive);
+  selectionStore.set('dirs', next);
+  clearSelection();
+  status(`已把 ${dirs.length} 个目录加入${recursive ? '含所有子目录' : '仅本层'}的目录清单`);
+}
+
 
 // 选择集在清单页、目录行按钮、右键菜单里都可能变化；只刷新标签，
 // 不重列目录，避免把删除勾选状态一并清掉。
@@ -944,6 +979,8 @@ async function renderDir(abs) {
   // 当前路径只由顶部面包屑显示；这里不再重复一条完整路径标题。
   stage.classList.add('list-mode');
   stage.innerHTML = `${switcher}${trashToolbarHtml()}<div class="stage-scroll">${body}</div>`;
+  // 新工具栏插入后再同步一次数量/按钮状态（勾选状态已由行模板带出）。
+  resetTrashSelection();
   applyDirSizeCache();
   const upper = parentOf(abs);
   const dirs = items.filter((item) => item.dir);
@@ -1268,6 +1305,18 @@ document.addEventListener('click', async (event) => {
     await handleTrashAction(action, element, event);
     return;
   }
+  if (action === 'selection-add-files') {
+    await addSelectedToFileList();
+    return;
+  }
+  if (action === 'selection-add-dirs') {
+    addSelectedToDirList();
+    return;
+  }
+  if (action === 'selection-clear') {
+    clearSelection();
+    return;
+  }
   if (action === 'row-menu') {
     openRowMenu(element);
     return;
@@ -1276,7 +1325,7 @@ document.addEventListener('click', async (event) => {
     const box = rowMenuHost?.querySelector('.trash-check');
     if (box) {
       box.click(); // 触发原有 trash-check 分支，保持批量选择集同步
-      element.textContent = box.checked ? '✓ 已选中 · 点此取消' : '选中以批量删除';
+      element.textContent = box.checked ? '✓ 已选中 · 点此取消' : '选中这个条目';
     }
     return;
   }
