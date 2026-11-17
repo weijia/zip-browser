@@ -284,6 +284,12 @@ input[type="password"] { width: 100%; padding: 8px 10px; }
 .view-switch { display: flex; gap: 6px; margin: 0 0 14px; }
 .view-switch button { font-size: 12px; padding: 4px 12px; }
 .view-switch button.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.sort-th {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 0; border: 0; background: none;
+  font: inherit; color: inherit; cursor: pointer;
+}
+.sort-th:hover, .sort-th:focus-visible { color: var(--accent); }
 .thumb-head { display: flex; align-items: baseline; gap: 10px; font-size: 13px; font-weight: 500; margin: 0 0 12px; }
 .thumb-head span { font-size: 11px; font-weight: 400; color: var(--text-3); }
 .folder-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }

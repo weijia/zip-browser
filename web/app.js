@@ -114,6 +114,16 @@ const IMAGE_EXT = new Set([
 ]);
 
 let viewMode = 'list';
+// 文件列表排序：none（保持服务端默认：目录在前、名称升序）/ desc / asc。
+// 目录始终排在文件前，大小排序只作用于文件。
+let sizeSort = (() => {
+  try {
+    const saved = localStorage.getItem('zb-size-sort');
+    return saved === 'asc' || saved === 'desc' ? saved : 'none';
+  } catch {
+    return 'none';
+  }
+})();
 const state = { index: 0, depth: 0, target: { kind: 'drives' } };
 let crumbTargets = [];
 
@@ -751,22 +761,58 @@ function parentOf(abs) {
   return `${match[1]}:\\${segments.join('\\')}`;
 }
 
+// 目录始终在前；文件按 size 升/降序，大小相同则保持原顺序（JS sort 稳定）。
+// sizeSort 为 none 时原样返回，保持服务端既有的目录/名称顺序。
+function sortedDirItems(items) {
+  if (sizeSort === 'none') return items;
+  const sign = sizeSort === 'asc' ? 1 : -1;
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => {
+      if (a.item.dir || b.item.dir) {
+        if (a.item.dir && b.item.dir) return a.index - b.index;
+        return a.item.dir ? -1 : 1;
+      }
+      const diff = (Number(a.item.size) || 0) - (Number(b.item.size) || 0);
+      return diff ? diff * sign : a.index - b.index;
+    })
+    .map((entry) => entry.item);
+}
+
+function sizeSortLabel() {
+  if (sizeSort === 'desc') return '大小 ↓';
+  if (sizeSort === 'asc') return '大小 ↑';
+  return '按大小';
+}
+
+async function cycleSizeSort() {
+  sizeSort = sizeSort === 'none' ? 'desc' : (sizeSort === 'desc' ? 'asc' : 'none');
+  try {
+    localStorage.setItem('zb-size-sort', sizeSort);
+  } catch {
+    // 隐私模式/存储被禁用时只影响记忆，不影响本次排序
+  }
+  await render(current());
+}
+
 async function renderDir(abs) {
   const data = await api(`/api/list?path=${encodeURIComponent(abs)}`);
   // 每次重列目录都清空勾选，避免上一目录的选中项被误删
   resetTrashSelection();
-  const images = data.items.filter((item) => !item.dir && isImageName(item.name));
-  const zips = data.items.filter((item) => item.zip);
+  const items = sortedDirItems(data.items);
+  const images = items.filter((item) => !item.dir && isImageName(item.name));
+  const zips = items.filter((item) => item.zip);
   const vsid = getVaultSessionId() || undefined;
   const defpw = getDefaultPassword() || undefined;
   const thumbsCount = images.length + zips.length;
   const switcher = `<div class="view-switch">
     <button type="button" data-action="view" data-view="list" class="${viewMode === 'list' ? 'active' : ''}">列表</button>
     <button type="button" data-action="view" data-view="thumbs" class="${viewMode === 'thumbs' ? 'active' : ''}">缩略图${thumbsCount ? ` (${thumbsCount})` : ''}</button>
+    <button type="button" data-action="sort-size" class="sort-toggle${sizeSort === 'none' ? '' : ' active'}" title="按文件大小排序：第一次从大到小，再点从小到大，再点恢复默认">${sizeSortLabel()}</button>
   </div>`;
   let body;
   if (viewMode === 'thumbs') {
-    const folders = data.items.filter((item) => item.dir);
+    const folders = items.filter((item) => item.dir);
     const imageCards = images.map((item) => `<div class="thumb-card" data-action="file" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
       ${trashCardControls(item)}
       ${rowMenuButton(item)}
@@ -792,7 +838,7 @@ async function renderDir(abs) {
       ${folders.length ? `<div class="folder-chips">${folders.map((item) => `<span class="folder-chip" data-action="dir" data-path="${esc(item.path)}">${esc(item.name)}${trashChipControls({ ...item, dir: true })}${flControls({ ...item, dir: true })}${dirListControls({ ...item, dir: true })}${explorerControls({ ...item, dir: true })}${rowMenuButton({ ...item, dir: true })}</span>`).join('')}</div>` : ''}
       <div class="thumb-grid">${allCards || '<div class="thumb-empty">当前目录没有图片或压缩包，可切换到列表视图</div>'}</div>`;
   } else {
-    const rows = data.items.map((item) => {
+    const rows = items.map((item) => {
       const isZip = item.zip;
       const icon = item.dir ? 'icon-dir' : (isZip ? '' : 'icon-file');
       const action = item.dir ? 'dir' : (isZip ? 'zip' : 'file');
@@ -809,14 +855,14 @@ async function renderDir(abs) {
         ${trashRowEnd(item)}
       </tr>`;
     }).join('');
-    body = `<table class="file-table"><thead><tr>${trashHeadStart()}<th>名称</th><th style="width:110px">大小</th><th style="width:150px">修改时间</th>${trashHeadEnd()}</tr></thead>
+    body = `<table class="file-table"><thead><tr>${trashHeadStart()}<th>名称</th><th style="width:110px"><button type="button" class="sort-th" data-action="sort-size" title="按文件大小排序：第一次从大到小，再点从小到大，再点恢复默认">大小${sizeSort === 'none' ? '' : (sizeSort === 'desc' ? ' ↓' : ' ↑')}</button></th><th style="width:150px">修改时间</th>${trashHeadEnd()}</tr></thead>
       <tbody>${rows || '<tr><td colspan="5" class="empty">此目录为空</td></tr>'}</tbody></table>`;
   }
   // 当前路径只由顶部面包屑显示；这里不再重复一条完整路径标题。
   stage.innerHTML = `${switcher}${trashToolbarHtml()}${body}`;
   applyDirSizeCache();
   const upper = parentOf(abs);
-  const dirs = data.items.filter((item) => item.dir);
+  const dirs = items.filter((item) => item.dir);
   const sidebarRoot = LABELS.sidebarRoot || LABELS.root || '此电脑';
   sidebar.innerHTML = `<div class="side-title">当前目录</div>
     ${upper ? `<div class="side-item" data-action="dir" data-path="${esc(upper)}">↰ 上一级</div>` : `<div class="side-item" data-action="crumb" data-index="0">↰ ${esc(sidebarRoot)}</div>`}
@@ -1146,6 +1192,10 @@ document.addEventListener('click', async (event) => {
       box.click(); // 触发原有 trash-check 分支，保持批量选择集同步
       element.textContent = box.checked ? '✓ 已选中 · 点此取消' : '选中以批量删除';
     }
+    return;
+  }
+  if (action === 'sort-size') {
+    await cycleSizeSort();
     return;
   }
   if (action === 'fl-add') {
