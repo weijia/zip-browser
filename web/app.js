@@ -133,6 +133,16 @@ function viewportHeight() {
   ));
 }
 
+// Android 外壳的底部工具栏浮在 WebView 上方，约 80px；行菜单若贴底会被它盖住。
+// 浏览器没有这个覆盖层，保持 0 即可。
+const ROW_MENU_BOTTOM = /Android/i.test(navigator.userAgent) ? 88 : 0;
+
+function fitRowMenuCard(card) {
+  if (!card) return;
+  card.style.bottom = `${ROW_MENU_BOTTOM}px`;
+  card.style.maxHeight = `${Math.max(240, Math.round(viewportHeight() - ROW_MENU_BOTTOM - 72))}px`;
+}
+
 function openRowMenu(button) {
   const modal = $('rowMenuModal');
   const list = $('rowMenuList');
@@ -140,8 +150,7 @@ function openRowMenu(button) {
   const sub = $('rowMenuSub');
   if (!modal || !list || !title || !sub) return;
   const card = modal.querySelector('.modal-card');
-  const vh = viewportHeight();
-  if (card) card.style.maxHeight = `${Math.max(240, Math.round(vh * 0.92))}px`;
+  fitRowMenuCard(card);
   const host = button.closest('tr, .thumb-card, .folder-chip');
   if (!host) return;
   rowMenuHost = host;
@@ -237,8 +246,7 @@ function initMobileChrome() {
     if (topActions?.classList.contains('open')) positionMenu();
     const rowMenu = $('rowMenuModal');
     if (rowMenu && !rowMenu.classList.contains('hidden')) {
-      const card = rowMenu.querySelector('.modal-card');
-      if (card) card.style.maxHeight = `${Math.max(240, Math.round(viewportHeight() * 0.92))}px`;
+      fitRowMenuCard(rowMenu.querySelector('.modal-card'));
     }
   });
   window.addEventListener('keydown', (event) => {
