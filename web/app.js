@@ -639,6 +639,7 @@ async function restore() {
 
 function showError(err) {
   status(err.message || String(err), true);
+  stage.classList.remove('list-mode');
   stage.innerHTML = `<div class="error-box"><strong>加载失败</strong><br>${esc(err.message || err)}</div>`;
 }
 
@@ -737,6 +738,7 @@ async function renderDrives() {
   const unit = LABELS.drivesUnit || '磁盘';
   const empty = LABELS.drivesEmpty || '没有检测到可用磁盘';
   const hint = LABELS.drivesHint || '';
+  stage.classList.remove('list-mode');
   stage.innerHTML = `<h2 class="stage-title">${esc(title)}（${drives.length}）</h2>
     <div class="drive-grid">${cards || `<div class="empty">${esc(empty)}</div>`}</div>
     ${hint ? `<p class="stage-hint">${esc(hint)}</p>` : ''}`;
@@ -859,7 +861,8 @@ async function renderDir(abs) {
       <tbody>${rows || '<tr><td colspan="5" class="empty">此目录为空</td></tr>'}</tbody></table>`;
   }
   // 当前路径只由顶部面包屑显示；这里不再重复一条完整路径标题。
-  stage.innerHTML = `${switcher}${trashToolbarHtml()}${body}`;
+  stage.classList.add('list-mode');
+  stage.innerHTML = `${switcher}${trashToolbarHtml()}<div class="stage-scroll">${body}</div>`;
   applyDirSizeCache();
   const upper = parentOf(abs);
   const dirs = items.filter((item) => item.dir);
@@ -965,6 +968,7 @@ function bindViewer(url) {
 
 function renderZip(target) {
   const url = target.current || `/zip/${target.id}/`;
+  stage.classList.remove('list-mode');
   stage.innerHTML = viewerHtml(url, target);
   bindViewer(url);
   sidebar.innerHTML = `<div class="side-title">压缩包内 · ${target.entries.filter((item) => !item.dir).length} 个文件</div>
@@ -973,6 +977,7 @@ function renderZip(target) {
 }
 
 function renderPreview(target) {
+  stage.classList.remove('list-mode');
   stage.innerHTML = viewerHtml(target.url, target);
   bindViewer(target.url);
   const upper = target.dir;

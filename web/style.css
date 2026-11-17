@@ -102,6 +102,8 @@ input[type="password"] { width: 100%; padding: 8px 10px; }
 .side-tree summary:hover { background: var(--bg-hover); }
 
 .stage { flex: 1 1 auto; min-width: 0; overflow: auto; padding: 20px 22px; }
+.stage.list-mode { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.stage-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .stage-title { font-size: 14px; font-weight: 500; margin: 0 0 14px; }
 .stage-hint { font-size: 12px; color: var(--text-3); margin: 16px 0 0; }
 
@@ -119,6 +121,7 @@ input[type="password"] { width: 100%; padding: 8px 10px; }
 
 .file-table { width: 100%; border-collapse: collapse; }
 .file-table th { text-align: left; font-weight: 500; font-size: 11px; color: var(--text-3); padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.file-table thead th { position: sticky; top: 0; z-index: 2; background: var(--bg); box-shadow: 0 1px 0 var(--border); }
 .file-table td { padding: 7px 10px; border-bottom: 1px solid #f2f3f5; font-size: 12px; }
 .file-table tr:hover td { background: var(--bg-hover); cursor: pointer; }
 .file-name { display: flex; align-items: center; gap: 8px; }
