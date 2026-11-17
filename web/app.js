@@ -501,15 +501,36 @@ function flControls(item) {
 
 // 文件列表 / 目录清单 / 手工文件三个选择集共用同一套持久化仓库；
 // 文件浏览页用它给已选项加一个常驻标记，切换目录后仍能看到。
+function dirPathKey(value) {
+  return String(value || '').replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+// 父目录已选时，当前行是否也在它的范围内；非递归目录清单只覆盖直接子目录。
+function dirSelectionCovers(entry, path) {
+  const root = dirPathKey(entry?.path);
+  const target = dirPathKey(path);
+  if (!root || !target || !root.startsWith('/') && !/^[a-z]:\//.test(root)) return false;
+  if (target === root) return true;
+  if (!target.startsWith(`${root}/`)) return false;
+  if (entry.recursive !== false) return true;
+  const rest = target.slice(root.length + 1);
+  return Boolean(rest) && !rest.includes('/');
+}
+
 function manifestSelectionBadge(item) {
   const fileSel = selectionStore.get('files');
   const dirSel = selectionStore.get('dirs');
   const key = String(item.path || '').toLowerCase();
   if (!item.dir && isFileSelected(fileSel, item.path)) return '<span class="tag tag-sel">已选文件</span>';
-  if (item.dir && (fileSel.dirs || []).some((entry) => String(entry.path).toLowerCase() === key)) {
-    return '<span class="tag tag-sel">已选文件</span>';
+  if (!item.dir) return '';
+  const fileRoot = (fileSel.dirs || []).find((entry) => dirSelectionCovers(entry, item.path));
+  if (fileRoot) {
+    return `<span class="tag tag-sel">${dirPathKey(fileRoot.path) === dirPathKey(item.path) ? '已选文件' : '已选文件（含）'}</span>`;
   }
-  if (item.dir && isDirSelected(dirSel, item.path)) return '<span class="tag tag-sel">已选清单</span>';
+  const dirRoot = (dirSel.dirs || []).find((entry) => dirSelectionCovers(entry, item.path));
+  if (dirRoot) {
+    return `<span class="tag tag-sel">${dirPathKey(dirRoot.path) === dirPathKey(item.path) ? '已选清单' : '已选清单（含）'}</span>`;
+  }
   return '';
 }
 

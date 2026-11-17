@@ -1483,6 +1483,16 @@ test('selection helpers normalize windows paths and keep two independent sets', 
   assert.equal(files.dirs.length, 1);
   assert.equal(files.files[0].archive, true);
   assert.equal(sel.removeFileDirSelection(files, 'd:\\photos').dirs.length, 0);
+
+  // OpenList Go 宿主返回 /C/...，选择集必须保留这种 POSIX 绝对路径。
+  dirs = sel.addDirSelection(sel.emptyDirSelection(), '/C//codes/_gosdk');
+  assert.equal(dirs.dirs.length, 1);
+  assert.equal(dirs.dirs[0].path, '/C/codes/_gosdk');
+  assert.equal(sel.isDirSelected(dirs, '/c/codes/_gosdk'), true);
+  files = sel.addFileDirSelection(sel.emptyFileSelection(), '/C/codes/_gosdk');
+  assert.equal(files.dirs.length, 1);
+  assert.equal(files.dirs[0].path, '/C/codes/_gosdk');
+  assert.equal(sel.removeFileDirSelection(files, '/C/CODES/_GOSDK').dirs.length, 0);
 });
 
 test('v2 scan shards, unified host index and bookmark renaming', async () => {

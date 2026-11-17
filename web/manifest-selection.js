@@ -35,6 +35,9 @@ export function emptyFileSelection() {
 function cleanPath(value) {
   const text = String(value ?? '').trim();
   if (text.startsWith('zip:')) return text;
+  // OpenList Go 宿主把本机盘符暴露成 /C/...；这类 POSIX 绝对路径必须原样保留，
+  // 不能转成 C:\...，否则选择集会被清空、API 也会找不到存储。
+  if (/^\/+/.test(text)) return text.replace(/\\/g, '/').replace(/\/+/g, '/');
   if (!/^[A-Za-z]:[\\/]/i.test(text)) return '';
   // 盘符路径统一成单反斜杠：不同来源（浏览页 / 粘贴 / URL）可能带 / 或重复分隔符。
   return text.replace(/\//g, '\\').replace(/\\+/g, '\\');
