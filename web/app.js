@@ -793,8 +793,17 @@ function parentOf(abs) {
   return `${match[1]}:\\${segments.join('\\')}`;
 }
 
-// 目录始终在前；文件按 size 升/降序，大小相同则保持原顺序（JS sort 稳定）。
+// 目录始终在前；有已缓存体积的目录按真实体积排序，未知体积的目录保持原顺序并排在后面。
+// 文件按 size 升/降序，大小相同则保持原顺序（JS sort 稳定）。
 // sizeSort 为 none 时原样返回，保持服务端既有的目录/名称顺序。
+function sortableDirSize(item) {
+  if (!item?.dir) return null;
+  const cached = cachedDirSize(item.path);
+  if (cached && typeof cached === 'object') return Number(cached.totalSize) || 0;
+  const raw = Number(item.size);
+  return Number.isFinite(raw) && raw > 0 ? raw : null;
+}
+
 function sortedDirItems(items) {
   if (sizeSort === 'none') return items;
   const sign = sizeSort === 'asc' ? 1 : -1;
@@ -802,7 +811,17 @@ function sortedDirItems(items) {
     .map((item, index) => ({ item, index }))
     .sort((a, b) => {
       if (a.item.dir || b.item.dir) {
-        if (a.item.dir && b.item.dir) return a.index - b.index;
+        if (a.item.dir && b.item.dir) {
+          const aSize = sortableDirSize(a.item);
+          const bSize = sortableDirSize(b.item);
+          if (aSize === null || bSize === null) {
+            if (aSize !== null) return -1;
+            if (bSize !== null) return 1;
+            return a.index - b.index;
+          }
+          const diff = aSize - bSize;
+          return diff ? diff * sign : a.index - b.index;
+        }
         return a.item.dir ? -1 : 1;
       }
       const diff = (Number(a.item.size) || 0) - (Number(b.item.size) || 0);
