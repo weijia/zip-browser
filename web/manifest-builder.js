@@ -74,6 +74,11 @@ function cacheGetSummary(path) {
   return dirSummaryCache.get(normPath(path)) || null;
 }
 
+/** 供文件浏览页读取「清单生成」已经扫描过的目录体积，避免重复请求。 */
+export function getCachedDirSummary(path) {
+  return cacheGetSummary(path);
+}
+
 function cacheScanSummaries(scan) {
   for (const [path, sum] of Object.entries(scan?.summaries || {})) {
     dirSummaryCache.set(normPath(path), {

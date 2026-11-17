@@ -12,7 +12,7 @@ import { initManifestSync, scheduleSync } from './manifest-sync.js';
 import { createSelectionStore } from './manifest-selection.js';
 import {
   initManifestBuilder, addPickedFromItem, addFileListDir, openCopyRefForItem,
-  openDirListForItem,
+  openDirListForItem, getCachedDirSummary,
 } from './manifest-builder.js';
 import {
   initTrash, resetTrashSelection, trashToolbarHtml,
@@ -319,6 +319,20 @@ function pathKey(value) {
   return String(value ?? '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 }
 
+function cachedDirSize(path) {
+  const direct = dirSizeCache.get(path);
+  if (direct && typeof direct === 'object') return direct;
+  // 「清单生成」的扫描会缓存整棵子树的 summaries，浏览页直接复用。
+  const builder = getCachedDirSummary(path);
+  if (builder) return builder;
+  if (direct !== undefined) return direct;
+  const wanted = pathKey(path);
+  for (const [key, value] of dirSizeCache.entries()) {
+    if (pathKey(key) === wanted) return value;
+  }
+  return undefined;
+}
+
 function pickDirSummary(data, path) {
   const wanted = pathKey(path);
   const summaries = data.summaries || {};
@@ -344,9 +358,10 @@ function dirSizeCompact(info) {
 }
 
 function updateDirSizeDisplays(path, notifyName) {
-  const value = dirSizeCache.get(path);
+  const value = cachedDirSize(path);
+  const wanted = pathKey(path);
   const elements = Array.from(document.querySelectorAll('[data-size-path]'))
-    .filter((element) => element.dataset.sizePath === path);
+    .filter((element) => pathKey(element.dataset.sizePath) === wanted);
   for (const element of elements) {
     if (value === 'pending') {
       element.textContent = '计算中…';
@@ -371,7 +386,12 @@ function updateDirSizeDisplays(path, notifyName) {
 }
 
 function applyDirSizeCache() {
-  for (const [path, value] of dirSizeCache.entries()) {
+  const paths = new Set();
+  for (const element of document.querySelectorAll('[data-size-path]')) {
+    if (element.dataset.sizePath) paths.add(element.dataset.sizePath);
+  }
+  for (const path of paths) {
+    const value = cachedDirSize(path);
     if (value && typeof value === 'object') updateDirSizeDisplays(path);
   }
 }
@@ -391,21 +411,31 @@ async function flushDirSizeQueue() {
         timeoutMs: 60_000,
       }),
     });
+    for (const [summaryPath, summary] of Object.entries(data.summaries || {})) {
+      if (!summaryPath || !summary || typeof summary !== 'object') continue;
+      dirSizeCache.set(summaryPath, {
+        fileCount: Number(summary.fileCount) || 0,
+        totalSize: Number(summary.totalSize) || 0,
+        totalSizeOnDisk: Number(summary.totalSizeOnDisk) || 0,
+        partial: Boolean(summary.partial || summary.incomplete || summary.sizePartial),
+      });
+    }
     for (const path of paths) {
       const summary = pickDirSummary(data, path);
-      if (!summary) {
-        dirSizeCache.set(path, 'error');
-      } else {
+      if (summary) {
         dirSizeCache.set(path, {
           fileCount: Number(summary.fileCount) || 0,
           totalSize: Number(summary.totalSize) || 0,
           totalSizeOnDisk: Number(summary.totalSizeOnDisk) || 0,
           partial: Boolean(summary.partial || summary.incomplete || summary.sizePartial),
         });
+      } else if (!(cachedDirSize(path) && typeof cachedDirSize(path) === 'object')) {
+        dirSizeCache.set(path, 'error');
       }
       updateDirSizeDisplays(path, dirSizeNotify.get(path));
       dirSizeNotify.delete(path);
     }
+    applyDirSizeCache();
   } catch (err) {
     for (const path of paths) {
       dirSizeCache.set(path, 'error');
@@ -431,7 +461,7 @@ function scheduleDirSizeFlush() {
 
 function requestDirSize(path, name, notify = false) {
   if (!path) return;
-  const cached = dirSizeCache.get(path);
+  const cached = cachedDirSize(path);
   if (cached && typeof cached === 'object') {
     updateDirSizeDisplays(path, name);
     return;
