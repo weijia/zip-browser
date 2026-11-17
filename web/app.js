@@ -213,7 +213,10 @@ function initMobileChrome() {
     if (!topActions) return;
     const topbar = document.querySelector('.topbar');
     if (!topbar) return;
-    const bottom = Math.max(0, Math.round(topbar.getBoundingClientRect().bottom));
+    // 手机端「更多」已挪到面包屑行：菜单贴着按钮下沿展开，
+    // 不再按 topbar 底边算，避免把菜单顶到屏幕最上面。
+    const anchor = moreBtn || topbar;
+    const bottom = Math.max(0, Math.round(anchor.getBoundingClientRect().bottom));
     topActions.style.setProperty('--menu-top', `${bottom}px`);
     // 不用 dvh：Android WebView 里 dvh 可能为 0，会把菜单压成一条边。
     const room = viewportHeight() - bottom - 8;
@@ -978,7 +981,7 @@ async function renderDir(abs) {
   }
   // 当前路径只由顶部面包屑显示；这里不再重复一条完整路径标题。
   stage.classList.add('list-mode');
-  stage.innerHTML = `${switcher}${trashToolbarHtml()}<div class="stage-scroll">${body}</div>`;
+  stage.innerHTML = `<div class="stage-tools">${switcher}${trashToolbarHtml()}</div><div class="stage-scroll">${body}</div>`;
   // 新工具栏插入后再同步一次数量/按钮状态（勾选状态已由行模板带出）。
   resetTrashSelection();
   applyDirSizeCache();

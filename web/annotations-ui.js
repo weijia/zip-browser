@@ -70,6 +70,11 @@ function renderBar() {
     <datalist id="annoTagSuggestions">${suggestions}</datalist>
     <button type="button" class="anno-bookmark${marked ? ' active' : ''}" data-action="anno-toggle-bookmark">${marked ? '★ 已收藏' : '☆ 加入书签'}</button>
   </div>`;
+  const tools = document.querySelector('.stage-tools');
+  if (tools) {
+    tools.insertAdjacentHTML('afterbegin', html);
+    return;
+  }
   const title = document.querySelector('.stage-title');
   if (title) title.insertAdjacentHTML('afterend', html);
   else $('stage')?.insertAdjacentHTML('afterbegin', html);

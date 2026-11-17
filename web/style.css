@@ -643,9 +643,10 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
   /* 手机端紧凑排版：压缩留白和卡片高度，让一屏多显示几条。
      只作用于窄屏，桌面端保持原密度。 */
   body { font-size: 12px; line-height: 1.45; }
-  .topbar { padding: 5px 8px; gap: 6px; }
-  .brand { font-size: 12px; gap: 6px; }
-  .brand-mark { width: 9px; height: 9px; }
+  /* 手机端不再占一行标题：品牌隐藏，topbar 归零；「更多」已挪到面包屑行。 */
+  .topbar { height: 0; min-height: 0; padding: 0; border: 0; overflow: visible; }
+  .brand { display: none; }
+  .toolbar .more-btn { display: inline-block; margin-left: 2px; flex: 0 0 auto; }
   .more-btn { min-height: 30px; padding: 3px 8px; font-size: 12px; }
   .toolbar { padding: 4px 8px; gap: 4px; }
   .toolbar button { min-height: 30px; padding: 2px 7px; font-size: 12px; }
@@ -653,9 +654,17 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
   .crumbs { font-size: 11px; gap: 2px; }
   .stage { padding: 6px 8px 10px; }
   .stage-title { margin-bottom: 8px; font-size: 12px; }
-  .view-switch { gap: 4px; margin-bottom: 8px; }
+  /* 标签、书签、视图切换和批量动作合成一块紧凑控制区。 */
+  .stage-tools {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px;
+    margin: 0 0 8px; padding: 4px 6px;
+    border: 1px solid var(--border); border-radius: 8px; background: #fff;
+  }
+  .stage-tools .anno-bar, .stage-tools .view-switch, .stage-tools .trash-toolbar { display: contents; }
+  .stage-tools .anno-bar-label, .stage-tools .anno-none, .stage-tools .trash-hint { display: none; }
+  .view-switch { gap: 4px; margin-bottom: 0; }
   .view-switch button { min-height: 30px; padding: 3px 9px; font-size: 12px; }
-  .trash-toolbar { gap: 6px; margin-bottom: 8px; font-size: 11px; }
+  .trash-toolbar { gap: 6px; margin-bottom: 0; font-size: 11px; }
   .trash-toolbar button { min-height: 28px; padding: 2px 8px; font-size: 11px; }
   .anno-bar { gap: 4px; }
   .anno-chip { font-size: 10px; padding: 1px 6px; }
