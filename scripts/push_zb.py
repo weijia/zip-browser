@@ -6,8 +6,8 @@ from pathlib import Path
 
 repo = "weijia/zip-browser"
 root = Path(r"C:\codes\nodejs\zip-browser")
-files = ["web/app.js", "web/style.css", ".gitignore", "scripts/push_zb.py"]
-message = "feat(zb): 选中状态改为独立行标识并整行高亮"
+files = ["web/manifest-builder.js", "web/index.html", "scripts/push_zb.py"]
+message = "fix(zb): 目录树保持展开并区分覆盖半选"
 
 
 def gh(args, payload=None, method=None):

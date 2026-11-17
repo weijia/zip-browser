@@ -38,6 +38,7 @@ const TREE_CACHE_TTL_MS = 5 * 60 * 1000; // 展开子目录缓存 5 分钟，与
 const SCAN_BATCH_SIZE = 4;               // 目录体积/清单扫描每批根数，避免单请求共享 deadline 饿死后面的根
 const SCAN_BATCH_TIMEOUT_MS = 60_000;    // 每批独立超时；OpenList 单请求上限 120 秒
 const treeCache = new Map();             // 归一化 path -> { children, at }
+const expandedTree = new Set();          // 已展开的归一化目录路径；重绘后用它恢复目录树
 const treeInflight = new Map();          // 归一化 path -> Promise，避免并发展开重复请求
 const sizePending = new Set();           // 正在排队/计算的归一化目录路径
 const sizeFailures = new Map();          // 归一化 path -> 错误信息
@@ -59,6 +60,19 @@ function pathIsUnder(parent, child) {
   if (!p || !c) return false;
   if (c === p) return true;
   return c.startsWith(p.endsWith('\\') ? p : `${p}\\`);
+}
+
+// 与文件列表行的「含子目录」语义保持一致：
+// recursive=false 只覆盖直接子目录；recursive=true 覆盖所有后代。
+function dirCoveredByAncestor(dirSel, path) {
+  const key = normPath(path);
+  return (dirSel?.dirs || []).some((entry) => {
+    const root = normPath(entry.path);
+    if (!root || root === key || !pathIsUnder(root, key)) return false;
+    if (entry.recursive !== false) return true;
+    const rest = key.slice(root.length + 1);
+    return !rest.includes('\\');
+  });
 }
 
 function scanSummaryOf(scan, path) {
@@ -208,22 +222,39 @@ async function ensureHostInfo() {
 function treeNodeHtml(node) {
   const dirSel = store.get('dirs');
   const fileSel = store.get('files');
-  const checked = isDirSelected(dirSel, node.path) ? 'checked' : '';
+  const key = normPath(node.path);
+  const exact = isDirSelected(dirSel, node.path);
+  const covered = !exact && dirCoveredByAncestor(dirSel, node.path);
+  const checked = exact ? 'checked' : '';
+  const coveredAttr = covered ? 'data-covered="1"' : '';
+  const checkTitle = exact
+    ? '本目录已作为清单根单独选中'
+    : (covered ? '已被上层目录的“含子目录/仅本层”覆盖，不需要重复勾选' : '未加入目录清单');
   const inFiles = isFileSelected(fileSel, node.path) || (fileSel.dirs || []).some((d) => d.path.toLowerCase() === node.path.toLowerCase());
   const tags = (node.tags || []).slice(0, 3).map((t) => `<span class="bt-tag">${esc(t)}</span>`).join('');
   const size = dirSizeText(node.path, {
     includeSize: dirSel.options.includeSize !== false,
     compact: true,
   });
+  const expanded = expandedTree.has(key);
+  let childrenHtml = '';
+  if (expanded) {
+    const cached = treeCache.get(key);
+    childrenHtml = cached
+      ? ((cached.children || []).length
+        ? (cached.children || []).map(treeNodeHtml).join('')
+        : '<div class="bt-empty">没有子目录</div>')
+      : '<div class="bt-empty">读取子目录…</div>';
+  }
   return `<div class="bt-node" data-path="${esc(node.path)}">
     <div class="bt-row">
-      <button type="button" class="bt-expand" data-bt="expand" title="展开子目录">▸</button>
-      <label class="bt-check"><input type="checkbox" data-bt="check" data-path="${esc(node.path)}" ${checked}> <span>${esc(node.name || node.path)}</span></label>
+      <button type="button" class="bt-expand" data-bt="expand" title="展开子目录">${expanded ? '▾' : '▸'}</button>
+      <label class="bt-check"><input type="checkbox" data-bt="check" data-path="${esc(node.path)}" ${checked}${coveredAttr} title="${checkTitle}"> <span>${esc(node.name || node.path)}</span></label>
       ${tags}
       <span class="bt-size" data-size-path="${esc(node.path)}" title="整棵物理子树的体积">${esc(size)}</span>
       <button type="button" class="bt-add ${inFiles ? 'active' : ''}" data-bt="add-fl" data-path="${esc(node.path)}" title="把该目录下的文件加入文件列表选择集">${inFiles ? '已加入' : '+ 目录下文件'}</button>
     </div>
-    <div class="bt-children hidden"></div>
+    <div class="bt-children${expanded ? '' : ' hidden'}">${childrenHtml}</div>
   </div>`;
 }
 
@@ -239,7 +270,7 @@ async function renderDirs() {
       <span class="bl-path" title="${esc(item.path)}">${esc(item.path)}</span>
       <span class="dl-size" data-size-path="${esc(item.path)}" title="整棵物理子树口径，与清单显示几层无关">${esc(size)}</span>
       <button type="button" data-bt="dl-refresh" data-path="${esc(item.path)}" title="重新计算这个目录的体积">刷新</button>
-      <button type="button" data-bt="dl-toggle" data-path="${esc(item.path)}" title="切换只加一层 / 含所有子目录">${item.recursive === false ? '仅本层' : '含子目录'}</button>
+      <button type="button" data-bt="dl-toggle" data-path="${esc(item.path)}" title="切换只加一层 / 含所有子目录">${item.recursive === false ? '仅本层' : '含所有子目录'}</button>
       <button type="button" class="danger-text" data-bt="dl-remove" data-path="${esc(item.path)}">移除</button>
     </div>`;
   }).join('');
@@ -247,7 +278,7 @@ async function renderDirs() {
     pane.innerHTML = '<p class="builder-hint">请先进入一个磁盘目录，再从这里勾选要生成清单的子目录。</p>';
     return;
   }
-  pane.innerHTML = `<p class="builder-hint">从 <strong>${esc(root)}</strong> 开始勾选；也可在文件浏览页的目录行点 <strong>+ 目录清单</strong>，选择只加一层或含所有子目录，并查看目录体积。展开子目录只按需读取一层，体积单独异步计算。</p>
+  pane.innerHTML = `<p class="builder-hint">从 <strong>${esc(root)}</strong> 开始勾选；也可在文件浏览页的目录行点 <strong>+ 目录清单</strong>，选择只加一层或含所有子目录，并查看目录体积。勾选表示把这个目录作为清单根；父目录已选“含子目录”时，子目录显示为半选，不需要重复勾。展开子目录只按需读取一层，体积单独异步计算。</p>
     <p class="builder-totals" id="builderTotals">${totalsHtml()}</p>
     <div class="bl-section-title">已选目录（${(sel.dirs || []).length}）</div>
     <div class="bl-list">${rows || '<div class="bl-empty">尚未选择目录</div>'}</div>
@@ -258,6 +289,8 @@ async function renderDirs() {
       <label><input type="checkbox" id="builderOptSize" ${sel.options.includeSize ? 'checked' : ''}> 计算目录体积</label>
       <label><input type="checkbox" id="builderOptMtime" ${sel.options.includeMtime ? 'checked' : ''}> 记录 mtime</label>
     </div>`;
+  applyCoveredChecks(pane);
+  void hydrateExpandedNodes(pane);
 }
 
 function copyRowHtml(path, ref) {
@@ -573,9 +606,10 @@ function queueSizes(paths, { force = false } = {}) {
 /** 文件浏览页目录行「+ 目录清单」入口：只打开弹窗，不写选择集、不上传。 */
 export function openDirListForItem(item) {
   if (!store || !item?.path) return;
-  const sel = store.get('dirs');
+  const sel = canonicalDirSelection(store.get('dirs'));
+  if (sel !== store.get('dirs')) store.set('dirs', sel);
   const existing = (sel.dirs || []).find(
-    (entry) => String(entry.path).toLowerCase() === String(item.path).toLowerCase(),
+    (entry) => normPath(entry.path) === normPath(item.path),
   );
   dirDraft = { path: item.path, recursive: existing ? existing.recursive !== false : false };
   const input = $('dirListPath');
@@ -603,7 +637,7 @@ function saveDirList() {
   const path = dirDraft.path;
   const recursive = $('dirListAll')?.checked === true;
   const includeFiles = $('dirListIncludeFiles')?.checked === true;
-  let sel = store.get('dirs');
+  let sel = canonicalDirSelection(store.get('dirs'));
   sel = removeDirSelection(sel, path); // 已存在时先移除，允许改层数
   sel = addDirSelection(sel, path, recursive);
   store.set('dirs', sel);
@@ -739,12 +773,78 @@ function render() {
   if (tab === 'diag') renderDiag();
 }
 
+function applyCoveredChecks(rootEl) {
+  for (const input of rootEl?.querySelectorAll?.('input[data-bt="check"][data-covered="1"]') || []) {
+    input.indeterminate = true;
+  }
+}
+
 function renderTreeChildren(childrenEl, children) {
   childrenEl.innerHTML = (children || []).length
     ? (children || []).map(treeNodeHtml).join('')
     : '<div class="bt-empty">没有子目录</div>';
   childrenEl.dataset.loaded = '1';
   childrenEl.classList.remove('hidden');
+  applyCoveredChecks(childrenEl);
+  void hydrateExpandedNodes(childrenEl);
+}
+
+async function hydrateExpandedNodes(rootEl) {
+  for (const nodeEl of rootEl?.querySelectorAll?.('.bt-node') || []) {
+    const key = normPath(nodeEl.dataset.path);
+    if (!expandedTree.has(key) || treeCache.has(key)) continue;
+    const childrenEl = nodeEl.querySelector(':scope > .bt-children');
+    if (!childrenEl || childrenEl.dataset.loading === '1') continue;
+    childrenEl.dataset.loading = '1';
+    try {
+      const result = await treeChildrenFor(nodeEl.dataset.path);
+      if (childrenEl.isConnected && expandedTree.has(key)) {
+        renderTreeChildren(childrenEl, result.children);
+      }
+    } catch (err) {
+      if (childrenEl.isConnected) {
+        childrenEl.innerHTML = `<div class="bt-empty">读取失败：${esc(err.message)}</div>`;
+      }
+    } finally {
+      delete childrenEl.dataset.loading;
+    }
+  }
+}
+
+function toCurrentPath(value) {
+  const text = String(value || '').trim();
+  if (!text || text.startsWith('zip:')) return text;
+  const currentDir = String(getCurrentDir() || '');
+  if (/^[A-Za-z]:[\\/]/.test(currentDir)) {
+    const match = text.match(/^\/([A-Za-z])(?:\/(.*))?$/);
+    if (match) return `${match[1].toUpperCase()}:\\${(match[2] || '').replace(/\//g, '\\')}`;
+    return text.replace(/\//g, '\\');
+  }
+  if (currentDir.startsWith('/')) {
+    const match = text.match(/^([A-Za-z]):[\\/](.*)$/);
+    if (match) return `/${match[1].toUpperCase()}/${match[2].replace(/\\/g, '/')}`;
+    return text.replace(/\\/g, '/');
+  }
+  return text;
+}
+
+function uiPathFromHost(path) {
+  return toCurrentPath(path);
+}
+
+function canonicalDirSelection(sel) {
+  let changed = false;
+  const seen = new Set();
+  const dirs = [];
+  for (const item of sel?.dirs || []) {
+    const path = toCurrentPath(item.path);
+    if (path !== item.path) changed = true;
+    const key = normPath(path);
+    if (!key || seen.has(key)) { changed = true; continue; }
+    seen.add(key);
+    dirs.push(path === item.path ? item : { ...item, path });
+  }
+  return changed ? { ...sel, dirs } : sel;
 }
 
 function treeChildrenFor(path, { force = false } = {}) {
@@ -760,7 +860,8 @@ function treeChildrenFor(path, { force = false } = {}) {
   }
   const promise = api(`/api/mft/tree?path=${encodeURIComponent(path)}`)
     .then((data) => {
-      const children = Array.isArray(data?.children) ? data.children : [];
+      const rawChildren = Array.isArray(data?.children) ? data.children : [];
+      const children = rawChildren.map((child) => ({ ...child, path: uiPathFromHost(child.path) }));
       treeCache.set(key, { children, at: Date.now() });
       return children;
     })
@@ -781,12 +882,17 @@ async function refreshTreeInBackground(path, childrenEl) {
 async function expandNode(nodeEl) {
   const childrenEl = nodeEl.querySelector(':scope > .bt-children');
   if (!childrenEl) return;
-  if (!childrenEl.classList.contains('hidden')) {
-    childrenEl.classList.add('hidden');
-    return;
-  }
   const path = nodeEl.dataset.path;
   const key = normPath(path);
+  const expandBtn = nodeEl.querySelector(':scope > .bt-row .bt-expand');
+  if (!childrenEl.classList.contains('hidden')) {
+    childrenEl.classList.add('hidden');
+    expandedTree.delete(key);
+    if (expandBtn) expandBtn.textContent = '▸';
+    return;
+  }
+  expandedTree.add(key);
+  if (expandBtn) expandBtn.textContent = '▾';
   const cached = treeCache.get(key);
   if (cached) {
     renderTreeChildren(childrenEl, cached.children);
@@ -995,8 +1101,9 @@ async function onAction(action, element) {
       break;
     }
     case 'check': {
-      const sel = store.get('dirs');
-      store.set('dirs', element.checked ? addDirSelection(sel, path) : removeDirSelection(sel, path));
+      const sel = canonicalDirSelection(store.get('dirs'));
+      const recursive = sel.options.recursive !== false;
+      store.set('dirs', element.checked ? addDirSelection(sel, path, recursive) : removeDirSelection(sel, path));
       invalidateScan();
       render();
       if (element.checked) void queueSizes([path]);
@@ -1101,6 +1208,8 @@ export function openBuilder() {
   const modal = $('builderModal');
   if (modal) modal.classList.remove('hidden');
   syncBuilderInline();
+  const canonical = canonicalDirSelection(store?.get('dirs'));
+  if (canonical && canonical !== store.get('dirs')) store.set('dirs', canonical);
   void ensureHostInfo().then(() => render()).catch((err) => setStatus(`读取本机信息失败：${err.message}`, true));
   render();
   const dirSel = store?.get('dirs');
@@ -1203,9 +1312,10 @@ export function initManifestBuilder(options = {}) {
   $('builderBody')?.addEventListener('change', (event) => {
     const element = event.target;
     if (element.dataset.bt === 'check') {
-      const sel = store.get('dirs');
+      const sel = canonicalDirSelection(store.get('dirs'));
+      const recursive = sel.options.recursive !== false;
       store.set('dirs', element.checked
-        ? addDirSelection(sel, element.dataset.path)
+        ? addDirSelection(sel, element.dataset.path, recursive)
         : removeDirSelection(sel, element.dataset.path));
       invalidateScan();
       render();

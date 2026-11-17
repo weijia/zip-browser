@@ -165,8 +165,8 @@
     <p class="modal-note">把目录加入目录结构清单（<code>struct/</code> v2）。体积按<strong>整棵物理子树</strong>统计，与清单里显示几层无关（与 dir-struct-gen 口径一致）；因此「仅本层」也需要扫描整棵子树才能算准大小。</p>
     <label class="cr-field">目录<input id="dirListPath" type="text" readonly></label>
     <div class="dl-options">
-      <label><input type="radio" name="dlDepth" id="dirListOne" value="one" checked> 仅本层 — 清单里只列该目录与一层子目录</label>
-      <label><input type="radio" name="dlDepth" id="dirListAll" value="all"> 含所有子目录 — 递归整棵子树</label>
+      <label><input type="radio" name="dlDepth" id="dirListOne" value="one" checked> 仅本层 — 清单写该目录和它的直接子目录，不写孙目录</label>
+      <label><input type="radio" name="dlDepth" id="dirListAll" value="all"> 含所有子目录 — 递归写整棵子树</label>
       <label><input type="checkbox" id="dirListIncludeFiles"> 同时加入文件列表 — 包含该目录下的所有文件</label>
     </div>
     <div class="bl-section-title">目录体积
