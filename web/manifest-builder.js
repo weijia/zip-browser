@@ -84,8 +84,14 @@ function scanSummaryOf(scan, path) {
   return found ? sums[found] : null;
 }
 
+function cachePathKey(value) {
+  const key = normPath(value);
+  // OpenList 返回 /C/codes/...，选择集可能是 C:\codes\...；统一成盘符键。
+  return key.replace(/^\\([a-z])\\/, '$1:\\').replace(/^\\([a-z]):/, '$1:');
+}
+
 function cacheGetSummary(path) {
-  return dirSummaryCache.get(normPath(path)) || null;
+  return dirSummaryCache.get(cachePathKey(path)) || null;
 }
 
 /** 供文件浏览页读取「清单生成」已经扫描过的目录体积，避免重复请求。 */
@@ -95,7 +101,7 @@ export function getCachedDirSummary(path) {
 
 function cacheScanSummaries(scan) {
   for (const [path, sum] of Object.entries(scan?.summaries || {})) {
-    dirSummaryCache.set(normPath(path), {
+    dirSummaryCache.set(cachePathKey(path), {
       fileCount: Number(sum.fileCount) || 0,
       totalSize: Number(sum.totalSize) || 0,
       totalSizeOnDisk: Number(sum.totalSizeOnDisk) || 0,
@@ -108,7 +114,7 @@ function cacheScanSummaries(scan) {
 function cacheRootSummaries(scan) {
   for (const root of scan?.roots || []) {
     if (!root?.path) continue;
-    dirSummaryCache.set(normPath(root.path), {
+    dirSummaryCache.set(cachePathKey(root.path), {
       fileCount: Number(root.fileCount) || 0,
       totalSize: Number(root.totalSize) || 0,
       totalSizeOnDisk: Number(root.totalSizeOnDisk) || 0,
@@ -488,6 +494,10 @@ async function runScanBatches(rawEntries, {
   for (let index = 0; index < total; index += SCAN_BATCH_SIZE) {
     const batch = entries.slice(index, index + SCAN_BATCH_SIZE);
     onProgress?.({ done: index, total, batch });
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const abortTimer = controller
+      ? setTimeout(() => controller.abort(), timeoutMs + 15_000)
+      : null;
     try {
       const part = await api('/api/mft/scan', {
         method: 'POST',
@@ -496,14 +506,20 @@ async function runScanBatches(rawEntries, {
           timeoutMs,
           ...(hash ? { hash: true } : {}),
         }),
+        ...(controller ? { signal: controller.signal } : {}),
       });
       mergeScanResult(out, part);
     } catch (err) {
+      if (err?.name === 'AbortError') {
+        err.message = `扫描请求超过 ${Math.round((timeoutMs + 15_000) / 1000)} 秒，已取消`;
+      }
       out.failed.push({
         paths: batch.map((entry) => entry.path),
         message: err.message,
       });
       if (!continueOnError) throw err;
+    } finally {
+      if (abortTimer) clearTimeout(abortTimer);
     }
   }
   onProgress?.({ done: total, total, batch: [] });
@@ -570,8 +586,12 @@ async function flushSizeQueue() {
     }
   } finally {
     sizeQueueRunning = false;
-    if (sizeQueue.length) scheduleSizeFlush(0);
-    else updateBuilderTotals();
+    if (sizeQueue.length) {
+      scheduleSizeFlush(0);
+    } else {
+      updateBuilderTotals();
+      setStatus(sizeFailures.size ? `目录体积计算完成，${sizeFailures.size} 个目录失败` : '目录体积计算完成');
+    }
   }
 }
 

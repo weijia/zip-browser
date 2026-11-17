@@ -6,8 +6,8 @@ from pathlib import Path
 
 repo = "weijia/zip-browser"
 root = Path(r"C:\codes\nodejs\zip-browser")
-files = ["server/manifest-scan.js", "tests/smoke.test.mjs", "web/manifest-builder.js", "scripts/push_zb.py"]
-message = "fix(zb): tree API reports hasChildren so empty dirs have no arrow"
+files = ["web/manifest-builder.js", "scripts/push_zb.py"]
+message = "fix(zb): normalize scan summary cache keys and clear size progress state"
 
 
 def gh(args, payload=None, method=None):
