@@ -407,6 +407,7 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
 
 /* 加密归档标记：列表行标签 + 缩略图卡片角标（避开右上的删除、右下的打开位置） */
 .tag-enc { color: #8a4b00; border-color: #f0d6a8; background: #fff5e6; }
+.tag-sel { color: #0f6e56; border-color: #b7e3d3; background: #e1f5ee; }
 .enc-badge { position: absolute; right: 5px; bottom: 5px; z-index: 1; font-size: 10px; line-height: 1.6; padding: 1px 7px; color: #8a4b00; background: rgba(255, 245, 230, .96); border: 1px solid #f0d6a8; border-radius: 99px; white-space: nowrap; }
 
 #dirListModal .modal-card { width: min(600px, 94vw); max-height: 88vh; overflow: auto; }
@@ -635,5 +636,56 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
     flex: 0 0 auto; margin: 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
     border-top: 1px solid var(--border); background: #fff;
   }
+
+  /* 手机端紧凑排版：压缩留白和卡片高度，让一屏多显示几条。
+     只作用于窄屏，桌面端保持原密度。 */
+  body { font-size: 12px; line-height: 1.45; }
+  .topbar { padding: 5px 8px; gap: 6px; }
+  .brand { font-size: 12px; gap: 6px; }
+  .brand-mark { width: 9px; height: 9px; }
+  .more-btn { min-height: 30px; padding: 3px 8px; font-size: 12px; }
+  .toolbar { padding: 4px 8px; gap: 4px; }
+  .toolbar button { min-height: 30px; padding: 2px 7px; font-size: 12px; }
+  .side-toggle { min-height: 30px; padding: 2px 7px; font-size: 15px; }
+  .crumbs { font-size: 11px; gap: 2px; }
+  .stage { padding: 6px 8px 10px; }
+  .stage-title { margin-bottom: 8px; font-size: 12px; }
+  .view-switch { gap: 4px; margin-bottom: 8px; }
+  .view-switch button { min-height: 30px; padding: 3px 9px; font-size: 12px; }
+  .trash-toolbar { gap: 6px; margin-bottom: 8px; font-size: 11px; }
+  .trash-toolbar button { min-height: 28px; padding: 2px 8px; font-size: 11px; }
+  .anno-bar { gap: 4px; }
+  .anno-chip { font-size: 10px; padding: 1px 6px; }
+  .anno-add, .anno-bookmark { font-size: 10px; padding: 2px 8px; }
+
+  .file-table tr {
+    margin: 0 0 4px; padding: 6px 36px 6px 30px;
+    border-radius: 6px;
+  }
+  .file-table td { font-size: 11px; }
+  .file-table td.trash-col-check { left: 7px; top: 8px; width: 18px; }
+  .file-table td.trash-col-action { margin-top: 4px; }
+  .file-name { gap: 5px; font-size: 12px; line-height: 1.4; }
+  .file-thumb { width: 24px; height: 24px; }
+  .file-size, .file-time { margin: 2px 8px 0 0; font-size: 10px; }
+  .tag { font-size: 10px; padding: 1px 6px; }
+  .trash-check { width: 16px; height: 16px; }
+  .file-name .row-menu-btn {
+    right: 5px; top: 5px; width: 30px; min-width: 30px; min-height: 30px;
+    font-size: 17px;
+  }
+  .thumb-card .row-menu-btn { width: 30px; min-width: 30px; min-height: 30px; font-size: 17px; }
+  .thumb-head { font-size: 12px; margin-bottom: 8px; }
+  .thumb-grid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 6px; }
+  .thumb-box { height: 88px; }
+  .thumb-name { padding: 5px 7px 0; font-size: 11px; }
+  .thumb-meta { padding: 0 7px 6px; font-size: 10px; }
+  .drive-grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 6px; }
+  .drive-card { padding: 9px; }
+  .drive-bar { margin: 8px 0 5px; }
+  .folder-chips { gap: 4px; margin-bottom: 8px; }
+  .folder-chip { padding: 3px 8px; font-size: 11px; }
+  .statusbar { padding: 4px 8px; font-size: 11px; }
+  .status-right { gap: 4px; }
 }
 

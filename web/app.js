@@ -9,7 +9,7 @@ import {
 import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.js';
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
 import { initManifestSync, scheduleSync } from './manifest-sync.js';
-import { createSelectionStore } from './manifest-selection.js';
+import { createSelectionStore, isDirSelected, isFileSelected } from './manifest-selection.js';
 import {
   initManifestBuilder, addPickedFromItem, addFileListDir, openCopyRefForItem,
   openDirListForItem, getCachedDirSummary,
@@ -492,7 +492,39 @@ function flControls(item) {
   return `<button type="button" class="fl-add" data-action="fl-add"
     data-path="${esc(item.path)}" data-name="${esc(item.name)}" data-dir="${dir ? '1' : ''}"
     data-size="${Number(item.size) || 0}" data-mtime="${Number(item.mtime) || 0}"
-    title="${dir ? '把该目录下的文件加入文件列表选择集' : '把该文件加入文件列表选择集'}">${dir ? '+ 目录下文件' : '+ 该文件'}</button>`;
+    title="${dir ? '把这个目录的下一层子目录加入文件列表选择集' : '把该文件加入文件列表选择集'}">${dir ? '+ 目录下文件' : '+ 该文件'}</button>`;
+}
+
+// 文件列表 / 目录清单 / 手工文件三个选择集共用同一套持久化仓库；
+// 文件浏览页用它给已选项加一个常驻标记，切换目录后仍能看到。
+function manifestSelectionBadge(item) {
+  const fileSel = selectionStore.get('files');
+  const dirSel = selectionStore.get('dirs');
+  const key = String(item.path || '').toLowerCase();
+  if (!item.dir && isFileSelected(fileSel, item.path)) return '<span class="tag tag-sel">已选文件</span>';
+  if (item.dir && (fileSel.dirs || []).some((entry) => String(entry.path).toLowerCase() === key)) {
+    return '<span class="tag tag-sel">已选文件</span>';
+  }
+  if (item.dir && isDirSelected(dirSel, item.path)) return '<span class="tag tag-sel">已选清单</span>';
+  return '';
+}
+
+// 选择集在清单页、目录行按钮、右键菜单里都可能变化；只刷新标签，
+// 不重列目录，避免把删除勾选状态一并清掉。
+function refreshManifestBadges() {
+  for (const row of document.querySelectorAll('tr[data-path]')) {
+    const name = row.querySelector('.file-name');
+    if (!name) continue;
+    name.querySelectorAll('.tag-sel').forEach((tag) => tag.remove());
+    const badge = manifestSelectionBadge({
+      path: row.dataset.path,
+      dir: row.dataset.action === 'dir',
+    });
+    if (!badge) continue;
+    const anchor = name.querySelector('.tag-enc') || name.querySelector('.fl-add');
+    if (anchor) anchor.insertAdjacentHTML('beforebegin', badge);
+    else name.insertAdjacentHTML('beforeend', badge);
+  }
 }
 
 // 「+ 副本」：给单个文件预留一个网络副本链接 / 远端路径（仅元数据，不上传内容）。
@@ -900,7 +932,7 @@ async function renderDir(abs) {
         : `<span class="icon ${icon}"></span>`;
       return `<tr data-action="${action}" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
         ${trashRowStart(item)}
-        <td><span class="file-name">${thumb}${esc(item.name)}${hint}${encBadge(item)}${flControls(item)}${dirListControls(item)}${copyControls(item)}${explorerControls(item)}${rowMenuButton(item)}</span></td>
+        <td><span class="file-name">${thumb}${esc(item.name)}${hint}${manifestSelectionBadge(item)}${encBadge(item)}${flControls(item)}${dirListControls(item)}${copyControls(item)}${explorerControls(item)}${rowMenuButton(item)}</span></td>
         <td class="file-size${item.dir ? ' dir-size-cell' : ''}"${item.dir ? ` data-size-path="${esc(item.path)}"` : ''}>${item.dir ? '文件夹' : formatSize(item.size)}</td>
         <td class="file-time">${formatTime(item.mtime)}</td>
         ${trashRowEnd(item)}
@@ -1260,7 +1292,7 @@ document.addEventListener('click', async (event) => {
       mtime: Number(element.dataset.mtime) || 0,
       dir: element.dataset.dir === '1',
     };
-    if (item.dir) addFileListDir(item.path);
+    if (item.dir) await addFileListDir(item.path);
     else addPickedFromItem(item);
     return;
   }
@@ -1365,8 +1397,10 @@ window.addEventListener('hashchange', () => {
   restore().catch(showError);
 });
 
-const selectionStore = createSelectionStore();
-selectionStore.init().catch((err) => console.warn('selection store unavailable', err));
+const selectionStore = createSelectionStore({ onChange: () => refreshManifestBadges() });
+selectionStore.init()
+  .then(() => refreshManifestBadges())
+  .catch((err) => console.warn('selection store unavailable', err));
 
 initAnnotations({
   navigate, openZipBookmark, status,

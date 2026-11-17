@@ -586,6 +586,12 @@ export function openDirListForItem(item) {
   if (all) all.checked = dirDraft.recursive;
   const save = $('dirListSave');
   if (save) save.textContent = existing ? '更新目录清单' : '加入目录清单';
+  const fileSel = store.get('files');
+  const inFiles = (fileSel.dirs || []).some(
+    (entry) => String(entry.path).toLowerCase() === String(item.path).toLowerCase(),
+  );
+  const includeFiles = $('dirListIncludeFiles');
+  if (includeFiles) includeFiles.checked = inFiles;
   const err = $('dirListError');
   if (err) err.textContent = '';
   $('dirListModal')?.classList.remove('hidden');
@@ -596,13 +602,22 @@ function saveDirList() {
   if (!dirDraft) return;
   const path = dirDraft.path;
   const recursive = $('dirListAll')?.checked === true;
+  const includeFiles = $('dirListIncludeFiles')?.checked === true;
   let sel = store.get('dirs');
   sel = removeDirSelection(sel, path); // 已存在时先移除，允许改层数
   sel = addDirSelection(sel, path, recursive);
   store.set('dirs', sel);
+
+  // 目录清单只负责 struct；勾选“同时加入文件列表”后，才把这个目录作为
+  // 文件列表根加入（从而包含该目录/子树下的所有文件）。
+  let fileSel = store.get('files');
+  fileSel = removeFileDirSelection(fileSel, path);
+  if (includeFiles) fileSel = addFileDirSelection(fileSel, path, recursive);
+  store.set('files', fileSel);
+
   invalidateScan();
   closeDirListModal();
-  setStatus(`已把 ${path} 加入目录清单（${recursive ? '含所有子目录' : '仅本层'}）；点「重新扫描并生成」写入 struct v2`);
+  setStatus(`已把 ${path} 加入目录清单（${recursive ? '含所有子目录' : '仅本层'}）${includeFiles ? '，并加入文件列表' : ''}；点「重新扫描并生成」写入 struct v2`);
   render();
   if (store.get('dirs').options.includeSize !== false) void queueSizes([path]);
 }
@@ -1117,15 +1132,51 @@ export function addPickedFromItem(item) {
   render();
 }
 
-export function addFileListDir(path) {
+export async function addFileListDir(path) {
   if (!store || !path) return;
   const sel = store.get('files');
-  if ((sel.dirs || []).some((item) => item.path.toLowerCase() === String(path).toLowerCase())) return;
-  store.set('files', addFileDirSelection(sel, path));
+  const key = String(path).toLowerCase();
+  // zip 包内目录没有宿主机 /api/list，保留原来“整目录加入”的行为。
+  if (String(path).startsWith('zip:')) {
+    if ((sel.dirs || []).some((item) => item.path.toLowerCase() === key)) return;
+    store.set('files', addFileDirSelection(sel, path));
+    invalidateScan();
+    status(`已把 ${path} 加入文件列表选择集`);
+    render();
+    return;
+  }
+
+  let data;
+  try {
+    data = await api(`/api/list?path=${encodeURIComponent(path)}`);
+  } catch (err) {
+    setStatus(`读取 ${path} 的下一层目录失败：${err.message}`, true);
+    return;
+  }
+  const children = (data?.items || []).filter((item) => item?.dir && item.path);
+  if (!children.length) {
+    setStatus(`${path} 没有下一层子目录`, true);
+    return;
+  }
+
+  let next = sel;
+  let added = 0;
+  for (const child of children) {
+    if ((next.dirs || []).some((item) => item.path.toLowerCase() === String(child.path).toLowerCase())) continue;
+    next = addFileDirSelection(next, child.path);
+    added += 1;
+  }
+  if (!added) {
+    setStatus(`下一层目录都已在文件列表选择集中`);
+    return;
+  }
+  store.set('files', next);
   invalidateScan();
-  status(`已把 ${path} 加入文件列表选择集`);
+  status(`已把 ${added} 个下一层目录加入文件列表选择集`);
   render();
-  if (store.get('dirs').options.includeSize !== false) void queueSizes([path]);
+  if (store.get('dirs').options.includeSize !== false) {
+    void queueSizes(children.map((item) => item.path));
+  }
 }
 
 export function initManifestBuilder(options = {}) {
