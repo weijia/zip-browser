@@ -237,18 +237,22 @@ function treeNodeHtml(node) {
     compact: true,
   });
   const expanded = expandedTree.has(key);
+  const cached = treeCache.get(key);
+  const knownEmpty = Boolean(cached) && (cached.children || []).length === 0;
   let childrenHtml = '';
   if (expanded) {
-    const cached = treeCache.get(key);
     childrenHtml = cached
       ? ((cached.children || []).length
         ? (cached.children || []).map(treeNodeHtml).join('')
         : '<div class="bt-empty">没有子目录</div>')
       : '<div class="bt-empty">读取子目录…</div>';
   }
+  const expandControl = knownEmpty
+    ? '<span class="bt-expand bt-expand-empty" aria-hidden="true"></span>'
+    : `<button type="button" class="bt-expand" data-bt="expand" title="展开子目录">${expanded ? '▾' : '▸'}</button>`;
   return `<div class="bt-node" data-path="${esc(node.path)}">
     <div class="bt-row">
-      <button type="button" class="bt-expand" data-bt="expand" title="展开子目录">${expanded ? '▾' : '▸'}</button>
+      ${expandControl}
       <label class="bt-check"><input type="checkbox" data-bt="check" data-path="${esc(node.path)}" ${checked}${coveredAttr} title="${checkTitle}"> <span>${esc(node.name || node.path)}</span></label>
       ${tags}
       <span class="bt-size" data-size-path="${esc(node.path)}" title="整棵物理子树的体积">${esc(size)}</span>
@@ -278,7 +282,7 @@ async function renderDirs() {
     pane.innerHTML = '<p class="builder-hint">请先进入一个磁盘目录，再从这里勾选要生成清单的子目录。</p>';
     return;
   }
-  pane.innerHTML = `<p class="builder-hint">从 <strong>${esc(root)}</strong> 开始勾选；也可在文件浏览页的目录行点 <strong>+ 目录清单</strong>，选择只加一层或含所有子目录，并查看目录体积。勾选表示把这个目录作为清单根；父目录已选“含子目录”时，子目录显示为半选，不需要重复勾。展开子目录只按需读取一层，体积单独异步计算。</p>
+  pane.innerHTML = `<p class="builder-hint">从 <strong>${esc(root)}</strong> 开始勾选；也可在文件浏览页的目录行点 <strong>+ 目录清单</strong>，选择只加一层或含所有子目录，并查看目录体积。勾选框：<strong>勾选</strong>=本目录单独作为清单根；<strong>横杠（半选）</strong>=已被上层目录覆盖，不需要重复勾；<strong>空白</strong>=未选。没有子目录的目录不会显示展开箭头。展开子目录只按需读取一层，体积单独异步计算。</p>
     <p class="builder-totals" id="builderTotals">${totalsHtml()}</p>
     <div class="bl-section-title">已选目录（${(sel.dirs || []).length}）</div>
     <div class="bl-list">${rows || '<div class="bl-empty">尚未选择目录</div>'}</div>
@@ -786,6 +790,13 @@ function renderTreeChildren(childrenEl, children) {
   childrenEl.dataset.loaded = '1';
   childrenEl.classList.remove('hidden');
   applyCoveredChecks(childrenEl);
+  const nodeEl = childrenEl.parentElement;
+  const expandBtn = nodeEl?.querySelector(':scope > .bt-row .bt-expand');
+  if (expandBtn && expandBtn.tagName === 'BUTTON') {
+    const hasChildren = (children || []).length > 0;
+    expandBtn.disabled = !hasChildren;
+    expandBtn.style.visibility = hasChildren ? '' : 'hidden';
+  }
   void hydrateExpandedNodes(childrenEl);
 }
 

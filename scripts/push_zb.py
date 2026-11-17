@@ -6,8 +6,8 @@ from pathlib import Path
 
 repo = "weijia/zip-browser"
 root = Path(r"C:\codes\nodejs\zip-browser")
-files = ["web/manifest-builder.js", "web/index.html", "scripts/push_zb.py"]
-message = "fix(zb): 目录树保持展开并区分覆盖半选"
+files = ["web/manifest-builder.js", "web/index.html", "web/style.css", "scripts/push_zb.py"]
+message = "fix(zb): 空目录隐藏展开箭头并说明半选状态"
 
 
 def gh(args, payload=None, method=None):

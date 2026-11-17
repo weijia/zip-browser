@@ -356,6 +356,7 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
 .bt-node { margin: 3px 0; }
 .bt-row { display: flex; align-items: center; gap: 6px; min-height: 26px; flex-wrap: wrap; }
 .bt-expand { width: 20px; padding: 0; font-size: 11px; }
+.bt-expand-empty { display: inline-block; visibility: hidden; }
 .bt-check { flex: 1 1 auto; display: flex; align-items: center; gap: 5px; font-size: 12px; min-width: 150px; word-break: break-all; }
 .bt-tag { font-size: 10px; color: #534ab7; background: #eeedfe; border-radius: 99px; padding: 1px 6px; }
 .bt-add { font-size: 11px; padding: 2px 8px; color: #0f6e56; background: #e1f5ee; border-color: #bfe6d8; border-radius: 99px; }
