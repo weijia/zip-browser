@@ -517,21 +517,46 @@ function dirSelectionCovers(entry, path) {
   return Boolean(rest) && !rest.includes('/');
 }
 
-function manifestSelectionBadge(item) {
+function manifestSelectionState(item) {
   const fileSel = selectionStore.get('files');
   const dirSel = selectionStore.get('dirs');
-  const key = String(item.path || '').toLowerCase();
-  if (!item.dir && isFileSelected(fileSel, item.path)) return '<span class="tag tag-sel">已选文件</span>';
-  if (!item.dir) return '';
+  if (!item.dir) {
+    return isFileSelected(fileSel, item.path)
+      ? { kind: 'file', label: '文件', inherited: false }
+      : null;
+  }
   const fileRoot = (fileSel.dirs || []).find((entry) => dirSelectionCovers(entry, item.path));
   if (fileRoot) {
-    return `<span class="tag tag-sel">${dirPathKey(fileRoot.path) === dirPathKey(item.path) ? '已选文件' : '已选文件（含）'}</span>`;
+    return {
+      kind: 'file',
+      label: '文件',
+      inherited: dirPathKey(fileRoot.path) !== dirPathKey(item.path),
+    };
   }
   const dirRoot = (dirSel.dirs || []).find((entry) => dirSelectionCovers(entry, item.path));
   if (dirRoot) {
-    return `<span class="tag tag-sel">${dirPathKey(dirRoot.path) === dirPathKey(item.path) ? '已选清单' : '已选清单（含）'}</span>`;
+    return {
+      kind: 'dir',
+      label: '清单',
+      inherited: dirPathKey(dirRoot.path) !== dirPathKey(item.path),
+    };
   }
-  return '';
+  return null;
+}
+
+function manifestSelectionBadge(item) {
+  const state = manifestSelectionState(item);
+  if (!state) return '';
+  const title = state.kind === 'dir'
+    ? (state.inherited ? '父目录已加入目录清单，本目录包含在内' : '本目录已加入目录清单')
+    : (state.inherited ? '父目录已加入文件列表，本目录包含在内' : '本目录的文件已加入文件列表');
+  return `<span class="sel-pill ${state.kind}${state.inherited ? ' inherited' : ''}" title="${title}">✓ ${state.label}${state.inherited ? '·含' : ''}</span>`;
+}
+
+function manifestRowClass(item) {
+  const state = manifestSelectionState(item);
+  if (!state) return '';
+  return state.inherited ? 'sel-row sel-row-inherited' : 'sel-row';
 }
 
 // 批量选择后的两个动作：目录按“下一层子目录”加入文件列表；
@@ -575,14 +600,16 @@ function refreshManifestBadges() {
     const name = row.querySelector('.file-name');
     if (!name) continue;
     name.querySelectorAll('.tag-sel').forEach((tag) => tag.remove());
-    const badge = manifestSelectionBadge({
-      path: row.dataset.path,
-      dir: row.dataset.action === 'dir',
-    });
-    if (!badge) continue;
-    const anchor = name.querySelector('.tag-enc') || name.querySelector('.fl-add');
-    if (anchor) anchor.insertAdjacentHTML('beforebegin', badge);
-    else name.insertAdjacentHTML('beforeend', badge);
+    let slot = name.querySelector('.sel-state');
+    if (!slot) {
+      slot = document.createElement('span');
+      slot.className = 'sel-state';
+      name.prepend(slot);
+    }
+    const item = { path: row.dataset.path, dir: row.dataset.action === 'dir' };
+    slot.innerHTML = manifestSelectionBadge(item);
+    row.classList.toggle('sel-row', Boolean(slot.innerHTML));
+    row.classList.toggle('sel-row-inherited', Boolean(name.querySelector('.sel-pill.inherited')));
   }
 }
 
@@ -989,9 +1016,9 @@ async function renderDir(abs) {
       const thumb = isZip
         ? `<img class="file-thumb" src="${esc(fsCoverUrlFront(item.path, vsid, defpw))}" loading="lazy" alt="">`
         : `<span class="icon ${icon}"></span>`;
-      return `<tr data-action="${action}" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
+      return `<tr class="${manifestRowClass(item)}" data-action="${action}" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
         ${trashRowStart(item)}
-        <td><span class="file-name">${thumb}${esc(item.name)}${hint}${manifestSelectionBadge(item)}${encBadge(item)}${flControls(item)}${dirListControls(item)}${copyControls(item)}${explorerControls(item)}${rowMenuButton(item)}</span></td>
+        <td><span class="file-name"><span class="sel-state">${manifestSelectionBadge(item)}</span>${thumb}${esc(item.name)}${hint}${encBadge(item)}${flControls(item)}${dirListControls(item)}${copyControls(item)}${explorerControls(item)}${rowMenuButton(item)}</span></td>
         <td class="file-size${item.dir ? ' dir-size-cell' : ''}"${item.dir ? ` data-size-path="${esc(item.path)}"` : ''}>${item.dir ? '文件夹' : formatSize(item.size)}</td>
         <td class="file-time">${formatTime(item.mtime)}</td>
         ${trashRowEnd(item)}

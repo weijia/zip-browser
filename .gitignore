@@ -23,3 +23,6 @@ tests/.version-state*.json
 Thumbs.db
 .DS_Store
 desktop.ini
+
+# 本机截图与调试产物
+artifacts/

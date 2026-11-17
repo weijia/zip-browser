@@ -411,6 +411,24 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
 /* 加密归档标记：列表行标签 + 缩略图卡片角标（避开右上的删除、右下的打开位置） */
 .tag-enc { color: #8a4b00; border-color: #f0d6a8; background: #fff5e6; }
 .tag-sel { color: #0f6e56; border-color: #b7e3d3; background: #e1f5ee; }
+/* 选择状态放在文件名最前面，和行内操作按钮分开；整行淡绿底强调。 */
+.sel-state:empty { display: none; }
+.sel-pill {
+  flex: 0 0 auto; align-self: center;
+  font-size: 10px; line-height: 1.5; font-weight: 600;
+  padding: 1px 6px; border-radius: 4px;
+  color: #fff; background: #0f6e56; border: 1px solid #0f6e56;
+  white-space: nowrap;
+}
+.sel-pill.file { background: #245f9e; border-color: #245f9e; }
+.sel-pill.inherited {
+  color: #0f6e56; background: #f2fbf6; border: 1px dashed #7cc4ad; font-weight: 500;
+}
+.file-table tr.sel-row td { background: #f3fbf7; }
+.file-table tr.sel-row-inherited td { background: #f8fdfa; }
+.file-table tr.sel-row td:first-child { box-shadow: inset 3px 0 0 #0f6e56; }
+.file-table tr.sel-row-inherited td:first-child { box-shadow: inset 3px 0 0 #a5dccb; }
+.file-table tr.sel-row:hover td { background: #eaf8f1; }
 .enc-badge { position: absolute; right: 5px; bottom: 5px; z-index: 1; font-size: 10px; line-height: 1.6; padding: 1px 7px; color: #8a4b00; background: rgba(255, 245, 230, .96); border: 1px solid #f0d6a8; border-radius: 99px; white-space: nowrap; }
 
 #dirListModal .modal-card { width: min(600px, 94vw); max-height: 88vh; overflow: auto; }
@@ -678,6 +696,14 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
   .file-table td.trash-col-check { left: 7px; top: 8px; width: 18px; }
   .file-table td.trash-col-action { margin-top: 4px; }
   .file-name { gap: 5px; font-size: 12px; line-height: 1.4; }
+  .sel-pill { font-size: 10px; padding: 1px 5px; }
+  .file-table tr.sel-row {
+    background: #f3fbf7; border-color: #9fd8c7; border-left: 3px solid #0f6e56;
+  }
+  .file-table tr.sel-row-inherited {
+    background: #f8fdfa; border-color: #cbe9df; border-left: 3px solid #a5dccb;
+  }
+  .file-table tr.sel-row td, .file-table tr.sel-row-inherited td { background: transparent; }
   .file-thumb { width: 24px; height: 24px; }
   .file-size, .file-time { margin: 2px 8px 0 0; font-size: 10px; }
   .tag { font-size: 10px; padding: 1px 6px; }
