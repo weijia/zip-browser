@@ -1679,6 +1679,7 @@ test('mft scan APIs walk a temporary directory and report sizes/tags/mtime', asy
   const tmp = await fs.mkdtemp(path.join(ROOT, 'tests', 'mft-'));
   try {
     await fs.mkdir(path.join(tmp, 'sub'));
+    await fs.mkdir(path.join(tmp, 'sub2', 'nested'), { recursive: true });
     await fs.writeFile(path.join(tmp, 'a.txt'), 'hello');
     await fs.writeFile(path.join(tmp, 'sub', 'b.txt'), 'world!');
     await fs.writeFile(path.join(tmp, 'package.json'), '{}');
@@ -1692,7 +1693,11 @@ test('mft scan APIs walk a temporary directory and report sizes/tags/mtime', asy
     const treeRes = await fetch(`${BASE}/api/mft/tree?path=${encodeURIComponent(tmp)}`, { headers });
     assert.equal(treeRes.status, 200);
     const tree = await treeRes.json();
-    assert.deepEqual(tree.children.map((item) => item.name), ['sub']);
+    assert.deepEqual(tree.children.map((item) => item.name), ['sub', 'sub2']);
+    assert.equal(tree.children.find((item) => item.name === 'sub').hasChildren, false,
+      'directory with only files has no child directories');
+    assert.equal(tree.children.find((item) => item.name === 'sub2').hasChildren, true,
+      'directory with a nested directory reports hasChildren');
     assert.ok(tree.tags.includes('node'));
 
     const scanRes = await fetch(`${BASE}/api/mft/scan`, {

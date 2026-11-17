@@ -238,7 +238,7 @@ function treeNodeHtml(node) {
   });
   const expanded = expandedTree.has(key);
   const cached = treeCache.get(key);
-  const knownEmpty = Boolean(cached) && (cached.children || []).length === 0;
+  const knownEmpty = node.hasChildren === false || (Boolean(cached) && (cached.children || []).length === 0);
   let childrenHtml = '';
   if (expanded) {
     childrenHtml = cached

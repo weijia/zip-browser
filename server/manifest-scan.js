@@ -333,10 +333,24 @@ export async function listTreeLevel(input) {
   } catch (err) {
     throw new HttpError(403, `cannot open directory: ${err.message}`);
   }
-  const children = dirents
+  const childDirs = dirents
     .filter((dirent) => dirent.isDirectory() && !dirent.isSymbolicLink() && !SKIP_NAMES.has(dirent.name))
-    .map((dirent) => ({ name: dirent.name, path: path.win32.join(abs, dirent.name) }))
     .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+  // 提前探测每个直接子目录是否还有下一层，避免 UI 给空目录画一个点开才知道是空的箭头。
+  // 读不到时返回 null，前端按“未知”处理，不把可能非空的目录误标成空。
+  const children = await mapLimit(childDirs, CONCURRENCY, async (dirent) => {
+    const childPath = path.win32.join(abs, dirent.name);
+    let hasChildren = null;
+    try {
+      const entries = await fs.readdir(childPath, { withFileTypes: true });
+      hasChildren = entries.some(
+        (entry) => entry.isDirectory() && !entry.isSymbolicLink() && !SKIP_NAMES.has(entry.name),
+      );
+    } catch {
+      hasChildren = null;
+    }
+    return { name: dirent.name, path: childPath, hasChildren };
+  });
   return {
     path: abs,
     name: path.win32.basename(abs) || abs,
