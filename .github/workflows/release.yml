@@ -1,0 +1,40 @@
+name: Release zb web
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build web distribution
+        run: npm run dist
+
+      - name: Verify manifest
+        run: |
+          node -e "const m=require('./build/zip-browser-web/manifest.json'); if(!m.commit) throw new Error('manifest commit missing'); console.log('manifest commit:', m.commit, 'files:', Object.keys(m.files).length)"
+
+      - name: Publish release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/zip-browser-web.tar.gz
+          generate_release_notes: true
+          prerelease: false
+          make_latest: true
