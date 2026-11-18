@@ -8,7 +8,7 @@
 // 同步组由 <sync-group-configurator> 配置；只有含远端后端的组才允许导出。
 
 import {
-  buildV2Export, manifestPrefixFor, hostRelativePath, sanitizeKey,
+  buildV2Export, hostRelativePath, sanitizeKey,
 } from './manifest-export.js';
 import {
   buildScanShards, buildHostIndex, renameBookmarkShards, collectRemoteShards,
@@ -21,6 +21,7 @@ import { copyRefsByRel, copyRefTotals } from './manifest-selection.js';
 
 // 与 dir-struct-gen 共用同步组命名空间，两个生成器写同一个远端数据组。
 const APP_ID = 'dir-struct-gen';
+const LOCAL_BACKEND_TYPES = new Set(['InMemory', 'IndexedDB']);
 
 function apiUrlOf(url) {
   return typeof window !== 'undefined' && window.ZB ? window.ZB.url(url) : String(url || '');
@@ -50,6 +51,7 @@ let getCopyRefs = () => null;
 let onStatus = null;
 let configurator = null;
 let timer = null;
+let syncGroupsPoll = null;
 let running = false;
 let queued = false;
 
@@ -118,20 +120,21 @@ async function applyConnection(detail) {
     return;
   }
   const { connected, declared } = remoteBackends(group);
-  const plan = manifestPrefixFor(connected.length ? connected : declared);
-  if (!plan.ok) {
+  const backends = connected.length ? connected : declared;
+  const remotes = backends.filter((b) => b && !LOCAL_BACKEND_TYPES.has(b.type));
+  if (!remotes.length) {
     appFs = null; prefix = null;
-    blockReason = plan.reason;
-    report(`清单导出不可用：${plan.reason}`, false);
+    blockReason = '数据组没有远端后端，只有本地后端时不会真正同步到其他设备';
+    report(`清单导出不可用：${blockReason}`, false);
     return;
   }
+  // dataGroup.fs 是数据组的逻辑根：zen-fs-config 会把同一个相对路径分别映射到
+  // 每个后端自己的根（Gitee 仓库根、RemoteStorage basePath 等）。因此这里只写
+  // 组根下的 /struct、/file-list，不能再按后端 basePath 另算前缀。
   appFs = group.fs;
-  prefix = plan.prefix;
+  prefix = '';
   blockReason = '';
-  const where = prefix
-    ? `/${prefix}/struct/…、/${prefix}/file-list/…`
-    : '/struct/…、/file-list/…';
-  report(`已就绪：${plan.types.join(' / ')} · 写入 ${where}`, true);
+  report(`已就绪：${[...new Set(remotes.map((b) => b.type))].join(' / ')} · 写入 /struct/…、/file-list/…`, true);
   scheduleSync(0);
 }
 
@@ -436,9 +439,50 @@ export function cancelScheduledSync() {
   timer = null;
 }
 
+/**
+ * 配置同步是异步的：组件首次 connect 时会先 loadDataGroups()，此时远端
+ * `.config/app-data-groups/<appId>/` 可能还没拉下来，于是显示“暂无数据同步组”。
+ * 配置同步完成后组件不会主动重读描述符；这里在弹窗打开期间轻量轮询，直到
+ * 至少出现一个数据组（或用户关闭弹窗），避免必须刷新整个页面才能看到。
+ */
+async function refreshSyncGroupList() {
+  const core = configurator && configurator.core;
+  if (!core || typeof core.loadDataGroups !== 'function') return -1;
+  // 新建/编辑表单占用中，重新渲染会清空输入；等表单关闭后再刷新。
+  if (core.showForm || core.groupNameEdit) return -1;
+  try {
+    await core.loadDataGroups();
+    if (typeof core.render === 'function') core.render();
+    return Array.isArray(core.dataGroups) ? core.dataGroups.length : 0;
+  } catch {
+    return -1;
+  }
+}
+
+function stopSyncGroupsPoll() {
+  if (syncGroupsPoll) clearInterval(syncGroupsPoll);
+  syncGroupsPoll = null;
+}
+
+function startSyncGroupsPoll() {
+  stopSyncGroupsPoll();
+  const tick = async () => {
+    const modal = $('syncModal');
+    if (!modal || modal.classList.contains('hidden')) {
+      stopSyncGroupsPoll();
+      return;
+    }
+    const count = await refreshSyncGroupList();
+    if (count > 0) stopSyncGroupsPoll();
+  };
+  void tick();
+  syncGroupsPoll = setInterval(() => { void tick(); }, 1500);
+}
+
 export function openSyncModal() {
   const modal = $('syncModal');
   if (modal) modal.classList.remove('hidden');
+  startSyncGroupsPoll();
 }
 
 export function syncState() {
@@ -466,9 +510,15 @@ export function initManifestSync(options = {}) {
   onStatus = options.onStatus || null;
 
   $('syncBtn')?.addEventListener('click', openSyncModal);
-  $('syncClose')?.addEventListener('click', () => $('syncModal')?.classList.add('hidden'));
+  $('syncClose')?.addEventListener('click', () => {
+    $('syncModal')?.classList.add('hidden');
+    stopSyncGroupsPoll();
+  });
   $('syncModal')?.addEventListener('click', (event) => {
-    if (event.target?.id === 'syncModal') $('syncModal').classList.add('hidden');
+    if (event.target?.id === 'syncModal') {
+      $('syncModal').classList.add('hidden');
+      stopSyncGroupsPoll();
+    }
   });
   $('syncNowBtn')?.addEventListener('click', () => void runSync(true));
 

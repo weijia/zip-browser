@@ -893,17 +893,17 @@ test('v2 path helpers and manifest prefix derivation', () => {
 
   assert.equal(manifest.manifestPrefixFor([
     { type: 'IndexedDB' }, { type: 'RemoteStorage', options: { basePath: 'app_data/folders/' } },
-  ]).prefix, '', 'RemoteStorage basePath already points at the manifest base');
-  assert.equal(manifest.manifestPrefixFor([{ type: 'Gitee' }]).prefix, 'app_data/folders',
-    'repo-root backends need the app_data/folders prefix');
+  ]).prefix, '', 'data-group fs root is the logical root; no extra prefix');
+  assert.equal(manifest.manifestPrefixFor([{ type: 'Gitee' }]).prefix, '',
+    'Gitee repo root is already the data-group root');
   assert.equal(manifest.manifestPrefixFor([{ type: 'InMemory' }]).ok, false,
     'local-only data group must not be accepted');
   assert.equal(manifest.manifestPrefixFor([
     { type: 'RemoteStorage', options: { basePath: 'somewhere/else' } },
-  ]).ok, false, 'an unaligned basePath must abort instead of guessing');
+  ]).ok, true, 'basePath is a backend root, not a path-prefix constraint');
   assert.equal(manifest.manifestPrefixFor([
     { type: 'RemoteStorage', options: { basePath: 'app_data/folders' } }, { type: 'Gitee' },
-  ]).ok, false, 'mixed prefixes cannot share one relative path');
+  ]).ok, true, 'multiple backends share one group-root-relative path');
 });
 
 test('v2 export builds host index, per-volume shards and file-tags without polluting struct', () => {
@@ -1142,7 +1142,7 @@ test('v2 sync writes host index, shard and file-tags into a fake app-data group'
   }
 });
 
-test('v2 sync prefixes app_data/folders for repo-root backends', async () => {
+test('v2 sync writes group-root-relative paths for repo-root backends', async () => {
   const written = new Map();
   const fakeFs = {
     promises: {
@@ -1194,8 +1194,8 @@ test('v2 sync prefixes app_data/folders for repo-root backends', async () => {
     sync.initManifestSync({ getSnapshot: () => ({ tags: {}, paths: {}, bookmarks: [] }) });
     sync.cancelScheduledSync();
     await sync.syncNow();
-    assert.ok(written.has('/app_data/folders/struct/GITEE-PC.json'),
-      'repo-root backends must write under app_data/folders/struct');
+    assert.ok(written.has('/struct/GITEE-PC.json'),
+      'data-group fs maps /struct to each backend root; no extra prefix');
   } finally {
     sync.cancelScheduledSync();
     Object.assign(globalThis, saved);

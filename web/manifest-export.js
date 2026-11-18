@@ -101,39 +101,27 @@ export function tagFileFor(volumeKey) {
 }
 
 /**
- * 由数据组后端推导清单落点前缀（与 dir-struct-gen 的 SyncDedup.manifestPlan 同规则）。
- *   RemoteStorage basePath=app_data/folders → 组根即基目录 → 写 /struct/...
- *   其它后端组根=仓库根                    → 写 /app_data/folders/struct/...
- * 推导不出唯一前缀时 ok=false，调用方必须中止，绝不猜一个位置降级写入。
+ * 数据组写入方案。
+ *
+ * dataGroup.fs 是数据组的逻辑根：zen-fs-config 会把同一个相对路径分别映射到
+ * 每个后端自己的根（Gitee 仓库根、RemoteStorage basePath 等），所以清单固定写
+ * 组根下的 `/struct`、`/file-list`。不要按后端 basePath 再推导一个"公共前缀"，
+ * 那会把逻辑根和物理根混为一谈，导致多个后端时误报前缀冲突。
+ *
+ * 这里只负责判断是否存在远端后端；本地-only 的组不能用于跨设备导出。
  */
 export function manifestPrefixFor(backends) {
   const remotes = (Array.isArray(backends) ? backends : [])
     .filter((b) => b && !LOCAL_BACKEND_TYPES.has(b.type));
   if (!remotes.length) {
-    return { ok: false, prefix: null, types: [], reason: '数据组没有连上的远端后端（仅本地后端或后端尚未加载）' };
+    return { ok: false, prefix: null, types: [], reason: '数据组没有远端后端，只有本地后端时不会真正同步到其他设备' };
   }
-  const prefixes = [];
-  const types = [];
-  for (const backend of remotes) {
-    const base = backend.type === 'RemoteStorage'
-      ? String(backend.options?.basePath ?? '').replace(/^\/+/, '').replace(/\/+$/, '')
-      : '';
-    let prefix;
-    if (base === MANIFEST_BASE) prefix = '';
-    else if (base === '') prefix = MANIFEST_BASE;
-    else {
-      return {
-        ok: false, prefix: null, types,
-        reason: `${backend.type} 的 basePath=${base}/ 无法对齐 ${MANIFEST_BASE}/struct`,
-      };
-    }
-    prefixes.push(prefix);
-    types.push(backend.type);
-  }
-  if (new Set(prefixes).size > 1) {
-    return { ok: false, prefix: null, types, reason: '多个远端后端要求的路径前缀不一致，无法用同一个相对路径写入' };
-  }
-  return { ok: true, prefix: prefixes[0], types: [...new Set(types)], reason: '' };
+  return {
+    ok: true,
+    prefix: '',
+    types: [...new Set(remotes.map((b) => b.type))],
+    reason: '',
+  };
 }
 
 /** 由一组 host-relative 目录路径搭出「仅文件夹」的 children 树。 */
