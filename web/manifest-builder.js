@@ -298,6 +298,7 @@ async function renderDirs() {
       <label><input type="checkbox" id="builderOptRecursive" ${sel.options.recursive ? 'checked' : ''}> 递归包含子目录（仅对未单独指定层数的目录生效）</label>
       <label><input type="checkbox" id="builderOptSize" ${sel.options.includeSize ? 'checked' : ''}> 计算目录体积</label>
       <label><input type="checkbox" id="builderOptMtime" ${sel.options.includeMtime ? 'checked' : ''}> 记录 mtime</label>
+      <label><input type="checkbox" id="builderOptFiles" ${sel.options.includeFiles ? 'checked' : ''}> 同时生成已选目录的文件列表（生成时临时并入，不改文件列表选择集）</label>
     </div>`;
   applyCoveredChecks(pane);
   void hydrateExpandedNodes(pane);
@@ -347,6 +348,7 @@ function renderFiles() {
   const total = copyEntries.reduce((sum, [, refs]) => sum + refs.length, 0);
   const root = getCurrentDir();
   pane.innerHTML = `<p class="builder-hint">「哪些目录下的文件列表要上传」完全由你决定：在目录清单里点 <strong>+ 目录下文件</strong>，或在文件浏览页的目录行/文件行点 <strong>+ 目录下文件</strong> / <strong>+ 该文件</strong>。</p>
+    ${dirSel.options.includeFiles ? '<p class="builder-hint">目录清单已勾选“同时生成已选目录的文件列表”：点「重新扫描并生成」时会把已选目录临时并入文件列表，不会改写下面的文件列表选择集。</p>' : ''}
     <p class="builder-totals" id="builderTotals">${totalsHtml()}</p>
     <div class="bl-section-title">已选目录（${(sel.dirs || []).length}）</div>
     <div class="bl-list">${dirRows || '<div class="bl-empty">尚未选择目录</div>'}</div>
@@ -945,6 +947,19 @@ async function expandNode(nodeEl) {
 }
 
 /**
+ * 「目录清单」标签页的“同时生成已选目录的文件列表”选项：把每个已选目录
+ * 作为文件列表根加入。仅本层的目录保持 recursive=false，和目录清单的层数一致。
+ */
+function includeSelectedDirsAsFileLists(dirSel, fileSel) {
+  let next = fileSel;
+  for (const item of dirSel.dirs || []) {
+    if (!item?.path) continue;
+    next = addFileDirSelection(next, item.path, item.recursive !== false);
+  }
+  return next;
+}
+
+/**
  * struct 目录逐项带层数选择（对应 dir-struct-gen 的「⊕ 含子目录」）；
  * 文件列表目录也保留逐项递归语义；体积口径由「计算目录体积」统一控制。
  */
@@ -970,20 +985,23 @@ function scanRootEntries(dirSel, fileSel) {
 
 async function doScan(paths = null, fileSelection = null) {
   const dirSel = store.get('dirs');
-  const fileSel = fileSelection || store.get('files');
+  let effectiveFileSel = fileSelection || store.get('files');
+  if (!fileSelection && dirSel.options.includeFiles) {
+    effectiveFileSel = includeSelectedDirsAsFileLists(dirSel, effectiveFileSel);
+  }
   const defaults = {
     recursive: dirSel.options.recursive !== false,
     sizeFull: dirSel.options.includeSize !== false,
   };
-  const entries = minimalScanEntries(paths || scanRootEntries(dirSel, fileSel), defaults);
+  const entries = minimalScanEntries(paths || scanRootEntries(dirSel, effectiveFileSel), defaults);
   if (!entries.length) {
     setStatus('请先勾选至少一个目录，或用「+ 目录下文件」加入文件列表目录', true);
     return null;
   }
-  const capturedSig = selectionSignature(dirSel, fileSel);
+  const capturedSig = selectionSignature(dirSel, effectiveFileSel);
   const rootCount = entries.length;
-  const wantsHash = (fileSel?.dirs || []).length > 0
-    || (fileSel?.files || []).some((item) => {
+  const wantsHash = (effectiveFileSel?.dirs || []).length > 0
+    || (effectiveFileSel?.files || []).some((item) => {
       const itemPath = typeof item === 'string' ? item : item?.path;
       return Boolean(itemPath) && !String(itemPath).startsWith('zip:') && !item?.archive;
     });
@@ -1002,11 +1020,11 @@ async function doScan(paths = null, fileSelection = null) {
     if (!scan.roots.length) throw new Error('扫描没有返回任何目录');
     lastScan = scan;
     lastScanSig = capturedSig;
-    lastScanFileSel = fileSel;
+    lastScanFileSel = effectiveFileSel;
     await ensureHostInfo();
     const revision = syncDiagnostics().revision + 1;
     preview = composeExport({
-      scan, hostInfo, snapshot: getSnapshot(), fileSelection: fileSel,
+      scan, hostInfo, snapshot: getSnapshot(), fileSelection: effectiveFileSel,
       copyRefs: store.get('copies'), now: Date.now(), revision,
     });
     render();
@@ -1352,13 +1370,15 @@ export function initManifestBuilder(options = {}) {
       render();
       if (element.checked) void queueSizes([element.dataset.path]);
     }
-    if (element.id === 'builderOptRecursive' || element.id === 'builderOptSize' || element.id === 'builderOptMtime') {
+    if (element.id === 'builderOptRecursive' || element.id === 'builderOptSize'
+      || element.id === 'builderOptMtime' || element.id === 'builderOptFiles') {
       const sel = store.get('dirs');
       const nextOptions = {
         ...sel.options,
         recursive: $('builderOptRecursive')?.checked ?? true,
         includeSize: $('builderOptSize')?.checked ?? true,
         includeMtime: $('builderOptMtime')?.checked ?? true,
+        includeFiles: $('builderOptFiles')?.checked ?? false,
       };
       store.set('dirs', { ...sel, options: nextOptions });
       invalidateScan();

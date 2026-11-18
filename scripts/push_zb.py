@@ -6,8 +6,8 @@ from pathlib import Path
 
 repo = "weijia/zip-browser"
 root = Path(r"C:\codes\nodejs\zip-browser")
-files = ["web/manifest-builder.js", "scripts/push_zb.py"]
-message = "fix(zb): normalize scan summary cache keys and clear size progress state"
+files = ["web/manifest-builder.js", "tests/smoke.test.mjs", "scripts/push_zb.py"]
+message = "feat(zb): generate file lists for selected dirs in manifest builder"
 
 
 def gh(args, payload=None, method=None):
