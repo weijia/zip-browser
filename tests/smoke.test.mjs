@@ -1748,6 +1748,7 @@ test('manifest builder UI, new modules and token-protected mft routes are served
   const builder = await (await fetch(`${BASE}/manifest-builder.js`)).text();
   assert.match(builder, /id="builderOptFiles"/);
   assert.match(builder, /includeSelectedDirsAsFileLists/);
+  assert.match(builder, /data-bt="clear-selection"/);
 });
 
 test('network copy refs reject unsafe values, dedupe paths and support CRUD', async () => {

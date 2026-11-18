@@ -290,7 +290,9 @@ async function renderDirs() {
   }
   pane.innerHTML = `<p class="builder-hint">从 <strong>${esc(root)}</strong> 开始勾选；也可在文件浏览页的目录行点 <strong>+ 目录清单</strong>，选择只加一层或含所有子目录，并查看目录体积。勾选框：<strong>勾选</strong>=本目录单独作为清单根；<strong>横杠（半选）</strong>=已被上层目录覆盖，不需要重复勾；<strong>空白</strong>=未选。没有子目录的目录不会显示展开箭头。展开子目录只按需读取一层，体积单独异步计算。</p>
     <p class="builder-totals" id="builderTotals">${totalsHtml()}</p>
-    <div class="bl-section-title">已选目录（${(sel.dirs || []).length}）</div>
+    <div class="bl-section-title">已选目录（${(sel.dirs || []).length}）
+      <button type="button" class="bt-add danger-text" data-bt="clear-selection" title="清空目录清单与文件列表的全部选择">清空选择</button>
+    </div>
     <div class="bl-list">${rows || '<div class="bl-empty">尚未选择目录</div>'}</div>
     <div class="bl-section-title">目录勾选树</div>
     <div class="bt-tree">${treeNodeHtml({ path: root, name: root.split(/[\\/]/).filter(Boolean).pop() || root, tags: [] })}</div>
@@ -350,7 +352,9 @@ function renderFiles() {
   pane.innerHTML = `<p class="builder-hint">「哪些目录下的文件列表要上传」完全由你决定：在目录清单里点 <strong>+ 目录下文件</strong>，或在文件浏览页的目录行/文件行点 <strong>+ 目录下文件</strong> / <strong>+ 该文件</strong>。</p>
     ${dirSel.options.includeFiles ? '<p class="builder-hint">目录清单已勾选“同时生成已选目录的文件列表”：点「重新扫描并生成」时会把已选目录临时并入文件列表，不会改写下面的文件列表选择集。</p>' : ''}
     <p class="builder-totals" id="builderTotals">${totalsHtml()}</p>
-    <div class="bl-section-title">已选目录（${(sel.dirs || []).length}）</div>
+    <div class="bl-section-title">已选目录（${(sel.dirs || []).length}）
+      <button type="button" class="bt-add danger-text" data-bt="clear-selection" title="清空目录清单与文件列表的全部选择">清空选择</button>
+    </div>
     <div class="bl-list">${dirRows || '<div class="bl-empty">尚未选择目录</div>'}</div>
     <div class="bl-section-title">手工加入的文件（${(sel.files || []).length}）</div>
     <div class="bl-list">${fileRows || '<div class="bl-empty">无</div>'}</div>
@@ -1171,6 +1175,24 @@ async function onAction(action, element) {
       invalidateScan();
       render();
       if (store.get('dirs').options.includeSize !== false) void queueSizes([path]);
+      break;
+    }
+    case 'clear-selection': {
+      const dirSelNow = store.get('dirs');
+      const fileSelNow = store.get('files');
+      const dirCount = (dirSelNow.dirs || []).length;
+      const fileCount = (fileSelNow.dirs || []).length + (fileSelNow.files || []).length;
+      if (!dirCount && !fileCount) {
+        setStatus('当前没有可清空的选择');
+        break;
+      }
+      const message = `清空 ${dirCount} 个目录清单目录和 ${fileCount} 个文件列表项？`;
+      if (typeof window.confirm === 'function' && !window.confirm(message)) break;
+      store.set('dirs', { ...dirSelNow, dirs: [] });
+      store.set('files', { ...fileSelNow, dirs: [], files: [] });
+      invalidateScan();
+      render();
+      setStatus(`已清空目录清单和文件列表选择（${dirCount} 个目录 / ${fileCount} 个文件列表项）`);
       break;
     }
     case 'dl-remove':
