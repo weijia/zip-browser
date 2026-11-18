@@ -9,7 +9,7 @@ import {
 import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.js';
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
 import { initManifestSync, scheduleSync } from './manifest-sync.js';
-import { createSelectionStore, isDirSelected, isFileSelected, addDirSelection } from './manifest-selection.js';
+import { createSelectionStore, isDirSelected, isFileSelected, addDirSelection, removeDirSelection, removeFileDirSelection, removePickedFile, selectionPathKey } from './manifest-selection.js';
 import {
   initManifestBuilder, addPickedFromItem, addFileListDir, openCopyRefForItem,
   openDirListForItem, getCachedDirSummary,
@@ -502,7 +502,7 @@ function flControls(item) {
 // 文件列表 / 目录清单 / 手工文件三个选择集共用同一套持久化仓库；
 // 文件浏览页用它给已选项加一个常驻标记，切换目录后仍能看到。
 function dirPathKey(value) {
-  return String(value || '').replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/+$/, '').toLowerCase();
+  return selectionPathKey(value);
 }
 
 // 父目录已选时，当前行是否也在它的范围内；非递归目录清单只覆盖直接子目录。
@@ -550,7 +550,13 @@ function manifestSelectionBadge(item) {
   const title = state.kind === 'dir'
     ? (state.inherited ? '父目录已加入目录清单，本目录包含在内' : '本目录已加入目录清单')
     : (state.inherited ? '父目录已加入文件列表，本目录包含在内' : '本目录的文件已加入文件列表');
-  return `<span class="sel-pill ${state.kind}${state.inherited ? ' inherited' : ''}" title="${title}">✓ ${state.label}${state.inherited ? '·含' : ''}</span>`;
+  const cls = `sel-pill ${state.kind}${state.inherited ? ' inherited' : ''}`;
+  const text = `✓ ${state.label}${state.inherited ? '·含' : ''}`;
+  // 精确选中的条目可直接点掉；继承自父目录的只提示来源，避免误删整棵父目录。
+  if (state.inherited) {
+    return `<span class="${cls}" title="${title}；要取消请到父目录或清单生成中操作">${text}</span>`;
+  }
+  return `<button type="button" class="${cls}" data-action="manifest-remove" data-kind="${state.kind}" data-item-dir="${item.dir ? '1' : '0'}" data-path="${esc(item.path)}" title="${title}；点击取消选择">${text} ×</button>`;
 }
 
 function manifestRowClass(item) {
@@ -1366,6 +1372,37 @@ document.addEventListener('click', async (event) => {
   }
   if (action === 'selection-clear') {
     clearSelection();
+    return;
+  }
+  if (action === 'manifest-clear') {
+    const dirSelNow = selectionStore.get('dirs');
+    const fileSelNow = selectionStore.get('files');
+    const dirCount = (dirSelNow.dirs || []).length;
+    const fileCount = (fileSelNow.dirs || []).length + (fileSelNow.files || []).length;
+    if (!dirCount && !fileCount) {
+      status('当前没有目录清单或文件列表选择');
+      return;
+    }
+    const message = `清空 ${dirCount} 个目录清单目录和 ${fileCount} 个文件列表项？`;
+    if (typeof window.confirm === 'function' && !window.confirm(message)) return;
+    selectionStore.set('dirs', { ...dirSelNow, dirs: [] });
+    selectionStore.set('files', { ...fileSelNow, dirs: [], files: [] });
+    status(`已清空目录清单和文件列表选择（${dirCount} 个目录 / ${fileCount} 个文件列表项）`);
+    return;
+  }
+  if (action === 'manifest-remove') {
+    const kind = element.dataset.kind;
+    const path = element.dataset.path;
+    if (kind === 'dir') {
+      selectionStore.set('dirs', removeDirSelection(selectionStore.get('dirs'), path));
+      status(`已从目录清单移出：${path}`);
+    } else if (element.dataset.itemDir === '1') {
+      selectionStore.set('files', removeFileDirSelection(selectionStore.get('files'), path));
+      status(`已从文件列表移出：${path}`);
+    } else {
+      selectionStore.set('files', removePickedFile(selectionStore.get('files'), path));
+      status(`已从文件列表移出：${path}`);
+    }
     return;
   }
   if (action === 'row-menu') {

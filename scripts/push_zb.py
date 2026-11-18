@@ -6,8 +6,8 @@ from pathlib import Path
 
 repo = "weijia/zip-browser"
 root = Path(r"C:\codes\nodejs\zip-browser")
-files = ["web/manifest-builder.js", "tests/smoke.test.mjs", "scripts/push_zb.py"]
-message = "feat(zb): add clear selection action to manifest builder"
+files = ["web/app.js", "web/manifest-selection.js", "web/style.css", "web/trash-ui.js", "tests/smoke.test.mjs", "scripts/push_zb.py"]
+message = "feat(zb): clear and toggle manifest selections from browser"
 
 
 def gh(args, payload=None, method=None):

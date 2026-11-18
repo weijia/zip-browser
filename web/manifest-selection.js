@@ -54,7 +54,14 @@ export function cleanCrc32(value) {
 }
 
 function norm(value) {
-  return cleanPath(value).toLowerCase();
+  return selectionPathKey(value);
+}
+
+/** 统一 Windows 盘符与 Go 宿主的 /C/ 视图，供选择集精确匹配和父子覆盖判断。 */
+export function selectionPathKey(value) {
+  let key = cleanPath(value).toLowerCase().replace(/\\/g, '/').replace(/\/+/g, '/');
+  key = key.replace(/^([a-z]):(?=\/)/, '/$1');
+  return key.replace(/\/+$/, '');
 }
 
 function cleanDirList(raw) {

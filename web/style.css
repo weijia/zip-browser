@@ -421,6 +421,8 @@ button.danger:hover:not(:disabled) { background: #a32d2d; }
   color: #fff; background: #0f6e56; border: 1px solid #0f6e56;
   white-space: nowrap;
 }
+button.sel-pill { cursor: pointer; }
+button.sel-pill:hover { filter: brightness(.92); }
 .sel-pill.file { background: #245f9e; border-color: #245f9e; }
 .sel-pill.inherited {
   color: #0f6e56; background: #f2fbf6; border: 1px dashed #7cc4ad; font-weight: 500;

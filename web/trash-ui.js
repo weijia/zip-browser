@@ -111,6 +111,7 @@ export function trashToolbarHtml() {
     <button id="selectionAddDirsBtn" type="button" class="selection-add-btn" data-action="selection-add-dirs" title="把选中的目录加入目录清单" disabled>+ 目录清单（<span id="selectionDirCount">0</span>）</button>
     ${canRemove() ? '<button id="trashSelectedBtn" type="button" class="trash-selected-btn" data-action="trash-selected" disabled>删除（<span id="trashCurrentCount">0</span>）</button>' : ''}
     <button id="selectionClearBtn" type="button" class="selection-clear-btn" data-action="selection-clear" disabled>清空</button>
+    <button id="manifestClearBtn" type="button" class="selection-clear-btn" data-action="manifest-clear" title="清空目录清单和文件列表的全部选择，不影响当前目录里的勾选">清空清单</button>
     <span class="trash-hint">${esc(trashHintText(TRASH_BATCH))}</span>
   </div>`;
 }

@@ -1489,6 +1489,8 @@ test('selection helpers normalize windows paths and keep two independent sets', 
   assert.equal(dirs.dirs.length, 1);
   assert.equal(dirs.dirs[0].path, '/C/codes/_gosdk');
   assert.equal(sel.isDirSelected(dirs, '/c/codes/_gosdk'), true);
+  assert.equal(sel.selectionPathKey('C:\\codes\\_gosdk'), sel.selectionPathKey('/C/codes/_gosdk'));
+  assert.equal(sel.isDirSelected(dirs, 'C:\\codes\\_gosdk'), true);
   files = sel.addFileDirSelection(sel.emptyFileSelection(), '/C/codes/_gosdk');
   assert.equal(files.dirs.length, 1);
   assert.equal(files.dirs[0].path, '/C/codes/_gosdk');
@@ -1745,6 +1747,9 @@ test('manifest builder UI, new modules and token-protected mft routes are served
   const app = await (await fetch(`${BASE}/app.js`)).text();
   assert.match(app, /data-action="cr-add"/);
   assert.match(app, /openCopyRefForItem/);
+  assert.match(app, /data-action="manifest-remove"/);
+  const trashUi = await (await fetch(`${BASE}/trash-ui.js`)).text();
+  assert.match(trashUi, /data-action="manifest-clear"/);
   const builder = await (await fetch(`${BASE}/manifest-builder.js`)).text();
   assert.match(builder, /id="builderOptFiles"/);
   assert.match(builder, /includeSelectedDirsAsFileLists/);
