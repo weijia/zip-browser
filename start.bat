@@ -3,8 +3,8 @@ setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 title Local ZIP Browser Launcher
 
-rem ===== Settings: change PORT here if 4173 is already used =====
-set "PORT=4173"
+rem ===== Settings: change PORT here if 4174 is already used =====
+set "PORT=4174"
 rem Local browser always uses 127.0.0.1; the listen address is ZIP_BROWSER_HOST, not this URL.
 set "URL=http://127.0.0.1:%PORT%/"
 set "PROBE=http://127.0.0.1:%PORT%/health"
@@ -15,8 +15,8 @@ rem 1) bind to all NICs (or set a single LAN IP, which is safer); 2) require an 
 rem set "ZIP_BROWSER_HOST=0.0.0.0"
 rem set "ZIP_BROWSER_ACCESS_CODE=CHANGE_ME_TO_A_STRONG_CODE"
 rem Windows Firewall (admin, once):
-rem   netsh advfirewall firewall add rule name="ZipBrowser 4173" dir=in action=allow protocol=TCP localport=4173 remoteip=192.168.1.0/24
-rem Then other machines open http://LAN-IP:4173/ (user: any, password: the code above).
+rem   netsh advfirewall firewall add rule name="ZipBrowser 4174" dir=in action=allow protocol=TCP localport=4174 remoteip=192.168.1.0/24
+rem Then other machines open http://LAN-IP:4174/ (user: any, password: the code above).
 rem NOTE: plain HTTP on a LAN. Never expose this port to the public Internet.
 set "NO_BROWSER="
 if /i "%~1"=="--no-browser" set "NO_BROWSER=1"
@@ -26,6 +26,40 @@ echo  ==========================================================
 echo   Local ZIP Browser - disks and encrypted ZIP explorer
 echo  ==========================================================
 echo.
+
+rem ===== Resolve Node.js: PATH first, then fnm-managed default =====
+where node >nul 2>nul
+if errorlevel 1 (
+  rem fnm.exe is on PATH, but its Node shim is normally injected by `fnm env`
+  rem from a PowerShell profile - a double-clicked .bat never runs that profile.
+  rem Fall back to the fnm installation directory directly.
+  where fnm >nul 2>nul
+  if not errorlevel 1 (
+    if defined FNM_DIR (
+      set "FNM_ROOT=!FNM_DIR!"
+    ) else (
+      set "FNM_ROOT=%APPDATA%\fnm"
+    )
+    if defined FNM_ROOT (
+      if exist ".node-version" (
+        for /f "usebackq delims=" %%V in (".node-version") do set "FNM_VER=%%V"
+      ) else if exist ".nvmrc" (
+        for /f "usebackq delims=" %%V in (".nvmrc") do set "FNM_VER=%%V"
+      ) else (
+        for /f "usebackq delims=" %%V in (`fnm default 2^>nul`) do set "FNM_VER=%%V"
+      )
+      if not defined FNM_VER (
+        for /d %%D in ("!FNM_ROOT!\node-versions\v*") do set "FNM_VER=%%~nxD"
+      )
+      if defined FNM_VER (
+        if exist "!FNM_ROOT!\node-versions\!FNM_VER!\installation\node.exe" (
+          set "PATH=!FNM_ROOT!\node-versions\!FNM_VER!\installation;!PATH!"
+          echo  [i] Node.js not on PATH; using fnm !FNM_VER! from !FNM_ROOT!
+        )
+      )
+    )
+  )
+)
 
 where node >nul 2>nul
 if errorlevel 1 (

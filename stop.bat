@@ -3,7 +3,7 @@ setlocal
 title Local ZIP Browser - Stop
 
 rem ===== Keep this in sync with PORT in start.bat =====
-set "PORT=4173"
+set "PORT=4174"
 
 echo.
 echo  Stopping Local ZIP Browser ...
