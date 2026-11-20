@@ -18,6 +18,7 @@
     <button id="defPwBtn" type="button" title="设置缺省解压密码：打开不知道密码的加密压缩包时会先用它尝试">缺省密码</button>
     <button id="bookmarksBtn" type="button" title="打开书签面板">书签 <span id="bookmarkCount" class="anno-count">0</span></button>
     <button id="tagsBtn" type="button" title="按标签筛选目录">标签 <span id="tagCount" class="anno-count">0</span></button>
+    <button id="driveCacheBtn" type="button" title="登记网盘的类型、容量与月度流量配额">网盘信息 <span id="driveCount" class="anno-count">0</span></button>
     <button id="syncBtn" type="button" title="把收藏同步为目录结构清单 v2">同步收藏</button>
     <button id="builderBtn" type="button" title="勾选目录生成 v2 清单与文件列表">清单生成</button>
     <label class="encoding">文件名编码
@@ -105,6 +106,48 @@
       <button id="defPwClear" type="button" title="清除已设置的缺省密码">清除</button>
       <button id="defPwSave" type="button" class="primary">保存</button>
     </div>
+  </div>
+</div>
+
+<div id="driveCacheModal" class="modal hidden">
+  <div class="modal-card dc-card">
+    <div class="modal-head">
+      <h2>网盘信息登记</h2>
+      <button id="dcClose" type="button" class="modal-x" title="关闭">×</button>
+    </div>
+    <p class="modal-note">手工登记每个网盘的类型、容量与月度流量配额。信息只保存在本机 <code>codes/cached/&lt;后端名&gt;-&lt;序号&gt;/info.json</code>，并同步到 zen-fs-config；不缓存网盘文件、不读取远端接口。</p>
+    <div id="dcRoot" class="dc-root">缓存目录：读取中…</div>
+    <form id="dcForm" class="dc-form">
+      <div id="dcEditHint" class="dc-edit-hint hidden">
+        <span id="dcEditText">正在编辑</span>
+        <button id="dcCancelEdit" type="button" class="dc-mini">取消编辑</button>
+      </div>
+      <label class="cr-field">后端类型 <span class="dc-required">*</span>
+        <select id="dcBackend" required>
+          <option value="">请选择后端</option>
+        </select>
+      </label>
+      <label class="cr-field">备注名称（可选）<input id="dcLabel" type="text" placeholder="如：主力盘 / 备份盘"></label>
+      <div class="dc-grid">
+        <label class="cr-field">总容量（可选）<input id="dcTotal" type="text" placeholder="如：2TB"></label>
+        <label class="cr-field">剩余空间（可选）<input id="dcFree" type="text" placeholder="如：800GB"></label>
+        <label class="cr-field">每月上行配额（可选）<input id="dcUp" type="text" placeholder="如：1TB"></label>
+        <label class="cr-field">每月下行配额（可选）<input id="dcDown" type="text" placeholder="如：2TB"></label>
+        <label class="cr-field">剩余上行流量（可选）<input id="dcUpLeft" type="text" placeholder="如：300GB"></label>
+        <label class="cr-field">剩余下行流量（可选）<input id="dcDownLeft" type="text" placeholder="如：1.5TB"></label>
+      </div>
+      <div id="dcError" class="modal-error"></div>
+      <div class="modal-actions">
+        <button id="dcReset" type="button">清空表单</button>
+        <button id="dcSave" type="submit" class="primary">登记</button>
+      </div>
+    </form>
+    <div class="dc-list-head">
+      <span>已登记 <strong id="dcCount">0</strong> 个网盘</span>
+      <button id="dcRefresh" type="button" class="dc-mini" title="从本机缓存目录重新读取">刷新</button>
+    </div>
+    <div id="dcList" class="dc-list"></div>
+    <div id="dcSync" class="sync-status dc-sync" data-state="idle">同步状态：等待操作</div>
   </div>
 </div>
 

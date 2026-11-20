@@ -22,6 +22,10 @@ import { handleThumb } from './thumb.js';
 import { getVersionInfo } from './version.js';
 import { getHostInfo } from './hostinfo.js';
 import { trashPaths } from './trash-service.js';
+import {
+  readCache, saveEntry as saveDriveEntry, updateEntry as updateDriveEntry,
+  deleteEntry as deleteDriveEntry, ensureCacheRoot, ensureDataDir,
+} from './drive-cache.js';
 import { openInExplorer } from './explorer-service.js';
 import { scanPaths, listTreeLevel, readMtimes } from './manifest-scan.js';
 import {
@@ -117,7 +121,23 @@ async function handleApi(req, res, url) {
   const pathname = url.pathname;
 
   if (req.method === 'GET' && pathname === '/api/drives') {
-    return json(res, 200, { drives: await listDrives() });
+    // 磁盘列表同时展示本机磁盘与用户登记的网络存储（只有元信息，不缓存文件内容）。
+    // 缓存目录读取失败时降级为空列表，不能拖垮磁盘枚举。
+    let networkDrives = [];
+    let cacheRoot = null;
+    try {
+      const cache = await readCache();
+      cacheRoot = cache.cacheRoot;
+      // 每条登记带上真正缓存内容目录（cached/<dir>/data）的绝对路径，
+      // 前端据此把卡片做成可进入的目录；info.json 留在父目录，点进去看不到它。
+      networkDrives = await Promise.all(cache.entries.map(async (entry) => ({
+        ...entry,
+        path: await ensureDataDir(cache.cacheRoot, entry.dir),
+      })));
+    } catch {
+      // 忽略：codes/cached 不可读时仍返回本机磁盘。
+    }
+    return json(res, 200, { drives: await listDrives(), networkDrives, cacheRoot });
   }
 
   // v2 清单导出需要主机名与盘稳定身份（浏览器拿不到，且不允许写盘）。
@@ -128,6 +148,27 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && pathname === '/api/list') {
     const abs = normalizeLocalPath(url.searchParams.get('path') || '');
     return json(res, 200, await listDirectory(abs));
+  }
+
+  // 网盘信息本地缓存：只登记类型/容量/配额等元信息，不缓存网盘文件内容。
+  if (req.method === 'GET' && pathname === '/api/drive-cache/info') {
+    return json(res, 200, await readCache());
+  }
+  if (req.method === 'POST' && pathname === '/api/drive-cache/save') {
+    const body = await readJson(req);
+    const { codesRoot, cacheRoot } = await ensureCacheRoot();
+    const entry = await saveDriveEntry(cacheRoot, body);
+    return json(res, 200, { codesRoot, cacheRoot, entry });
+  }
+  if (req.method === 'POST' && pathname === '/api/drive-cache/update') {
+    const body = await readJson(req);
+    const { cacheRoot } = await ensureCacheRoot();
+    return json(res, 200, { entry: await updateDriveEntry(cacheRoot, body.dir, body) });
+  }
+  if (req.method === 'POST' && pathname === '/api/drive-cache/delete') {
+    const body = await readJson(req);
+    const { cacheRoot } = await ensureCacheRoot();
+    return json(res, 200, await deleteDriveEntry(cacheRoot, body.dir));
   }
 
   // 清单生成：物理扫描只在用户显式点「重新扫描并生成」时触发。
@@ -271,7 +312,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && pathname.startsWith('/vendor/')) {
       return await serveVendor(res, pathname);
     }
-    if (req.method === 'GET' && ['/host.js', '/app.js', '/vault.js', '/style.css', '/location.js', '/update-checker.js', '/annotations-store.js', '/annotations-ui.js', '/image-viewer.js', '/manifest-export.js', '/manifest-sync.js', '/manifest-selection.js', '/manifest-payload.js', '/manifest-builder.js', '/file-list-export.js', '/zip-writer.js', '/trash-ui.js'].includes(pathname)) {
+    if (req.method === 'GET' && ['/host.js', '/app.js', '/vault.js', '/style.css', '/location.js', '/update-checker.js', '/annotations-store.js', '/annotations-ui.js', '/image-viewer.js', '/manifest-export.js', '/manifest-sync.js', '/manifest-selection.js', '/manifest-payload.js', '/manifest-builder.js', '/file-list-export.js', '/zip-writer.js', '/trash-ui.js', '/drive-backends.js', '/drive-cache-store.js', '/drive-cache.js'].includes(pathname)) {
       return await serveStatic(res, pathname);
     }
     if (pathname.startsWith('/api/')) return await handleApi(req, res, url);

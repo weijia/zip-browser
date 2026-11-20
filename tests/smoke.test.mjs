@@ -1034,6 +1034,7 @@ test('hostinfo api and v2 sync assets are served', async () => {
 
   for (const file of [
     '/manifest-export.js', '/manifest-sync.js',
+    '/drive-backends.js', '/drive-cache-store.js', '/drive-cache.js',
     '/vendor/zen-fs-config-ui.js',
     '/vendor/zen-fs-remotestoragejs.global.js',
     '/vendor/zen-fs-gitee.global.js',
@@ -1042,15 +1043,94 @@ test('hostinfo api and v2 sync assets are served', async () => {
     assert.equal(res.status, 200, `${file} is not served`);
     assert.match(res.headers.get('content-type') || '', /javascript/);
   }
+  const dcSource = await (await fetch(`${BASE}/drive-cache.js`)).text();
+  assert.match(dcSource, /data-copy/, 'drive list must ship the copy action');
+  assert.match(dcSource, /data-edit/, 'drive list must ship the edit action');
+  assert.match(dcSource, /edit:\s*\(dir\)/, 'drive-cache must expose edit(dir) for the disk list');
+  const appSource = await (await fetch(`${BASE}/app.js`)).text();
+  assert.match(appSource, /net-drive-edit/, 'disk list must ship the network drive edit button');
+  assert.match(appSource, /data-action="drive" data-path="\$\{esc\(item\.path\)\}"/, 'network drive card must be clickable into its cache dir');
   const html = await (await fetch(BASE)).text();
   for (const id of ['syncBtn', 'syncModal', 'syncHost', 'syncNowBtn', 'syncStatus']) {
     assert.match(html, new RegExp(`id="${id}"`), `${id} missing from the page`);
   }
   assert.match(html, /vendor\/zen-fs-config-ui\.js/);
   assert.match(html, /目录结构清单 v2/);
+  for (const id of ['driveCacheBtn', 'driveCacheModal', 'dcForm', 'dcBackend', 'dcList', 'dcUpLeft', 'dcDownLeft', 'dcEditHint', 'dcCancelEdit']) {
+    assert.match(html, new RegExp(`id="${id}"`), `${id} missing from the page`);
+  }
   const pageRes = await fetch(BASE);
   assert.match(pageRes.headers.get('content-security-policy') || '', /connect-src 'self' https: http:/,
     'remote sync backends must not be blocked by connect-src');
+});
+
+test('drive-cache API registers a drive to codes/cached and deletes it', async () => {
+  const H = { 'X-Local-Token': TEST_TOKEN, 'Content-Type': 'application/json' };
+  const before = await (await fetch(`${BASE}/api/drive-cache/info`, { headers: H })).json();
+  assert.equal(typeof before.cacheRoot, 'string');
+  assert.ok(Array.isArray(before.entries));
+
+  const saved = await (await fetch(`${BASE}/api/drive-cache/save`, {
+    method: 'POST', headers: H,
+    body: JSON.stringify({ backend: 'Template', label: 'smoke', total: '1TB', free: '', upRemaining: '300GB', downRemaining: '500GB' }),
+  })).json();
+  assert.ok(saved.entry && saved.entry.dir, 'save must return the created dir');
+  assert.equal(saved.entry.backend, 'Template');
+  assert.equal(saved.entry.free, null);
+  assert.equal(saved.entry.upRemaining, '300GB');
+  const infoFile = path.join(saved.cacheRoot, saved.entry.dir, 'info.json');
+  assert.equal((await fs.stat(infoFile)).isFile(), true, 'info.json must land on disk');
+  const doc = JSON.parse(await fs.readFile(infoFile, 'utf8'));
+  assert.equal(doc.label, 'smoke');
+  assert.equal(doc.total, '1TB');
+  assert.equal(doc.downRemaining, '500GB');
+
+  const listed = await (await fetch(`${BASE}/api/drive-cache/info`, { headers: H })).json();
+  assert.ok(listed.entries.some((e) => e.dir === saved.entry.dir && e.upRemaining === '300GB'));
+
+  // 登记条目要出现在磁盘列表返回的网络存储里。
+  const diskList = await (await fetch(`${BASE}/api/drives`, { headers: H })).json();
+  assert.ok(Array.isArray(diskList.networkDrives), '/api/drives must expose networkDrives');
+  assert.ok(diskList.networkDrives.some((e) => e.dir === saved.entry.dir && e.backend === 'Template' && e.downRemaining === '500GB'));
+  assert.ok(Array.isArray(diskList.drives));
+  // 每条登记要带 data/ 缓存目录绝对路径（点进去只看到缓存内容，不含 info.json）。
+  assert.equal(typeof diskList.cacheRoot, 'string');
+  const netEntry = diskList.networkDrives.find((e) => e.dir === saved.entry.dir);
+  assert.equal(netEntry.path, path.join(diskList.cacheRoot, saved.entry.dir, 'data'));
+  assert.equal((await fs.stat(netEntry.path)).isDirectory(), true);
+  const listedCacheDir = await (await fetch(`${BASE}/api/list?path=${encodeURIComponent(netEntry.path)}`, { headers: H })).json();
+  assert.ok(Array.isArray(listedCacheDir.items));
+  assert.equal(listedCacheDir.items.some((it) => it.name === 'info.json'), false, 'data dir must not expose info.json');
+  // info.json 仍在父目录，编辑功能读的是它。
+  assert.equal((await fs.stat(path.join(saved.cacheRoot, saved.entry.dir, 'info.json'))).isFile(), true);
+
+  // 原地编辑：目录名/序号不变，后端类型锁定为目录名里的值。
+  const edited = await (await fetch(`${BASE}/api/drive-cache/update`, {
+    method: 'POST', headers: H,
+    body: JSON.stringify({
+      dir: saved.entry.dir, backend: 'S3', label: 'smoke-edited',
+      total: '3TB', free: '600GB', upRemaining: '150GB', downRemaining: '500GB',
+    }),
+  })).json();
+  assert.equal(edited.entry.dir, saved.entry.dir, 'edit must keep dir');
+  assert.equal(edited.entry.backend, 'Template', 'backend must stay bound to dir');
+  assert.equal(edited.entry.label, 'smoke-edited');
+  assert.equal(edited.entry.upRemaining, '150GB');
+  const editedDoc = JSON.parse(await fs.readFile(infoFile, 'utf8'));
+  assert.equal(editedDoc.label, 'smoke-edited');
+  const afterEdit = await (await fetch(`${BASE}/api/drive-cache/info`, { headers: H })).json();
+  assert.ok(afterEdit.entries.some((e) => e.dir === saved.entry.dir && e.label === 'smoke-edited'));
+  const diskAfterEdit = await (await fetch(`${BASE}/api/drives`, { headers: H })).json();
+  assert.ok(diskAfterEdit.networkDrives.some((e) => e.dir === saved.entry.dir && e.upRemaining === '150GB'));
+
+  const removed = await (await fetch(`${BASE}/api/drive-cache/delete`, {
+    method: 'POST', headers: H,
+    body: JSON.stringify({ dir: saved.entry.dir }),
+  })).json();
+  assert.equal(removed.removed, true);
+  assert.equal((await fs.stat(infoFile).catch(() => null)), null, 'info.json must be removed');
+  const afterDelete = await (await fetch(`${BASE}/api/drives`, { headers: H })).json();
+  assert.equal(afterDelete.networkDrives.some((e) => e.dir === saved.entry.dir), false);
 });
 
 test('v2 sync writes host index, shard and file-tags into a fake app-data group', async () => {

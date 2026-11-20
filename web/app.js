@@ -9,6 +9,7 @@ import {
 import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.js';
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
 import { initManifestSync, scheduleSync } from './manifest-sync.js';
+import { initDriveCache } from './drive-cache.js';
 import { createSelectionStore, isDirSelected, isFileSelected, addDirSelection, removeDirSelection, removeFileDirSelection, removePickedFile, selectionPathKey } from './manifest-selection.js';
 import {
   initManifestBuilder, addPickedFromItem, addFileListDir, openCopyRefForItem,
@@ -868,16 +869,20 @@ function renderCrumbs(target) {
 }
 
 async function renderDrives() {
-  const { drives } = await api('/api/drives');
+  const { drives, networkDrives } = await api('/api/drives');
+  const registered = Array.isArray(networkDrives) ? networkDrives : [];
   const mounts = HOST.drivesMode === 'mounts';
   const cards = drives.map((drive) => {
     const used = drive.total ? Math.round(((drive.total - drive.free) / drive.total) * 100) : 0;
     if (mounts) {
       const label = drive.label || drive.path || '存储';
+      const volumeID = drive.volumeId
+        ? `<br><span class="drive-volume">volumeId: <code>${esc(drive.volumeId)}</code></span>`
+        : '';
       return `<div class="drive-card" data-action="drive" data-path="${esc(drive.path)}" data-name="${esc(label)}">
         <div class="drive-head"><span class="drive-letter"><span class="icon icon-dir"></span></span><span class="drive-name">${esc(label)}</span></div>
         <div class="drive-bar"><div style="width:${used}%"></div></div>
-        <div class="drive-meta">${drive.total ? `${formatSize(drive.free)} 可用 / ${formatSize(drive.total)}` : '容量未知'} · ${esc(drive.kind || '存储')}<br><code>${esc(drive.path || '')}</code></div>
+        <div class="drive-meta">${drive.total ? `${formatSize(drive.free)} 可用 / ${formatSize(drive.total)}` : '容量未知'} · ${esc(drive.kind || '存储')}<br><code>${esc(drive.path || '')}</code>${volumeID}</div>
       </div>`;
     }
     const kindClass = drive.kind === '可移动' ? ' removable' : (drive.kind === '网络映射' ? ' network' : '');
@@ -888,19 +893,51 @@ async function renderDrives() {
       <div class="drive-meta">${drive.total ? `${formatSize(drive.free)} 可用 / ${formatSize(drive.total)}` : '容量未知'} · ${esc(drive.kind)}</div>
     </div>`;
   }).join('');
+
+  // 网络存储只有登记信息、没有本地路径，因此渲染成不可进入的只读卡片。
+  const networkCards = registered.map((item) => {
+    const name = item.label || item.backend || item.dir;
+    const fields = [
+      ['总容量', item.total],
+      ['剩余', item.free],
+      ['上行/月', item.upQuota],
+      ['下行/月', item.downQuota],
+      ['剩余上行', item.upRemaining],
+      ['剩余下行', item.downRemaining],
+    ].filter(([, value]) => value);
+    const meta = fields.length
+      ? fields.map(([key, value]) => `${esc(key)} ${esc(value)}`).join('<br>')
+      : '未填写容量信息';
+    const canOpen = Boolean(item.path);
+    return `<div class="drive-card network-storage${canOpen ? '' : ' net-static'}"${canOpen ? ` data-action="drive" data-path="${esc(item.path)}"` : ''} title="${canOpen ? '点击进入该网盘的本地缓存目录' : '登记的网络存储信息'}">
+      <div class="drive-head"><span class="drive-letter net">网</span><span class="drive-name" title="${esc(name)}">${esc(name)}</span><button type="button" class="net-edit dc-mini" data-action="net-drive-edit" data-dir="${esc(item.dir)}" title="编辑这个网盘的信息">编辑</button></div>
+      <div class="drive-meta net-meta"><span class="net-type">${esc(item.backend || '未知后端')}</span> #${esc(item.seq)}<br>${meta}${item.hasInfo === false ? '<br><span class="dc-warn">info.json 缺失或损坏</span>' : ''}</div>
+    </div>`;
+  }).join('');
+
   const title = LABELS.drivesTitle || '此电脑 · 磁盘';
   const unit = LABELS.drivesUnit || '磁盘';
   const empty = LABELS.drivesEmpty || '没有检测到可用磁盘';
   const hint = LABELS.drivesHint || '';
   stage.classList.remove('list-mode');
-  stage.innerHTML = `<h2 class="stage-title">${esc(title)}（${drives.length}）</h2>
-    <div class="drive-grid">${cards || `<div class="empty">${esc(empty)}</div>`}</div>
+  stage.innerHTML = `<h2 class="stage-title">${esc(title)}（${drives.length + registered.length}）</h2>
+    <div class="drive-grid">${cards}${networkCards || (drives.length ? '' : `<div class="empty">${esc(empty)}</div>`)}</div>
     ${hint ? `<p class="stage-hint">${esc(hint)}</p>` : ''}`;
   const sidebarRoot = LABELS.sidebarRoot || LABELS.root || '此电脑';
-  sidebar.innerHTML = `<div class="side-title">${esc(sidebarRoot)}</div>${drives.map((drive) => {
+  const localSidebar = drives.map((drive) => {
     const label = mounts ? (drive.label || drive.path || '存储') : `${drive.letter}: ${drive.label || drive.kind}`;
     return `<div class="side-item" data-action="drive" data-path="${esc(drive.path)}"><span class="icon icon-dir"></span>${esc(label)}</div>`;
-  }).join('')}`;
+  }).join('');
+  const networkSidebar = registered.length
+    ? `<div class="side-title side-sub">网络存储</div>${registered.map((item) => {
+      const name = item.label || item.backend || item.dir;
+      const nameTip = `${name}（${item.backend || ''}）`;
+      return item.path
+        ? `<div class="side-item net-side-item" data-action="drive" data-path="${esc(item.path)}" title="${esc(nameTip)}"><span class="icon icon-dir"></span>${esc(name)}</div>`
+        : `<div class="side-item net-side-item" title="${esc(nameTip)}">网 ${esc(name)}</div>`;
+    }).join('')}`
+    : '';
+  sidebar.innerHTML = `<div class="side-title">${esc(sidebarRoot)}</div>${localSidebar}${networkSidebar}`;
 }
 
 function parentOf(abs) {
@@ -1358,6 +1395,10 @@ document.addEventListener('click', async (event) => {
   if (!element) return;
   const action = element.dataset.action;
   // 行内勾选/删除控件优先处理，否则 closest 会落到带 data-action 的行上触发导航
+  if (action === 'net-drive-edit') {
+    driveCache?.edit(element.dataset.dir);
+    return;
+  }
   if (action.startsWith('trash-')) {
     await handleTrashAction(action, element, event);
     return;
@@ -1551,6 +1592,13 @@ initManifestSync({
   getSnapshot: () => getAnnotationStore()?.snapshot() || null,
   getFileSelection: () => selectionStore.get('files'),
   getCopyRefs: () => selectionStore.get('copies'),
+});
+
+const driveCache = initDriveCache({ api, status });
+
+// 网盘登记增删后，磁盘列表里的「网络存储」卡片要立即跟着变。
+window.addEventListener('zb:drive-cache-change', () => {
+  if (current().kind === 'drives') render(current());
 });
 
 initManifestBuilder({
