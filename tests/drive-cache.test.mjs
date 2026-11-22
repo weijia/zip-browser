@@ -211,6 +211,60 @@ test('drive-cache-store：setEntries 写入镜像并触发 onChange，可禁用 
   assert.equal(mirrored.entries[0].dir, 'S3-1');
 });
 
+test('config-repo：一次 connect 的 repo 延迟注入后被三个 store 共享', async () => {
+  const repoBus = await import('../web/config-repo.js');
+  const storeMod = await import('../web/drive-cache-store.js');
+  const annMod = await import('../web/annotations-store.js');
+  const selMod = await import('../web/manifest-selection.js');
+
+  function memStore() {
+    const map = new Map();
+    return {
+      getItem: (k) => (map.has(k) ? map.get(k) : null),
+      setItem: (k, v) => map.set(k, v),
+      removeItem: (k) => map.delete(k),
+    };
+  }
+
+  // 三个 store 都在 connect 之前 init：此时公告板为空，应落到本地镜像。
+  const dcStore = storeMod.createDriveCacheStore({ storage: memStore(), repoFactory: undefined });
+  const annStore = annMod.createAnnotationStore({ storage: memStore(), repoFactory: undefined });
+  const selStore = selMod.createSelectionStore({ storage: memStore(), repoFactory: undefined });
+  assert.equal((await dcStore.init()).backend, 'local');
+  await annStore.init();
+  await selStore.init();
+  assert.equal(dcStore.backend, 'local');
+  assert.equal(annStore.backend, 'local');
+  assert.equal(selStore.backend, 'local');
+
+  // 模拟 manifest-sync 那一次 connect 发布 repo。
+  const future = Date.now() + 60000;
+  const repoData = {
+    '/drive-cache': { v: 1, updatedAt: future, entries: [{ dir: 'WebDav-1', seq: 1, backend: 'WebDav', label: '共享盘' }] },
+    '/annotations': { v: 1, updatedAt: future, tags: { 'C:\\Docs': ['资料'] }, paths: {}, bookmarks: [] },
+  };
+  const fakeRepo = {
+    getConfig: (key) => repoData[key] ?? null,
+    setConfig: () => {},
+    flush: async () => {},
+  };
+  repoBus.publishConfigRepo(fakeRepo);
+
+  // 三处同时拿到同一个 repo（backend 变 zenfs），且较重的数据被读入。
+  assert.equal(dcStore.backend, 'zenfs');
+  assert.equal(annStore.backend, 'zenfs');
+  assert.equal(selStore.backend, 'zenfs');
+  assert.equal(dcStore.snapshot().entries[0].label, '共享盘');
+  assert.deepEqual(annMod.listTags(annStore.snapshot(), 'C:\\Docs'), ['资料']);
+
+  // 断开连接：退回本地镜像，但已读入的内存数据不被清空。
+  repoBus.publishConfigRepo(null);
+  assert.equal(dcStore.backend, 'local');
+  assert.equal(annStore.backend, 'local');
+  assert.equal(selStore.backend, 'local');
+  assert.equal(dcStore.snapshot().entries[0].label, '共享盘');
+});
+
 test('importEntries：按 dir 原样落地，不重算序号，已存在跳过，沿用清单时间戳', async () => {
   const root = await tempRoot();
   try {

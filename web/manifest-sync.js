@@ -18,6 +18,7 @@ import {
   buildFileListDocs, fileListSignature, removedDoc, applyCopyRefs,
 } from './file-list-export.js';
 import { copyRefsByRel, copyRefTotals } from './manifest-selection.js';
+import { publishConfigRepo } from './config-repo.js';
 
 // 与 dir-struct-gen 共用同步组命名空间，两个生成器写同一个远端数据组。
 const APP_ID = 'dir-struct-gen';
@@ -96,10 +97,16 @@ async function applyConnection(detail) {
     ? configurator.getConnection() : null);
   if (!conn) {
     appFs = null; prefix = null;
+    // 无连接：撤回已发布的 repo，让 store 退回各自的 localStorage 镜像。
+    publishConfigRepo(null);
     blockReason = '尚未连接同步组';
     report(blockReason);
     return;
   }
+  // 一次 connect 得到的 config repo（appId=dir-struct-gen）发布给三个 store 共用。
+  // 无论是否配置远端后端，connect 都会给出可用 repo（未配远端时为纯本地库）。
+  // 这一步先于 dataGroup 校验：即使没有数据组/没有远端后端，config repo 依然有效。
+  publishConfigRepo(conn.repo || null);
   let group = null;
   if (conn.dataGroup?.fs) group = conn.dataGroup;
   if (!group && conn.repo && typeof conn.repo.listAppDataGroups === 'function') {

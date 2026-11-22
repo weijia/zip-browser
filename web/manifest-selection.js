@@ -5,8 +5,9 @@
 // 三者相互独立，均存 zen-fs-config 配置仓，localStorage 作同步镜像与兜底。
 
 import { hostRelativePath } from './manifest-export.js';
+import { getConfigRepo, onConfigRepo } from './config-repo.js';
 
-export const APP_ID = 'zip-browser';
+export const APP_ID = 'dir-struct-gen';
 export const DIR_SELECTION_KEY = '/manifest-selection';
 export const FILE_SELECTION_KEY = '/file-list-selection';
 export const COPY_REFS_KEY = '/file-copy-refs';
@@ -337,14 +338,8 @@ function newer(a, b) {
 export function createSelectionStore({ storage, repoFactory, onChange } = {}) {
   const globals = typeof window !== 'undefined' ? window : globalThis;
   const local = storage || globals.localStorage || memoryStorage();
-  const factory = repoFactory === undefined
-    ? (() => {
-      const lib = globals.ZenFSConfig;
-      return lib && typeof lib.createConfigRepo === 'function'
-        ? () => lib.createConfigRepo(APP_ID)
-        : null;
-    })()
-    : repoFactory;
+  const useShared = repoFactory === undefined;
+  const factory = useShared ? null : repoFactory;
   const specs = {
     dirs: { config: DIR_SELECTION_KEY, local: LOCAL_DIR_KEY, empty: emptyDirSelection, clean: sanitizeDirSelection },
     files: { config: FILE_SELECTION_KEY, local: LOCAL_FILE_KEY, empty: emptyFileSelection, clean: sanitizeFileSelection },
@@ -370,8 +365,35 @@ export function createSelectionStore({ storage, repoFactory, onChange } = {}) {
     return { ...value, updatedAt: Date.now() };
   }
 
+  /** 重新按 repo 合并三套选择集（connect 到达后调用），变化则通知。 */
+  function reloadFromRepo() {
+    let changed = false;
+    for (const [which, spec] of Object.entries(specs)) {
+      const fromRepo = readRepo(spec.config, spec.clean);
+      const fromLocal = readLocal(spec.local, spec.clean);
+      const chosen = newer(fromRepo, fromLocal);
+      if (chosen && chosen.updatedAt !== state[which]?.updatedAt) {
+        state[which] = chosen;
+        writeLocal(spec.local, chosen);
+        changed = true;
+      }
+    }
+    if (changed && onChange) onChange('repo', snapshot());
+  }
+
+  /** 收到 connect 的 repo（或断开时的 null）：重合并并通知 UI。 */
+  function attachRepo(next) {
+    repo = next || null;
+    backend = repo ? 'zenfs' : 'local';
+    reloadFromRepo();
+  }
+
   async function init() {
-    if (factory) {
+    if (useShared) {
+      repo = getConfigRepo();
+      backend = repo ? 'zenfs' : 'local';
+      onConfigRepo(attachRepo);
+    } else if (factory) {
       try { repo = await factory(); backend = 'zenfs'; } catch { repo = null; backend = 'local'; }
     }
     for (const [which, spec] of Object.entries(specs)) {

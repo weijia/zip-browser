@@ -4,10 +4,17 @@
 // 数据流：用户登记 → 服务端写 codes/cached/<后端>-<序号>/info.json →
 // 前端拿到最新条目列表 → 写 zen-fs-config + localStorage → 其他设备可见。
 // 这里不缓存网盘文件内容，也不与配置同步组的数据组发生关系。
+//
+// repo 来源：不再自己 createConfigRepo('zip-browser')（那是没有 replica 的孤岛）。
+// 改为订阅 config-repo 公告板——全应用只 connect 一次（manifest-sync 的
+// configurator），拿到的 repo（appId=dir-struct-gen）由 store 共享。
+// 显式传 repoFactory（含 null）时仍按调用方控制，供单测使用。
+
+import { getConfigRepo, onConfigRepo } from './config-repo.js';
 
 export const STORAGE_KEY = 'zip-browser:drive-cache:v1';
 export const CONFIG_KEY = '/drive-cache';
-export const APP_ID = 'zip-browser';
+export const APP_ID = 'dir-struct-gen';
 
 function memoryStorage() {
   const map = new Map();
@@ -79,14 +86,9 @@ export function makeCopyPayload(entry) {
 export function createDriveCacheStore({ storage, repoFactory, onChange } = {}) {
   const globals = typeof window !== 'undefined' ? window : globalThis;
   const local = storage || globals.localStorage || memoryStorage();
-  const factory = repoFactory === undefined
-    ? (() => {
-      const lib = globals.ZenFSConfig;
-      return lib && typeof lib.createConfigRepo === 'function'
-        ? () => lib.createConfigRepo(APP_ID)
-        : null;
-    })()
-    : repoFactory;
+  // 显式传 repoFactory 时按调用方（单测）控制；否则订阅共享的 connect repo。
+  const useShared = repoFactory === undefined;
+  const factory = useShared ? null : repoFactory;
 
   let repo = null;
   let backend = 'local';
@@ -131,8 +133,35 @@ export function createDriveCacheStore({ storage, repoFactory, onChange } = {}) {
     return snapshot();
   }
 
+  /** 合并 repo 与本地镜像（取 updatedAt 较新者），并把较新一侧补写到另一侧。 */
+  function mergeFromRepo(notify = false) {
+    const fromRepo = readRepo();
+    const fromLocal = readLocal();
+    let chosen = fromRepo && fromLocal
+      ? (fromRepo.updatedAt >= fromLocal.updatedAt ? fromRepo : fromLocal)
+      : (fromRepo || fromLocal);
+    if (!chosen) chosen = { ...emptyData(), updatedAt: Date.now() };
+    const changed = chosen.updatedAt !== data.updatedAt;
+    adopt(chosen);
+    if (readRepo()?.updatedAt !== data.updatedAt) writeRepo(data);
+    if (changed && notify && onChange) onChange(snapshot());
+    return snapshot();
+  }
+
+  /** 收到 connect 的 repo（或断开时的 null）：重合并并通知 UI。 */
+  function attachRepo(next) {
+    repo = next || null;
+    backend = repo ? 'zenfs' : 'local';
+    mergeFromRepo(true);
+  }
+
   async function init() {
-    if (factory) {
+    if (useShared) {
+      // connected 事件晚于 init；先根据当前快照初始化本地，订阅会在 repo 到达时回调。
+      repo = getConfigRepo();
+      backend = repo ? 'zenfs' : 'local';
+      onConfigRepo(attachRepo);
+    } else if (factory) {
       try {
         repo = await factory();
         backend = 'zenfs';

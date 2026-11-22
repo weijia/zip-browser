@@ -2,9 +2,14 @@
 // 纯函数部分不依赖 DOM，可直接被 node:test 引入；持久化部分以 zen-fs-config
 // 的 config-sync 为主，localStorage 作为同步镜像与初始化失败时的兜底。
 
+// repo 来自共享的 connect（manifest-sync → config-repo，appId=dir-struct-gen），
+// 不再自建 createConfigRepo('zip-browser')。显式 repoFactory 仅供单测。
+
+import { getConfigRepo, onConfigRepo } from './config-repo.js';
+
 export const STORAGE_KEY = 'zip-browser:annotations:v1';
 export const CONFIG_KEY = '/annotations';
-export const APP_ID = 'zip-browser';
+export const APP_ID = 'dir-struct-gen';
 
 const MAX_TAGS_PER_KEY = 24;
 const MAX_BOOKMARKS = 500;
@@ -251,14 +256,8 @@ function memoryStorage() {
 export function createAnnotationStore({ storage, repoFactory, onChange } = {}) {
   const globals = typeof window !== 'undefined' ? window : globalThis;
   const local = storage || globals.localStorage || memoryStorage();
-  const factory = repoFactory === undefined
-    ? (() => {
-      const lib = globals.ZenFSConfig;
-      return lib && typeof lib.createConfigRepo === 'function'
-        ? () => lib.createConfigRepo(APP_ID)
-        : null;
-    })()
-    : repoFactory;
+  const useShared = repoFactory === undefined;
+  const factory = useShared ? null : repoFactory;
 
   let repo = null;
   let backend = 'local';
@@ -301,7 +300,11 @@ export function createAnnotationStore({ storage, repoFactory, onChange } = {}) {
   }
 
   async function init() {
-    if (factory) {
+    if (useShared) {
+      repo = getConfigRepo();
+      backend = repo ? 'zenfs' : 'local';
+      onConfigRepo(attachRepo);
+    } else if (factory) {
       try {
         repo = await factory();
         backend = 'zenfs';
@@ -318,11 +321,19 @@ export function createAnnotationStore({ storage, repoFactory, onChange } = {}) {
     return { backend, data: snapshot() };
   }
 
+  /** 收到 connect 的 repo（或断开时的 null）：重合并并通知 UI。 */
+  function attachRepo(next) {
+    repo = next || null;
+    backend = repo ? 'zenfs' : 'local';
+    reload();
+  }
+
   /** 其他标签页 / 设备同步后重新读取，不重建 repo。 */
   function reload() {
     const merged = newer(readRepo(), readLocal());
     if (merged && merged.updatedAt !== data.updatedAt) {
       data = merged;
+      writeLocal(data);
       notify();
     }
     return snapshot();

@@ -1035,6 +1035,7 @@ test('hostinfo api and v2 sync assets are served', async () => {
   for (const file of [
     '/manifest-export.js', '/manifest-sync.js',
     '/drive-backends.js', '/drive-cache-store.js', '/drive-cache.js', '/manifest-volume-import.js',
+    '/config-repo.js',
     '/vendor/zen-fs-config-ui.js',
     '/vendor/zen-fs-remotestoragejs.global.js',
     '/vendor/zen-fs-gitee.global.js',
