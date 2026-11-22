@@ -251,6 +251,65 @@ export async function deleteEntry(cacheRoot, dir) {
   return { dir: String(dir), removed: true };
 }
 
+/**
+ * 从 zen-fs-config 同步下来的远端清单批量落地：按条目自带的 dir 原样建目录，
+ * 不调用 nextSeq 重算序号（否则 Local-1 会被改写成别的号，和远端清单漂移）。
+ * 已存在且 info.json 完好的条目跳过，不覆盖用户在本机做过的编辑。
+ * 返回 { imported, skipped, invalid, entries }。
+ */
+export async function importEntries(cacheRoot, rawEntries) {
+  const result = { imported: 0, skipped: 0, invalid: 0, entries: [] };
+  const list = Array.isArray(rawEntries) ? rawEntries : [];
+  await fs.mkdir(cacheRoot, { recursive: true });
+  for (const raw of list) {
+    const dir = String(raw?.dir || '');
+    const parsed = parseDirName(dir);
+    if (!parsed || parsed.backend !== String(raw?.backend || '')) {
+      result.invalid += 1;
+      continue;
+    }
+    let info;
+    try {
+      info = sanitizeInfo({ ...(raw || {}), backend: parsed.backend });
+    } catch {
+      result.invalid += 1;
+      continue;
+    }
+    const target = path.join(cacheRoot, dir);
+    const infoPath = path.join(target, INFO_FILE);
+    // 已有完好的 info.json：视为已落地，跳过且不覆盖本机编辑。
+    let existing = null;
+    try {
+      existing = JSON.parse(await fs.readFile(infoPath, 'utf8'));
+    } catch {
+      existing = null;
+    }
+    if (existing && existing.backend === parsed.backend) {
+      result.skipped += 1;
+      result.entries.push({ ...existing, dir, seq: parsed.seq, hasInfo: true, imported: false });
+      continue;
+    }
+    const doc = {
+      v: 1,
+      backend: parsed.backend,
+      label: info.label,
+      total: info.total,
+      free: info.free,
+      upQuota: info.upQuota,
+      downQuota: info.downQuota,
+      upRemaining: info.upRemaining,
+      downRemaining: info.downRemaining,
+      // 沿用清单里的时间戳，便于两端对账；缺失时才用当前时间。
+      updatedAt: Number(raw?.updatedAt) || Date.now(),
+    };
+    await fs.mkdir(path.join(target, DATA_DIRNAME), { recursive: true });
+    await writeInfoFile(target, doc);
+    result.imported += 1;
+    result.entries.push({ ...doc, dir, seq: parsed.seq, hasInfo: true, imported: true });
+  }
+  return result;
+}
+
 /** 高层入口：返回缓存根与当前所有条目。 */
 export async function readCache(options = {}) {
   const { codesRoot, cacheRoot } = await ensureCacheRoot(options);

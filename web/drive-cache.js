@@ -3,13 +3,16 @@
 // 在 OpenList /zb 托管模式下这些本机 API 不存在，此时给出明确提示而不是静默失败。
 
 import { OPENLIST_BACKENDS } from './drive-backends.js';
-import { createDriveCacheStore, makeCopyPayload } from './drive-cache-store.js';
+import { createDriveCacheStore, makeCopyPayload, sanitizeData } from './drive-cache-store.js';
+import { getDataGroupFs } from './manifest-sync.js';
 
 const $ = (id) => document.getElementById(id);
 
 const store = createDriveCacheStore({
   onChange: () => refreshBadge(),
 });
+
+const REMOTE_MANIFEST = '/drive-cache.json'; // app_data 数据组根下的同步清单
 
 let apiFetch = null;
 let statusFn = null;
@@ -130,6 +133,98 @@ async function loadList({ quiet = false } = {}) {
       : `读取失败：${err?.message || err}`;
     setSync(msg, false);
     if (statusFn && !quiet) statusFn(`${msg}；网盘信息登记不可用`, true);
+  }
+}
+
+/**
+ * 从 configurator 已同步到本机的 dataGroup 读 drive-cache.json（本地 fs 读，不碰 RS）。
+ * 返回 sanitize 后的清单；未连接同步组或清单不存在时返回 null 并给出状态提示。
+ */
+async function readRemoteManifest() {
+  const fp = getDataGroupFs();
+  if (!fp) {
+    setSync('同步组未连接：请先在「收藏同步」面板连接并等待清单同步完成', false);
+    return null;
+  }
+  let raw;
+  try {
+    raw = await fp.readFile(REMOTE_MANIFEST, 'utf8');
+  } catch {
+    setSync(`数据组里没有 ${REMOTE_MANIFEST}（远端尚未写入或尚未同步）`, false);
+    return null;
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    setSync('同步清单不是合法 JSON', false);
+    return null;
+  }
+  const clean = sanitizeData(doc);
+  if (!clean || !clean.entries.length) {
+    setSync('同步清单为空或格式不符（需要 { v, updatedAt, entries[] }）', false);
+    return null;
+  }
+  return clean;
+}
+
+/** 列出本机尚未落地（或 info.json 缺失）的条目，供用户确认导入。 */
+async function pendingFromManifest(manifest) {
+  let have = new Set();
+  try {
+    const info = await apiFetch('/api/drive-cache/info');
+    have = new Set((info.entries || []).map((e) => e.dir));
+  } catch {
+    have = new Set();
+  }
+  return manifest.entries.filter((e) => !have.has(e.dir));
+}
+
+/** 从远端同步清单导入本机缓存目录：按条目 dir 原样建，不重算序号、已存在跳过。 */
+async function onImportRemote() {
+  if (!apiFetch) {
+    setSync('当前宿主不提供本机缓存接口，无法落地到 codes/cached', false);
+    return;
+  }
+  const btn = $('dcImport');
+  setSync('正在读取同步清单…');
+  const manifest = await readRemoteManifest();
+  if (!manifest) return;
+  const pending = await pendingFromManifest(manifest);
+  if (!pending.length) {
+    setSync(`同步清单 ${manifest.entries.length} 条，本机已全部落地，无需导入`, true);
+    return;
+  }
+  const names = pending.map((e) => `${e.dir} (${e.label || e.backend})`);
+  const ok = window.confirm(
+    `同步清单共 ${manifest.entries.length} 条，其中 ${pending.length} 条尚未落地本机：\n\n`
+    + `${names.slice(0, 12).join('\n')}${names.length > 12 ? `\n…等共 ${pending.length} 条` : ''}\n\n`
+    + '将按原目录名创建缓存目录（不改序号、不覆盖已有登记），确认导入？'
+  );
+  if (!ok) {
+    setSync('已取消导入', null);
+    return;
+  }
+  if (btn) btn.disabled = true;
+  setSync(`正在导入 ${pending.length} 条…`);
+  try {
+    const result = await apiFetch('/api/drive-cache/import', {
+      method: 'POST',
+      body: JSON.stringify({ entries: pending }),
+    });
+    await loadList({ quiet: true });
+    notifyDiskList();
+    const bad = result.invalid || 0;
+    setSync(
+      `导入完成：新增 ${result.imported || 0}、跳过 ${result.skipped || 0}`
+      + (bad ? `、非法 ${bad}` : '') + ' · 已同步到 zen-fs-config',
+      bad === 0,
+    );
+    if (statusFn) statusFn(`从同步清单导入 ${result.imported || 0} 个网盘`, false);
+  } catch (err) {
+    setSync(`导入失败：${err?.message || err}`, false);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -332,6 +427,7 @@ export function initDriveCache({ api, status } = {}) {
   $('dcReset')?.addEventListener('click', resetForm);
   $('dcCancelEdit')?.addEventListener('click', exitEditMode);
   $('dcRefresh')?.addEventListener('click', () => void loadList());
+  $('dcImport')?.addEventListener('click', () => void onImportRemote());
   $('dcForm')?.addEventListener('submit', (event) => { void onSave(event); });
   $('dcList')?.addEventListener('click', (event) => { void onListClick(event); });
   $('driveCacheModal')?.addEventListener('click', (event) => {

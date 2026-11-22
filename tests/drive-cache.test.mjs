@@ -176,6 +176,58 @@ test('drive-cache-store：setEntries 写入镜像并触发 onChange，可禁用 
   assert.equal(mirrored.entries[0].dir, 'S3-1');
 });
 
+test('importEntries：按 dir 原样落地，不重算序号，已存在跳过，沿用清单时间戳', async () => {
+  const root = await tempRoot();
+  try {
+    const entries = [
+      { dir: 'Local-7', seq: 7, backend: 'Local', label: '/disk/0', total: null, updatedAt: 111 },
+      { dir: 'SMB-2', seq: 2, backend: 'SMB', label: '/share', updatedAt: 222 },
+    ];
+    const r1 = await dc.importEntries(root, entries);
+    assert.equal(r1.imported, 2);
+    assert.equal(r1.skipped, 0);
+    assert.equal(r1.invalid, 0);
+    const doc = JSON.parse(await fs.readFile(path.join(root, 'Local-7', 'info.json'), 'utf8'));
+    assert.equal(doc.backend, 'Local');
+    assert.equal(doc.label, '/disk/0');
+    assert.equal(doc.free, null);
+    assert.equal(doc.updatedAt, 111);
+    assert.equal((await fs.stat(path.join(root, 'Local-7', 'data'))).isDirectory(), true);
+    // 再导一次：全部跳过，不覆盖、不新增目录。
+    const r2 = await dc.importEntries(root, entries);
+    assert.equal(r2.imported, 0);
+    assert.equal(r2.skipped, 2);
+    const dirs = (await fs.readdir(root, { withFileTypes: true }))
+      .filter((d) => d.isDirectory()).map((d) => d.name);
+    assert.deepEqual(dirs.sort(), ['Local-7', 'SMB-2']);
+    // 本机已有登记被改过：跳过时不覆盖用户的编辑。
+    const edited = { ...doc, label: '我改过的名称' };
+    await fs.writeFile(path.join(root, 'Local-7', 'info.json'), JSON.stringify(edited), 'utf8');
+    await dc.importEntries(root, entries);
+    const after = JSON.parse(await fs.readFile(path.join(root, 'Local-7', 'info.json'), 'utf8'));
+    assert.equal(after.label, '我改过的名称');
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('importEntries：拒绝非法目录名/后端不一致/未知后端', async () => {
+  const root = await tempRoot();
+  try {
+    const r = await dc.importEntries(root, [
+      { dir: '../Local-1', seq: 1, backend: 'Local' },       // 路径穿越
+      { dir: 'Local-2', seq: 2, backend: 'SMB' },             // 后端与目录名不符
+      { dir: 'TotallyUnknown-1', seq: 1, backend: 'TotallyUnknown' }, // 未知后端
+    ]);
+    assert.equal(r.imported, 0);
+    assert.equal(r.invalid, 3);
+    const dirs = (await fs.readdir(root)).filter((n) => n !== 'node_modules');
+    assert.equal(dirs.length, 0);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('makeCopyPayload：照搬字段并给副本改名', async () => {
   const storeMod = await import('../web/drive-cache-store.js');
   const payload = storeMod.makeCopyPayload({

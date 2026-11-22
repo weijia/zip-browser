@@ -115,7 +115,7 @@
       <h2>网盘信息登记</h2>
       <button id="dcClose" type="button" class="modal-x" title="关闭">×</button>
     </div>
-    <p class="modal-note">手工登记每个网盘的类型、容量与月度流量配额。信息只保存在本机 <code>codes/cached/&lt;后端名&gt;-&lt;序号&gt;/info.json</code>，并同步到 zen-fs-config；不缓存网盘文件、不读取远端接口。</p>
+    <p class="modal-note">手工登记每个网盘的类型、容量与月度流量配额。信息只保存在本机 <code>codes/cached/&lt;后端名&gt;-&lt;序号&gt;/info.json</code>，并同步到 zen-fs-config；不缓存网盘文件、不读取远端接口。也可从同步组清单 <code>drive-cache.json</code> 一键导入：按原目录名落地、不改序号、不覆盖已有登记。</p>
     <div id="dcRoot" class="dc-root">缓存目录：读取中…</div>
     <form id="dcForm" class="dc-form">
       <div id="dcEditHint" class="dc-edit-hint hidden">
@@ -144,7 +144,10 @@
     </form>
     <div class="dc-list-head">
       <span>已登记 <strong id="dcCount">0</strong> 个网盘</span>
-      <button id="dcRefresh" type="button" class="dc-mini" title="从本机缓存目录重新读取">刷新</button>
+      <span class="dc-head-actions">
+        <button id="dcImport" type="button" class="dc-mini" title="从同步组清单 drive-cache.json 导入尚未落地的网盘">从同步清单导入</button>
+        <button id="dcRefresh" type="button" class="dc-mini" title="从本机缓存目录重新读取">刷新</button>
+      </span>
     </div>
     <div id="dcList" class="dc-list"></div>
     <div id="dcSync" class="sync-status dc-sync" data-state="idle">同步状态：等待操作</div>

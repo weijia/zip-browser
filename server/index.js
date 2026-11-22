@@ -25,6 +25,7 @@ import { trashPaths } from './trash-service.js';
 import {
   readCache, saveEntry as saveDriveEntry, updateEntry as updateDriveEntry,
   deleteEntry as deleteDriveEntry, ensureCacheRoot, ensureDataDir,
+  importEntries as importDriveEntries,
 } from './drive-cache.js';
 import { openInExplorer } from './explorer-service.js';
 import { scanPaths, listTreeLevel, readMtimes } from './manifest-scan.js';
@@ -169,6 +170,13 @@ async function handleApi(req, res, url) {
     const body = await readJson(req);
     const { cacheRoot } = await ensureCacheRoot();
     return json(res, 200, await deleteDriveEntry(cacheRoot, body.dir));
+  }
+  // 从 zen-fs-config 同步清单批量落地：按条目 dir 原样建目录，不重算序号、已存在跳过。
+  if (req.method === 'POST' && pathname === '/api/drive-cache/import') {
+    const body = await readJson(req);
+    const { codesRoot, cacheRoot } = await ensureCacheRoot();
+    const result = await importDriveEntries(cacheRoot, body.entries);
+    return json(res, 200, { codesRoot, cacheRoot, ...result });
   }
 
   // 清单生成：物理扫描只在用户显式点「重新扫描并生成」时触发。

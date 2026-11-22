@@ -489,6 +489,17 @@ export function syncState() {
   return { ready: Boolean(appFs) && prefix !== null, reason: blockReason, prefix };
 }
 
+/**
+ * 供网盘信息登记（drive-cache）复用同一个 configurator 连接读同步下来的清单。
+ * 返回 dataGroup 的 promises fs（与清单导出共用 app_data 数据组，appId=dir-struct-gen）；
+ * 同步组未就绪时返回 null，调用方据此提示用户先连接同步组。
+ * 不新建 repo / 不新增 appId：读到的就是 configurator 已同步到本机的本地副本。
+ */
+export function getDataGroupFs() {
+  if (!appFs || prefix === null) return null;
+  return appFs.promises || appFs;
+}
+
 /** 供诊断面板列出本工具缓存的扫描分片与 file-list 片。 */
 export function syncDiagnostics() {
   return {
