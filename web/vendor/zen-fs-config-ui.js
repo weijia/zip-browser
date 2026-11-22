@@ -23297,7 +23297,7 @@ var ZenFSConfigUI = (() => {
     }
   });
 
-  // node_modules/zen-fs-config/dist/chunk-JS3F3RBC.mjs
+  // node_modules/zen-fs-config/dist/chunk-J6QHNG4F.mjs
   function idb() {
     return globalThis.indexedDB;
   }
@@ -23519,7 +23519,10 @@ var ZenFSConfigUI = (() => {
         const size = st.size;
         const buf = new Uint8Array(size);
         await isolatedFS.read(path, buf, 0, size);
-        if (args[0] === "utf-8") return new TextDecoder().decode(buf);
+        const enc = typeof args[0] === "string" ? args[0] : args[0] && typeof args[0] === "object" ? args[0].encoding : void 0;
+        if (enc === "utf-8" || enc === "utf8" || enc === "UTF-8") {
+          return new TextDecoder().decode(buf);
+        }
         return buf;
       },
       async writeFile(path, data, _options) {
@@ -23669,8 +23672,8 @@ var ZenFSConfigUI = (() => {
     return String(link5.href).replace(/\/+$/, "");
   }
   var INODE_SIZE, S_IFMT2, S_IFDIR2, LEGACY_LISTING_MAGIC, request2, registry, metadataRegistry, inMemoryCounter, _memCache, OPTIONAL_BACKEND_GLOBALS;
-  var init_chunk_JS3F3RBC = __esm({
-    "node_modules/zen-fs-config/dist/chunk-JS3F3RBC.mjs"() {
+  var init_chunk_J6QHNG4F = __esm({
+    "node_modules/zen-fs-config/dist/chunk-J6QHNG4F.mjs"() {
       "use strict";
       INODE_SIZE = 4096;
       S_IFMT2 = 61440;
@@ -23933,9 +23936,9 @@ var ZenFSConfigUI = (() => {
     }
   });
 
-  // node_modules/zen-fs-config/dist/backend-registry-KRGXHZRB.mjs
-  var backend_registry_KRGXHZRB_exports = {};
-  __export(backend_registry_KRGXHZRB_exports, {
+  // node_modules/zen-fs-config/dist/backend-registry-CUMSOE2S.mjs
+  var backend_registry_CUMSOE2S_exports = {};
+  __export(backend_registry_CUMSOE2S_exports, {
     createBackend: () => createBackend,
     getAccountFields: () => getAccountFields,
     getBackendMetadata: () => getBackendMetadata,
@@ -23947,10 +23950,10 @@ var ZenFSConfigUI = (() => {
     unregisterBackend: () => unregisterBackend,
     wrapZenFSFileSystem: () => wrapZenFSFileSystem
   });
-  var init_backend_registry_KRGXHZRB = __esm({
-    "node_modules/zen-fs-config/dist/backend-registry-KRGXHZRB.mjs"() {
+  var init_backend_registry_CUMSOE2S = __esm({
+    "node_modules/zen-fs-config/dist/backend-registry-CUMSOE2S.mjs"() {
       "use strict";
-      init_chunk_JS3F3RBC();
+      init_chunk_J6QHNG4F();
     }
   });
 
@@ -24462,7 +24465,7 @@ var ZenFSConfigUI = (() => {
   });
 
   // node_modules/zen-fs-config/dist/index.mjs
-  init_chunk_JS3F3RBC();
+  init_chunk_J6QHNG4F();
 
   // node_modules/@richard432/localstorage-logger/dist/index.mjs
   var PREFIX = "debug:";
@@ -26163,7 +26166,7 @@ var ZenFSConfigUI = (() => {
         const pathMod = await Promise.resolve().then(() => (init_stub_path(), stub_path_exports));
         const dir = options.path;
         const store = new FolderStore({ path: dir, label: options.label, fs, pathMod });
-        return (await Promise.resolve().then(() => (init_backend_registry_KRGXHZRB(), backend_registry_KRGXHZRB_exports))).wrapZenFSFileSystem({ backend: FolderBackend, path: dir, label: options.label });
+        return (await Promise.resolve().then(() => (init_backend_registry_CUMSOE2S(), backend_registry_CUMSOE2S_exports))).wrapZenFSFileSystem({ backend: FolderBackend, path: dir, label: options.label });
       },
       {
         type: "Folder",
@@ -27834,6 +27837,15 @@ var ZenFSConfigUI = (() => {
   function backendDedupKey(desc) {
     return `${desc.type}:${stableOptionsKey(identityOptions(desc.type, desc.options))}`;
   }
+  function prefetchedDescriptorFor(desc, prefetched) {
+    if (!prefetched) return void 0;
+    const candidate = {
+      id: "prefetched",
+      type: prefetched.type,
+      options: prefetched.options ?? {}
+    };
+    return backendDedupKey(candidate) === backendDedupKey(desc) ? prefetched.descriptor : void 0;
+  }
   function backendAgeRank(b) {
     if (typeof b.createdAt === "number") return b.createdAt;
     const m = /-(\d{10,})$/.exec(b.id);
@@ -27884,6 +27896,11 @@ var ZenFSConfigUI = (() => {
       __publicField(this, "onConflictCallback");
       __publicField(this, "disposed", false);
       __publicField(this, "configCache", /* @__PURE__ */ new Map());
+      /** 后台建对（deferReplicaSetup）的状态，见 `whenReplicasReady()`。 */
+      __publicField(this, "replicaSetupPromise", null);
+      __publicField(this, "replicaSetupSummary", null);
+      /** 同步对事件订阅者，见 `onSyncEvent()`。 */
+      __publicField(this, "syncEventHandlers", /* @__PURE__ */ new Set());
       __publicField(this, "primaryBackendId");
       __publicField(this, "cacheOptions");
       __publicField(this, "pollIntervalMs");
@@ -27928,6 +27945,10 @@ var ZenFSConfigUI = (() => {
        * If a sync is already in progress, the next poll will pick up the tombstone.
        */
       __publicField(this, "postDeleteSyncTimer");
+      // -----------------------------------------------------------------------
+      // IConfigRepo — Group Type
+      // -----------------------------------------------------------------------
+      __publicField(this, "identityPromise", null);
       this.appId = appId;
       this.nodeId = nodeId;
       this.primaryBackendId = primaryBackendId;
@@ -28089,6 +28110,12 @@ var ZenFSConfigUI = (() => {
     // -----------------------------------------------------------------------
     async flush() {
       this.assertNotDisposed();
+      if (this.replicaSetupPromise) {
+        try {
+          await this.replicaSetupPromise;
+        } catch {
+        }
+      }
       if (this.initialSyncPromise) {
         await this.initialSyncPromise;
         this.initialSyncPromise = null;
@@ -28736,6 +28763,26 @@ var ZenFSConfigUI = (() => {
       return this.syncEngine.getStatusAll();
     }
     /**
+     * Subscribe to sync-pair events (`sync:end` / `sync:error`). Returns an
+     * unsubscribe function. Handlers run after the existing state bookkeeping,
+     * so `getSyncStatuses()` is already up to date when they fire.
+     */
+    onSyncEvent(handler) {
+      this.syncEventHandlers.add(handler);
+      return () => {
+        this.syncEventHandlers.delete(handler);
+      };
+    }
+    emitSyncEvent(event) {
+      for (const handler of this.syncEventHandlers) {
+        try {
+          handler(event);
+        } catch (err2) {
+          log5.warn(`[ConfigRepo] sync event handler failed:`, err2);
+        }
+      }
+    }
+    /**
      * Per-backend sync state. Includes replica descriptors that failed to connect
      * (they have no sync pair, so they never show up in getSyncStatuses()).
      */
@@ -28755,18 +28802,37 @@ var ZenFSConfigUI = (() => {
     trackSyncErrors(backendId, pairId) {
       this.syncEngine.on(pairId, "sync:error", (event) => {
         const error2 = event.error;
+        const message = error2 instanceof Error ? error2.message : String(error2 ?? "sync failed");
         this.backendStates.set(backendId, {
           backendId,
           pairId,
           error: {
-            message: error2 instanceof Error ? error2.message : String(error2 ?? "sync failed"),
+            message,
             timestamp: Date.now()
           }
         });
+        this.emitSyncEvent({
+          type: "sync:error",
+          groupKind: "config",
+          groupId: this.groupId,
+          backendId,
+          pairId,
+          timestamp: event.timestamp ?? Date.now(),
+          error: message
+        });
       });
-      this.syncEngine.on(pairId, "sync:end", () => {
+      this.syncEngine.on(pairId, "sync:end", (event) => {
         const current = this.backendStates.get(backendId);
         if (current?.error) this.backendStates.set(backendId, { backendId, pairId });
+        this.emitSyncEvent({
+          type: "sync:end",
+          groupKind: "config",
+          groupId: this.groupId,
+          backendId,
+          pairId,
+          timestamp: event.timestamp ?? Date.now(),
+          result: event.result
+        });
       });
     }
     /** Registered replica backend descriptors (excludes the implicit local primary). */
@@ -28873,11 +28939,18 @@ var ZenFSConfigUI = (() => {
     // -----------------------------------------------------------------------
     async dispose() {
       if (this.disposed) return;
+      if (this.replicaSetupPromise) {
+        try {
+          await this.replicaSetupPromise;
+        } catch {
+        }
+      }
       if (this.initialSyncPromise) {
         await this.initialSyncPromise;
         this.initialSyncPromise = null;
       }
       this.disposed = true;
+      this.syncEventHandlers.clear();
       if (this.postDeleteSyncTimer) {
         clearTimeout(this.postDeleteSyncTimer);
         this.postDeleteSyncTimer = void 0;
@@ -28898,25 +28971,114 @@ var ZenFSConfigUI = (() => {
     // -----------------------------------------------------------------------
     // Internal — Setup
     // -----------------------------------------------------------------------
-    async setupSync(backends, primaryBackendId, pollIntervalMs) {
+    /** 当前副本准备结果（不等待）。 */
+    collectReplicaSetupSummary() {
+      const failed = [];
+      for (const [backendId, state] of this.backendStates) {
+        if (state.error) failed.push({ backendId, error: state.error.message });
+      }
+      return {
+        ready: Array.from(this.replicaBackends.keys()),
+        skipped: Array.from(this.skippedBackends, ([backendId, reason]) => ({ backendId, reason })),
+        failed
+      };
+    }
+    /** 副本后台准备的结果。未开启 defer 时立即 resolve。永不 reject。 */
+    whenReplicasReady() {
+      if (this.replicaSetupPromise) return this.replicaSetupPromise;
+      return Promise.resolve(this.replicaSetupSummary ?? this.collectReplicaSetupSummary());
+    }
+    /**
+     * 后台建对：`connect()` 只做探测 + 本地初始化，副本的 createBackend /
+     * 归属校验 / addPair 全部放在这里。
+     *
+     * 关键点：**校验完成前不建任何 pair**，因此不存在「pair 已存在但还没校验」
+     * 的冲突窗口，也不需要给同步加闸门；首同步与 watch 在 pair 建好之后才启动。
+     */
+    startReplicaSetupInBackground(backends, primaryBackendId, pollIntervalMs, prefetchedRemote, opts) {
+      if (this.replicaSetupPromise) return this.replicaSetupPromise;
+      this.replicaSetupPromise = (async () => {
+        if (this.disposed) return { ready: [], skipped: [], failed: [] };
+        try {
+          await this.setupSync(backends, primaryBackendId, pollIntervalMs, prefetchedRemote);
+        } catch (err2) {
+          log5.error("[ConfigRepo] background replica setup failed:", err2);
+        }
+        if (opts?.migrateVersionSidecars) {
+          try {
+            await this.migrateLegacyVersionSidecars();
+          } catch (err2) {
+            log5.warn("[ConfigRepo] background version sidecar migration failed:", err2);
+          }
+        }
+        if (this.disposed) {
+          this.replicaSetupSummary = this.collectReplicaSetupSummary();
+          return this.replicaSetupSummary;
+        }
+        if (this.replicaCount > 0) {
+          this.startBackgroundSync();
+          this.syncMetaToReplicas().catch((err2) => {
+            log5.error("[ConfigRepo] background syncMetaToReplicas failed:", err2);
+          });
+        }
+        this.replicaSetupSummary = this.collectReplicaSetupSummary();
+        log5.log(
+          `[ConfigRepo] background replica setup done: ready=${this.replicaSetupSummary.ready.join(",") || "(none)"} skipped=${this.replicaSetupSummary.skipped.length} failed=${this.replicaSetupSummary.failed.length}`
+        );
+        return this.replicaSetupSummary;
+      })();
+      this.replicaSetupPromise.catch(() => {
+      });
+      return this.replicaSetupPromise;
+    }
+    async setupSync(backends, primaryBackendId, pollIntervalMs, prefetchedRemote) {
       log5.log(`[ConfigRepo] setupSync: ${backends.length} backends, primary=${primaryBackendId} pollInterval=${pollIntervalMs ?? "default"}ms`);
+      const wanted = [];
+      const seenIds = /* @__PURE__ */ new Set();
       for (const desc of backends) {
         if (desc.id === primaryBackendId) continue;
         if (desc.enabled === false) {
           log5.log(`[ConfigRepo] Skipping disabled replica: ${desc.id}`);
           continue;
         }
+        if (seenIds.has(desc.id)) {
+          log5.warn(`[ConfigRepo] Duplicate backend id "${desc.id}" in setupSync input \u2014 using the first entry`);
+          continue;
+        }
+        seenIds.add(desc.id);
+        wanted.push(desc);
+      }
+      const prepared = /* @__PURE__ */ new Map();
+      await Promise.all(wanted.map(async (desc) => {
         log5.log(`[ConfigRepo] Creating replica backend: id=${desc.id}, type=${desc.type}`);
         try {
           const instance = await createBackend(desc);
-          const owner = await this.bindBackendIdentity(instance, desc.id);
+          const prefetched = prefetchedDescriptorFor(desc, prefetchedRemote);
+          const owner = await this.bindBackendIdentity(instance, desc.id, prefetched);
           if (owner === "conflict") {
             try {
               await instance.dispose?.();
             } catch {
             }
-            continue;
+            return;
           }
+          prepared.set(desc.id, { instance });
+        } catch (err2) {
+          log5.error(`[ConfigRepo] Failed to create replica ${desc.id} (${desc.type}):`, err2);
+          this.backendStates.set(desc.id, {
+            backendId: desc.id,
+            error: {
+              message: err2 instanceof Error ? err2.message : String(err2),
+              timestamp: Date.now()
+            }
+          });
+        }
+      }));
+      for (const desc of wanted) {
+        const entry = prepared.get(desc.id);
+        if (!entry) continue;
+        try {
+          const instance = entry.instance;
           let fsInstance = instance;
           if (this.cacheOptions) {
             const { wrapWithCache: wrapWithCache2 } = await Promise.resolve().then(() => (init_cache_wrapper_S5HRLRQX(), cache_wrapper_S5HRLRQX_exports));
@@ -29297,7 +29459,7 @@ var ZenFSConfigUI = (() => {
         );
       }
       const result = Array.from(seen.values()).map((i) => i.desc);
-      this.backendDescriptorCache = result;
+      this.backendDescriptorCache = [...result];
       return result;
     }
     /**
@@ -29543,16 +29705,21 @@ var ZenFSConfigUI = (() => {
         throw new Error(`\u66F4\u65B0\u540E\u7AEF\u53C2\u6570\u5931\u8D25\uFF1A${reason}\uFF08\u5DF2\u5C1D\u8BD5\u56DE\u6EDA\u65E7\u53C2\u6570\uFF09`);
       }
     }
-    // -----------------------------------------------------------------------
-    // IConfigRepo — Group Type
-    // -----------------------------------------------------------------------
+    async ensureGroupIdentity(kind = "config", id = CONFIG_GROUP_ID) {
+      if (!this.identityPromise) {
+        this.identityPromise = this.resolveGroupIdentity(kind, id).finally(() => {
+          this.identityPromise = null;
+        });
+      }
+      return this.identityPromise;
+    }
     /**
      * 本组的同步身份（kind + id + 不可变 instanceId）。
      *
      * 首次调用时若 `.meta/group.json` 里还没有 `instanceId`（老部署），生成一个
      * 并就地写回 —— 只写一次，之后字节相同不再落盘。
      */
-    async ensureGroupIdentity(kind = "config", id = CONFIG_GROUP_ID) {
+    async resolveGroupIdentity(kind = "config", id = CONFIG_GROUP_ID) {
       let existingFeatures;
       if (!this.instanceId) {
         let existing = null;
@@ -29759,10 +29926,10 @@ var ZenFSConfigUI = (() => {
      * 连接远端前校验归属：属于别的组 → `conflict`（调用方必须跳过、不建同步对）。
      * 老仓库（无 instanceId）会被本组认领。
      */
-    async bindBackendIdentity(instance, backendId) {
+    async bindBackendIdentity(instance, backendId, prefetched) {
       try {
         const identity = await this.ensureGroupIdentity();
-        const result = await bindRemoteGroupIdentityDetailed(instance, identity);
+        const result = await bindRemoteGroupIdentityDetailed(instance, identity, prefetched);
         if (result.state === "conflict") {
           this.skippedBackends.set(backendId, describeConflict(result));
           this.backendConflicts.set(backendId, {
@@ -30346,6 +30513,8 @@ var ZenFSConfigUI = (() => {
       __publicField(this, "dataBackends", /* @__PURE__ */ new Map());
       __publicField(this, "backendStates", /* @__PURE__ */ new Map());
       __publicField(this, "disposed", false);
+      /** 同步对事件订阅者，见 `onSyncEvent()`。 */
+      __publicField(this, "syncEventHandlers", /* @__PURE__ */ new Set());
       /** `.meta/` stores shared with the config-sync group. */
       __publicField(this, "tombstones");
       __publicField(this, "versions");
@@ -31020,6 +31189,22 @@ var ZenFSConfigUI = (() => {
     getSyncStatuses() {
       return this.syncEngine.getStatusAll();
     }
+    /** 订阅同步对事件；返回取消订阅函数。见 `SyncGroupSyncEvent`。 */
+    onSyncEvent(handler) {
+      this.syncEventHandlers.add(handler);
+      return () => {
+        this.syncEventHandlers.delete(handler);
+      };
+    }
+    emitSyncEvent(event) {
+      for (const handler of this.syncEventHandlers) {
+        try {
+          handler(event);
+        } catch (err2) {
+          log5.warn(`[AppDataGroup:${this.groupId}] sync event handler failed:`, err2);
+        }
+      }
+    }
     async flush() {
       await this.runTombstonePass("flush-pre");
       const results = await this.syncEngine.syncAll();
@@ -31039,18 +31224,37 @@ var ZenFSConfigUI = (() => {
     trackSyncErrors(backendId, pairId) {
       this.syncEngine.on(pairId, "sync:error", (event) => {
         const error2 = event.error;
+        const message = error2 instanceof Error ? error2.message : String(error2 ?? "sync failed");
         this.backendStates.set(backendId, {
           backendId,
           pairId,
           error: {
-            message: error2 instanceof Error ? error2.message : String(error2 ?? "sync failed"),
+            message,
             timestamp: Date.now()
           }
         });
+        this.emitSyncEvent({
+          type: "sync:error",
+          groupKind: "data",
+          groupId: this.groupId,
+          backendId,
+          pairId,
+          timestamp: event.timestamp ?? Date.now(),
+          error: message
+        });
       });
-      this.syncEngine.on(pairId, "sync:end", () => {
+      this.syncEngine.on(pairId, "sync:end", (event) => {
         const current = this.backendStates.get(backendId);
         if (current?.error) this.backendStates.set(backendId, { backendId, pairId });
+        this.emitSyncEvent({
+          type: "sync:end",
+          groupKind: "data",
+          groupId: this.groupId,
+          backendId,
+          pairId,
+          timestamp: event.timestamp ?? Date.now(),
+          result: event.result
+        });
       });
     }
     // -----------------------------------------------------------------------
@@ -31315,6 +31519,7 @@ var ZenFSConfigUI = (() => {
     async dispose() {
       if (this.disposed) return;
       this.disposed = true;
+      this.syncEventHandlers.clear();
       if (this.postDeleteTimer) {
         clearTimeout(this.postDeleteTimer);
         this.postDeleteTimer = void 0;
@@ -31348,12 +31553,20 @@ var ZenFSConfigUI = (() => {
     return new Uint8Array(raw);
   }
   async function createConfigRepo(appId, options = {}) {
+    const nowMs = () => typeof globalThis.performance?.now === "function" ? globalThis.performance.now() : Date.now();
+    const connectStartedAt = nowMs();
+    const phase = (name, extra) => {
+      const ms = Math.round(nowMs() - connectStartedAt);
+      log5.log(`[connect-timing] ${name}: ${ms}ms${extra ? ` (${extra})` : ""}`);
+    };
+    phase("start");
     const localPrimary = await resolveLocalPrimary(appId, "config", {
       idbStoreName: options.idbStoreName,
       folderPath: options.folderPath
     });
     log5.log(`[createConfigRepo] Creating local primary (type: ${localPrimary.type})...`);
     const primaryInstance = await createBackend(localPrimary);
+    phase("local-primary");
     const cachedFS = primaryInstance;
     if (options.purgeMtimeSidecars !== false) {
       try {
@@ -31381,6 +31594,7 @@ var ZenFSConfigUI = (() => {
         log5.warn(`[createConfigRepo] .keep purge failed:`, err2?.message ?? err2);
       }
     }
+    phase("local-purge");
     const cacheOptions = options.cache === false ? void 0 : options.cache ?? {};
     try {
       await primaryInstance.mkdir(META_DIR);
@@ -31426,6 +31640,7 @@ var ZenFSConfigUI = (() => {
     } catch (err2) {
       log5.warn(`[createConfigRepo] Failed to write group metadata:`, err2.message);
     }
+    phase("local-meta");
     const tempRepo = new ConfigRepo(
       appId,
       "",
@@ -31487,6 +31702,7 @@ var ZenFSConfigUI = (() => {
       }
     }
     log5.log(`[createConfigRepo] Replica backends: ${allBackends.map((b) => b.id).join(", ") || "(none)"}`);
+    phase("descriptors", `backends=${allBackends.length}`);
     let nodeId = options.nodeId;
     if (!nodeId) {
       nodeId = `node-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -31508,7 +31724,21 @@ var ZenFSConfigUI = (() => {
       if (nameDescriptor?.name) repo.name = nameDescriptor.name;
     } catch {
     }
-    await repo.setupSync(allBackends, LOCAL_IDB_BACKEND_ID, options.syncPollIntervalMs);
+    await repo.load();
+    phase("load");
+    if (options.deferReplicaSetup) {
+      repo.startReplicaSetupInBackground(
+        allBackends,
+        LOCAL_IDB_BACKEND_ID,
+        options.syncPollIntervalMs,
+        options.prefetchedRemote,
+        { migrateVersionSidecars: options.migrateVersionSidecars !== false }
+      );
+      phase("return", "replicas pending");
+      return repo;
+    }
+    await repo.setupSync(allBackends, LOCAL_IDB_BACKEND_ID, options.syncPollIntervalMs, options.prefetchedRemote);
+    phase("setupSync", `replicas=${allBackends.length}`);
     if (options.migrateVersionSidecars !== false) {
       try {
         const mig = await repo.migrateLegacyVersionSidecars();
@@ -31519,7 +31749,7 @@ var ZenFSConfigUI = (() => {
         log5.warn(`[createConfigRepo] version sidecar migration failed:`, err2?.message ?? err2);
       }
     }
-    await repo.load();
+    phase("version-migrate");
     if (repo.replicaCount > 0) {
       log5.log("[createConfigRepo] Starting background initial sync + dedup...");
       repo.startBackgroundSync();
@@ -31527,6 +31757,7 @@ var ZenFSConfigUI = (() => {
     repo.syncMetaToReplicas().catch((err2) => {
       log5.error("[createConfigRepo] background syncMetaToReplicas failed:", err2);
     });
+    phase("ready", "background sync started");
     return repo;
   }
   function sidecarOwnerPath(path) {
@@ -31649,52 +31880,116 @@ var ZenFSConfigUI = (() => {
   var log6 = createLogger22("connect");
   var GROUP_TYPE_FILE2 = "/.config/group-type";
   var LEGACY_GROUP_TYPE_FILE2 = "/.meta/group-type";
-  async function detectGroupTypeDetailed(type, options) {
-    log6(`detectGroupType: connecting to ${type}...`);
-    const tempBackend = await createBackend({ type, options });
-    let remote = null;
+  function errorText(err2) {
+    return err2?.message ?? String(err2);
+  }
+  function rootHintOf(options) {
+    for (const key of ["folderPath", "basePath", "root", "remoteRoot", "prefix", "path"]) {
+      const value = options[key];
+      if (typeof value === "string" && value) return value;
+    }
+    return void 0;
+  }
+  function bytesToText(value) {
+    if (typeof value === "string") return value;
+    if (value instanceof Uint8Array) return new TextDecoder().decode(value);
+    if (value instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(value));
+    return String(value ?? "");
+  }
+  var RemoteUnreachableError = class extends Error {
+    constructor(backendType, reason) {
+      super(
+        `\u8FDC\u7AEF\u4E0D\u53EF\u8FBE\uFF08${backendType}\uFF09${reason ? `\uFF1A${reason}` : ""}\uFF1B\u672A\u521B\u5EFA\u4EFB\u4F55\u672C\u5730\u540C\u6B65\u7EC4\u3002\u8BF7\u68C0\u67E5\u7F51\u7EDC/\u51ED\u8BC1\u540E\u91CD\u8BD5\u3002`
+      );
+      __publicField(this, "backendType");
+      __publicField(this, "reason");
+      __publicField(this, "code", "REMOTE_UNREACHABLE");
+      this.backendType = backendType;
+      this.reason = reason;
+      this.name = "RemoteUnreachableError";
+    }
+  };
+  var NeedsInitError = class extends Error {
+    constructor(backendType, rootHint) {
+      super(
+        `\u8FDC\u7AEF${rootHint ? `\uFF08${backendType} ${rootHint}\uFF09` : `\uFF08${backendType}\uFF09`}\u5C1A\u672A\u521D\u59CB\u5316\uFF1A\u8BF7\u786E\u8BA4\u662F\u5426\u5C06\u5176\u521D\u59CB\u5316\u4E3A config-sync \u6216 data-sync\uFF0C\u518D\u5E26 initGroupType \u91CD\u8BD5\u3002`
+      );
+      __publicField(this, "backendType");
+      __publicField(this, "rootHint");
+      __publicField(this, "code", "NEEDS_INIT");
+      __publicField(this, "requiresInit", true);
+      this.backendType = backendType;
+      this.rootHint = rootHint;
+      this.name = "NeedsInitError";
+    }
+  };
+  async function probeGroupTypeDetailed(type, options) {
+    let tempBackend;
     try {
-      try {
-        const descriptor = await readGroupDescriptor(tempBackend);
-        if (descriptor) {
-          remote = {
-            kind: descriptor.kind,
-            id: descriptor.id,
-            instanceId: isInstanceIdLike(descriptor.instanceId) ? descriptor.instanceId : void 0,
-            ...descriptor.name ? { name: descriptor.name } : {}
-          };
-        }
-      } catch {
-      }
-    } finally {
+      tempBackend = await createBackend({ type, options });
+    } catch (err2) {
+      return { state: "unreachable", groupType: null, remote: null, error: errorText(err2) };
     }
     try {
-      if (remote?.kind === "data") {
-        log6("detectGroupType: .meta/group.json declares kind=data \u2192 data-sync");
-        return { groupType: "data-sync", remote };
+      let descriptor;
+      try {
+        descriptor = await readGroupDescriptorStrict(tempBackend);
+      } catch (err2) {
+        return { state: "unreachable", groupType: null, remote: null, error: errorText(err2) };
       }
-      if (remote?.kind === "config") {
-        log6("detectGroupType: .meta/group.json declares kind=config \u2192 config-sync");
-        return { groupType: "config-sync", remote };
+      let remote = null;
+      if (descriptor) {
+        remote = {
+          kind: descriptor.kind,
+          id: descriptor.id,
+          instanceId: isInstanceIdLike(descriptor.instanceId) ? descriptor.instanceId : void 0,
+          ...descriptor.name ? { name: descriptor.name } : {}
+        };
+        if (descriptor.kind === "config") {
+          log6(`probe: .meta/group.json kind=config \u2192 occupied(config-sync)`);
+          return { state: "occupied", groupType: "config-sync", remote, descriptor };
+        }
+        if (descriptor.kind === "data") {
+          log6(`probe: .meta/group.json kind=data \u2192 occupied(data-sync)`);
+          return { state: "occupied", groupType: "data-sync", remote, descriptor };
+        }
+        return {
+          state: "occupied",
+          groupType: null,
+          remote,
+          descriptor,
+          error: `\u65E0\u6CD5\u8BC6\u522B\u7684\u7EC4\u63CF\u8FF0\u7B26 kind="${String(descriptor.kind)}"`
+        };
       }
       for (const path of [GROUP_TYPE_FILE2, LEGACY_GROUP_TYPE_FILE2]) {
+        let raw;
         try {
-          const raw = await tempBackend.readFile(path, "utf-8");
-          const groupType = raw.trim();
-          if (groupType === "config-sync" || groupType === "data-sync") {
-            log6(`detectGroupType: detected "${groupType}" at ${path} (no descriptor)`);
-            return { groupType, remote };
-          }
-          log6(`detectGroupType: unknown group-type value "${groupType}" at ${path}, treating as null`);
-          return { groupType: null, remote };
-        } catch {
+          raw = await tempBackend.readFile(path, "utf-8");
+        } catch (err2) {
+          if (isNotFoundError(err2)) continue;
+          return { state: "unreachable", groupType: null, remote: null, error: errorText(err2) };
         }
+        const value = bytesToText(raw).trim();
+        if (value === "config-sync" || value === "data-sync") {
+          log6(`probe: found "${value}" at ${path} (no descriptor) \u2192 marked`);
+          return { state: "marked", groupType: value, remote: null, descriptor: null };
+        }
+        return {
+          state: "occupied",
+          groupType: null,
+          remote: null,
+          descriptor: null,
+          error: `group-type \u6807\u8BB0\u503C\u975E\u6CD5\uFF1A"${value}"\uFF08${path}\uFF09`
+        };
       }
-      log6(`detectGroupType: no group-type file and no descriptor kind (new backend)`);
-      return { groupType: null, remote };
+      log6("probe: no descriptor and no group-type marker \u2192 empty");
+      return { state: "empty", groupType: null, remote: null, descriptor: null };
     } finally {
       if (tempBackend?.dispose) {
-        await tempBackend.dispose();
+        try {
+          await tempBackend.dispose();
+        } catch {
+        }
       }
     }
   }
@@ -31736,26 +32031,40 @@ var ZenFSConfigUI = (() => {
       };
     }
     const { type, options: backendOptions } = options.backendInfo;
-    const detected = await detectGroupTypeDetailed(type, backendOptions);
-    const detectedType = detected.groupType;
+    const probe2 = await probeGroupTypeDetailed(type, backendOptions);
     let groupType;
-    if (detectedType) {
-      if (options.groupType && options.groupType !== detectedType) {
-        const remoteText = summarizeIdentity(detected.remote);
-        const advice = detectedType === "config-sync" ? "\u8BE5\u8FDC\u7AEF\u6839\u5DF2\u88AB\u4E00\u4E2A\u914D\u7F6E\u7EC4\u5360\u7528\uFF1A\u8BF7\u7ED9\u6570\u636E\u7EC4\u6362\u4E00\u4E2A\u4E13\u5C5E\u7684\u8FDC\u7AEF\u6839\uFF0C\u6216\u5728\u914D\u7F6E\u7EC4\u4FA7\u89E3\u9664\u5BF9\u8BE5\u6839\u7684\u7ED1\u5B9A" : "\u8BE5\u8FDC\u7AEF\u6839\u5DF2\u88AB\u4E00\u4E2A\u6570\u636E\u7EC4\u5360\u7528\uFF1A\u8BF7\u7ED9\u914D\u7F6E\u7EC4\u6362\u4E00\u4E2A\u8FDC\u7AEF\u6839\uFF0C\u6216\u5220\u9664\u90A3\u4E2A\u6570\u636E\u7EC4\u540E\u7AEF";
+    if (probe2.state === "unreachable") {
+      throw new RemoteUnreachableError(type, probe2.error);
+    }
+    if (probe2.state === "empty") {
+      const chosen = options.initGroupType ?? options.groupType;
+      if (!chosen) throw new NeedsInitError(type, rootHintOf(backendOptions));
+      groupType = chosen;
+      log6(`connect: empty remote, initialized as "${groupType}" (explicit consent)`);
+    } else if (probe2.groupType) {
+      if (options.groupType && options.groupType !== probe2.groupType) {
+        const remoteText = summarizeIdentity(probe2.remote);
+        const advice = probe2.groupType === "config-sync" ? "\u8BE5\u8FDC\u7AEF\u6839\u5DF2\u88AB\u4E00\u4E2A\u914D\u7F6E\u7EC4\u5360\u7528\uFF1A\u8BF7\u7ED9\u6570\u636E\u7EC4\u6362\u4E00\u4E2A\u4E13\u5C5E\u7684\u8FDC\u7AEF\u6839\uFF0C\u6216\u5728\u914D\u7F6E\u7EC4\u4FA7\u89E3\u9664\u5BF9\u8BE5\u6839\u7684\u7ED1\u5B9A" : "\u8BE5\u8FDC\u7AEF\u6839\u5DF2\u88AB\u4E00\u4E2A\u6570\u636E\u7EC4\u5360\u7528\uFF1A\u8BF7\u7ED9\u914D\u7F6E\u7EC4\u6362\u4E00\u4E2A\u8FDC\u7AEF\u6839\uFF0C\u6216\u5220\u9664\u90A3\u4E2A\u6570\u636E\u7EC4\u540E\u7AEF";
         throw new Error(
-          `Group type mismatch: \u8FDC\u7AEF\u6807\u8BB0\u4E3A "${detectedType}"\uFF08${remoteText}\uFF09\uFF0C\u672C\u7AEF\u8981\u6C42 "${options.groupType}"\u3002${advice}`
+          `Group type mismatch: \u8FDC\u7AEF\u6807\u8BB0\u4E3A "${probe2.groupType}"\uFF08${remoteText}\uFF09\uFF0C\u672C\u7AEF\u8981\u6C42 "${options.groupType}"\u3002${advice}`
         );
       }
-      groupType = detectedType;
+      groupType = probe2.groupType;
     } else {
-      groupType = options.groupType ?? "config-sync";
-      log6(`connect: new backend, using groupType="${groupType}"`);
+      throw new Error(
+        `\u8FDC\u7AEF\u6839\u5DF2\u6709\u65E0\u6CD5\u8BC6\u522B\u7684\u7EC4\u63CF\u8FF0\u7B26${probe2.error ? `\uFF1A${probe2.error}` : ""}\uFF1B\u62D2\u7EDD\u81EA\u52A8\u5EFA\u7EC4\u3002`
+      );
     }
     const repo = await createConfigRepo(
       appId,
       groupType === "config-sync" ? {
         backendInfo: options.backendInfo,
+        prefetchedRemote: {
+          type,
+          options: backendOptions,
+          descriptor: probe2.descriptor ?? null
+        },
+        deferReplicaSetup: options.deferReplicaSetup,
         idbStoreName: options.idbStoreName,
         nodeId: options.nodeId,
         primaryBackendId: options.primaryBackendId,
@@ -31799,13 +32108,17 @@ var ZenFSConfigUI = (() => {
         await dataGroup.addBackend(backendId, type, backendOptions);
       }
     }
+    const replicasPending = !!options.deferReplicaSetup && groupType === "config-sync" && !!options.backendInfo;
+    const whenReplicasReady = typeof repo.whenReplicasReady === "function" ? repo.whenReplicasReady() : void 0;
     return {
       groupType,
       repo,
       configGroup: repo,
       groups: [repo, ...appDataGroups],
       dataGroup,
-      appDataGroups
+      appDataGroups,
+      replicasPending,
+      whenReplicasReady
     };
   }
 
@@ -31866,14 +32179,12 @@ var ZenFSConfigUI = (() => {
   }
 
   // src/core/api.ts
-  async function connectGroup(appId, backendInfo, nodeId) {
+  async function connectGroup(appId, backendInfo, nodeId, opts) {
+    const options = { backendInfo, nodeId };
+    if (opts?.initGroupType) options.groupType = opts.initGroupType;
+    if (opts?.deferReplicaSetup) options.deferReplicaSetup = true;
     try {
-      return await connect(appId, {
-        backendInfo,
-        nodeId,
-        // New backends default to data-sync (per requirements).
-        groupType: "data-sync"
-      });
+      return await connect(appId, options);
     } catch (err2) {
       const message = err2?.message ?? "";
       if (backendInfo && message.includes("Group type mismatch") && message.includes("config-sync")) {
@@ -31983,17 +32294,17 @@ var ZenFSConfigUI = (() => {
     if (isLocalStorageUnavailableError(err2)) {
       return {
         kind: "local-storage-unavailable",
-        message: LOCAL_STORAGE_UNAVAILABLE_MESSAGE + "\n\u539F\u59CB\u9519\u8BEF\uFF1A" + errorText(err2),
+        message: LOCAL_STORAGE_UNAVAILABLE_MESSAGE + "\n\u539F\u59CB\u9519\u8BEF\uFF1A" + errorText2(err2),
         storeName: dataGroupLocalStoreName(appId, groupId)
       };
     }
-    return { kind: "other", message: errorText(err2) };
+    return { kind: "other", message: errorText2(err2) };
   }
-  function errorText(err2) {
+  function errorText2(err2) {
     if (err2 && typeof err2 === "object") {
       const e = err2;
       const head = [e.name, e.code, e.message].filter(Boolean).join(": ") || String(err2);
-      return e.cause ? head + " \u2190 " + errorText(e.cause) : head;
+      return e.cause ? head + " \u2190 " + errorText2(e.cause) : head;
     }
     return String(err2);
   }
@@ -32009,7 +32320,7 @@ var ZenFSConfigUI = (() => {
       await syncNow.call(dg);
       result.ok = true;
     } catch (err2) {
-      result.error = errorText(err2);
+      result.error = errorText2(err2);
     }
     return result;
   }
@@ -32643,6 +32954,59 @@ var ZenFSConfigUI = (() => {
     return mode === "inline" ? root : null;
   }
 
+  // src/core/views/init-confirm.ts
+  var stylesInjected = false;
+  function injectStyles() {
+    if (stylesInjected) return;
+    const style = document.createElement("style");
+    style.setAttribute("data-zfui", "");
+    style.textContent = STYLES;
+    document.head.appendChild(style);
+    stylesInjected = true;
+  }
+  function openInitConfirm(opts) {
+    injectStyles();
+    return new Promise((resolve4) => {
+      const overlay = el("div", { className: "zfui-modal-overlay" });
+      const root = el("div", { className: "zfui-modal" });
+      overlay.appendChild(root);
+      const finished2 = (value) => {
+        try {
+          document.body.removeChild(overlay);
+        } catch {
+        }
+        document.removeEventListener("keydown", onKey);
+        resolve4(value);
+      };
+      const onKey = (e) => {
+        if (e.key === "Escape") finished2(null);
+      };
+      document.addEventListener("keydown", onKey);
+      on(overlay, "click", (e) => {
+        if (e.target === overlay) finished2(null);
+      });
+      root.appendChild(el("div", { className: "zfui-modal-title" }, "\u8FD9\u4E2A\u8FDC\u7AEF\u6839\u8FD8\u6CA1\u6709\u521D\u59CB\u5316"));
+      root.appendChild(el(
+        "div",
+        { className: "zfui-form-notice" },
+        `\u8FDC\u7AEF\uFF08${opts.backendType}${opts.rootHint ? ` ${opts.rootHint}` : ""}\uFF09\u65E2\u6CA1\u6709\u7EC4\u63CF\u8FF0\u7B26\uFF0C\u4E5F\u6CA1\u6709 group-type \u6807\u8BB0\u3002\u521D\u59CB\u5316\u4F1A\u628A\u6839\u4E0B\u5DF2\u6709\u7684\u6587\u4EF6\u5E76\u5165\u7EC4\u5E76\u540C\u6B65\u5230\u6240\u6709\u526F\u672C\uFF0C\u8FD8\u4F1A\u5199\u5165\u4E00\u4E2A\u4E0D\u53EF\u9006\u7684\u7EC4\u8EAB\u4EFD\uFF1B\u6240\u4EE5\u5FC5\u987B\u7531\u4F60\u786E\u8BA4\u7C7B\u578B\u3002`
+      ));
+      const row = el("div", { className: "zfui-form-row", style: "justify-content:flex-end;gap:8px;margin-top:16px" });
+      const cancel = el("button", { className: "zfui-btn zfui-btn-sm" }, "\u53D6\u6D88\uFF08\u4E0D\u5EFA\u7EC4\uFF09");
+      on(cancel, "click", () => finished2(null));
+      const data = el("button", { className: "zfui-btn zfui-btn-sm" }, "\u521D\u59CB\u5316\u4E3A\u6570\u636E\u7EC4");
+      on(data, "click", () => finished2("data-sync"));
+      const config = el("button", { className: "zfui-btn zfui-btn-primary zfui-btn-sm" }, "\u521D\u59CB\u5316\u4E3A\u914D\u7F6E\u7EC4");
+      on(config, "click", () => finished2("config-sync"));
+      row.appendChild(cancel);
+      row.appendChild(data);
+      row.appendChild(config);
+      root.appendChild(row);
+      document.body.appendChild(overlay);
+      config.focus();
+    });
+  }
+
   // src/core/configurator.ts
   var LOCAL_BACKEND_TYPES = /* @__PURE__ */ new Set(["IndexedDB", "InMemory"]);
   var STORAGE_KEY = "zenfs-config-ui:backend";
@@ -32708,6 +33072,19 @@ var ZenFSConfigUI = (() => {
   function formatBackendFailureSummary(failed) {
     return failed.length === 0 ? "" : ` \xB7 ${failed.length} \u4E2A\u540E\u7AEF\u672A\u5EFA\u7ACB\u540C\u6B65\u5BF9`;
   }
+  function formatReplicaSetupNote(summary, error2) {
+    if (error2) return `\u540E\u53F0\u5EFA\u5BF9\u5931\u8D25 \xB7 ${error2.slice(0, 160)}`;
+    if (!summary) return void 0;
+    const parts = [`\u540E\u53F0\u5EFA\u5BF9 \u5C31\u7EEA ${summary.ready.length}`];
+    if (summary.skipped.length > 0) {
+      const reasons = summary.skipped.map((s) => `${s.backendId}: ${String(s.reason).slice(0, 100)}`).join("\uFF1B");
+      parts.push(`\u8DF3\u8FC7 ${summary.skipped.length}\uFF08${reasons}\uFF09`);
+    }
+    if (summary.failed.length > 0) {
+      parts.push(`\u5931\u8D25 ${summary.failed.length}\uFF08${summary.failed.map((f) => f.backendId).join("\u3001")}\uFF09`);
+    }
+    return parts.join(" \xB7 ");
+  }
   function shortInstanceId(instanceId) {
     if (!instanceId) return "\uFF08\u65E0\uFF09";
     return instanceId.length > 8 ? `${instanceId.slice(0, 8)}\u2026` : instanceId;
@@ -32724,6 +33101,14 @@ var ZenFSConfigUI = (() => {
   function formatBackendFailureDetail(failed) {
     return failed.map((f) => `\u672A\u5EFA\u7ACB\u540C\u6B65\u5BF9\uFF1A${f.id} \xB7 ${String(f.message).slice(0, 120)}`).join("\n");
   }
+  function subscribeGroupSyncEvents(group, onEvent) {
+    if (!group || typeof group !== "object") return null;
+    const withEvents = group;
+    if (typeof withEvents.onSyncEvent !== "function") return null;
+    const unsubscribe = withEvents.onSyncEvent(onEvent);
+    return typeof unsubscribe === "function" ? unsubscribe : () => {
+    };
+  }
   var SyncGroupConfiguratorCore = class {
     constructor(container, props) {
       this.destroyed = false;
@@ -32733,6 +33118,10 @@ var ZenFSConfigUI = (() => {
       this.error = null;
       this.repo = null;
       this.dataGroup = null;
+      /** 同步对事件（repo + 每个数据组）的取消订阅函数。 */
+      this.syncEventUnsubscribers = [];
+      /** 已挂过事件的组实例，避免同一实例重复订阅。 */
+      this.syncEventGroups = /* @__PURE__ */ new WeakSet();
       this.configBackends = [];
       this.dataGroups = [];
       this.dataBackends = [];
@@ -32752,6 +33141,11 @@ var ZenFSConfigUI = (() => {
       this.groupUnavailable = /* @__PURE__ */ new Map();
       this.statusRefs = [];
       this.statusTimer = null;
+      /** connect() 已返回、副本仍在后台校验/建对。 */
+      this.replicasPending = false;
+      this.replicaReadyPromise = null;
+      this.replicaSummary = null;
+      this.replicaError = null;
       /** Legacy `app-data` group created by older dir-struct-gen versions. */
       this.legacyAppData = null;
       this.metadata = [];
@@ -32769,7 +33163,7 @@ var ZenFSConfigUI = (() => {
     }
     // ── Version logging ──────────────────────────────────────────────────
     logVersion() {
-      const uiVersion = true ? "0.3.36" : "dev";
+      const uiVersion = true ? "0.4.1" : "dev";
       console.log(
         `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
         "color:#2563eb;font-weight:bold",
@@ -32944,6 +33338,7 @@ var ZenFSConfigUI = (() => {
     destroy() {
       this.destroyed = true;
       this.stopStatusTimer();
+      this.clearSyncEventSubscriptions();
       clear(this.container);
       if (this.styleEl) this.styleEl.remove();
       this.listeners.clear();
@@ -32962,6 +33357,32 @@ var ZenFSConfigUI = (() => {
       };
     }
     // ── Events ───────────────────────────────────────────────────────────
+    /**
+     * 订阅一个组实例的同步对事件（`zen-fs-config` 的 `onSyncEvent`）。
+     * 老版本库没有该方法时静默跳过，行为与之前一致。
+     */
+    subscribeSyncEvents(group) {
+      if (!group || typeof group !== "object") return;
+      if (this.syncEventGroups.has(group)) return;
+      const unsubscribe = subscribeGroupSyncEvents(group, (event) => {
+        if (this.destroyed) return;
+        this.emit("sync", event);
+        this.updateStatusRows();
+      });
+      if (!unsubscribe) return;
+      this.syncEventGroups.add(group);
+      this.syncEventUnsubscribers.push(unsubscribe);
+    }
+    clearSyncEventSubscriptions() {
+      for (const unsubscribe of this.syncEventUnsubscribers) {
+        try {
+          unsubscribe();
+        } catch {
+        }
+      }
+      this.syncEventUnsubscribers = [];
+      this.syncEventGroups = /* @__PURE__ */ new WeakSet();
+    }
     on(name, listener) {
       if (!this.listeners.has(name)) this.listeners.set(name, /* @__PURE__ */ new Set());
       this.listeners.get(name).add(listener);
@@ -32980,19 +33401,47 @@ var ZenFSConfigUI = (() => {
         this.connecting = true;
       }
       this.error = null;
+      this.replicasPending = false;
+      this.replicaSummary = null;
+      this.replicaReadyPromise = null;
+      this.replicaError = null;
+      this.clearSyncEventSubscriptions();
       this.render();
       try {
-        const result = await connectGroup(this.props.appId, backendInfo, this.props.nodeId);
+        let result;
+        try {
+          result = await connectGroup(this.props.appId, backendInfo, this.props.nodeId, {
+            deferReplicaSetup: true
+          });
+        } catch (err2) {
+          const needsInit = err2?.code === "NEEDS_INIT";
+          if (!needsInit || !backendInfo || isBackground) throw err2;
+          const choice = await openInitConfirm({ backendType: backendInfo.type });
+          if (!choice) throw err2;
+          result = await connectGroup(this.props.appId, backendInfo, this.props.nodeId, {
+            initGroupType: choice,
+            deferReplicaSetup: true
+          });
+        }
+        const widened = result;
+        this.replicasPending = widened.replicasPending === true;
+        this.replicaSummary = null;
+        this.replicaReadyPromise = this.replicasPending ? widened.whenReplicasReady ?? null : null;
         this.groupInstances = /* @__PURE__ */ new Map();
         this.groupUnavailable = /* @__PURE__ */ new Map();
         for (const g of result.appDataGroups ?? []) {
-          if (g) this.groupInstances.set(g.groupId, g);
+          if (g) {
+            this.groupInstances.set(g.groupId, g);
+            this.subscribeSyncEvents(g);
+          }
         }
         if (result.dataGroup) {
           this.groupInstances.set(result.dataGroup.groupId, result.dataGroup);
+          this.subscribeSyncEvents(result.dataGroup);
         }
         if (result.repo) {
           this.repo = result.repo;
+          this.subscribeSyncEvents(result.repo);
           this.mode = "config-sync";
           await this.loadConfigBackends();
           await this.loadDataGroups();
@@ -33012,6 +33461,7 @@ var ZenFSConfigUI = (() => {
           dataGroup: this.dataGroup ?? void 0,
           backendInfo: backendInfo ?? this.props.backendInfo ?? void 0
         });
+        if (this.replicasPending) void this.awaitReplicasReady();
       } catch (err2) {
         this.error = err2 instanceof Error ? err2.message : String(err2);
         if (backendInfo && !isBackground) this.clearBackendInfo();
@@ -33021,6 +33471,32 @@ var ZenFSConfigUI = (() => {
         this.backgroundConnecting = false;
         this.render();
       }
+    }
+    /**
+     * 信号②：等待后台「校验 → 建对」完成。connect() 早已返回，这里只是刷新
+     * 状态行；失败也不会把整个面板切到错误页 —— 本地配置照常可用。
+     */
+    async awaitReplicasReady() {
+      const pending = this.replicaReadyPromise;
+      if (!pending) {
+        this.replicasPending = false;
+        this.updateStatusRows();
+        return;
+      }
+      let summary = null;
+      let failure = null;
+      try {
+        summary = await pending;
+      } catch (err2) {
+        failure = err2 instanceof Error ? err2.message : String(err2);
+      }
+      if (this.destroyed) return;
+      this.replicaSummary = summary;
+      this.replicaError = failure;
+      this.replicasPending = false;
+      this.replicaReadyPromise = null;
+      this.updateStatusRows();
+      if (!this.formContainer) this.render();
     }
     async loadConfigBackends() {
       if (!this.repo) return;
@@ -33050,6 +33526,14 @@ var ZenFSConfigUI = (() => {
       this.groupUnavailable = /* @__PURE__ */ new Map();
       for (const d of this.dataGroups) {
         if (!this.groupInstances.has(d.id)) {
+          try {
+            const healed = await this.repo.getAppDataGroup(d.id);
+            if (healed) {
+              this.groupInstances.set(healed.groupId, healed);
+              continue;
+            }
+          } catch {
+          }
           this.groupUnavailable.set(
             d.id,
             "\u8BE5\u7EC4\u672A\u5728\u5F53\u524D\u4F1A\u8BDD\u5B9E\u4F8B\u5316\uFF08\u8FDE\u63A5\u65F6\u52A0\u8F7D\u5931\u8D25\u6216\u4EC5\u5B58\u5728\u4E8E\u63CF\u8FF0\u7B26\u4E2D\uFF09\uFF0C\u6682\u65E0\u5B9E\u65F6\u72B6\u6001"
@@ -33139,6 +33623,7 @@ var ZenFSConfigUI = (() => {
               description: result.description
             }]);
             this.groupInstances.set(created.groupId, created);
+            this.subscribeSyncEvents(created);
             await this.loadDataGroups();
             this.emit("data-group-created", { groupId: result.id, dataGroup: created });
           } else if (isGroupBackend && this.repo && this.formTargetDataGroup) {
@@ -33529,7 +34014,12 @@ var ZenFSConfigUI = (() => {
           if (!this.repo) return null;
           return {
             statuses: this.repo.getSyncStatuses(),
-            failed: collectFailedBackends(this.readConfigBackendStates())
+            failed: collectFailedBackends(this.readConfigBackendStates()),
+            pending: this.replicasPending,
+            replicaNote: this.replicasPending ? void 0 : formatReplicaSetupNote(
+              this.replicaSummary,
+              this.replicaError
+            )
           };
         },
         readStates: () => this.readConfigBackendStates(),
@@ -34119,6 +34609,12 @@ ${result.failed.join("\n")}
           ref.detailEl.textContent = "";
           continue;
         }
+        if (snapshot.pending) {
+          ref.textEl.textContent = "\u8FDC\u7AEF\u6821\u9A8C\u4E2D \xB7 connect \u5DF2\u8FD4\u56DE\uFF0C\u526F\u672C\u5C1A\u672A\u5EFA\u5BF9";
+          ref.textEl.parentElement?.classList.remove("err");
+          ref.detailEl.textContent = "\u672C\u5730\u914D\u7F6E\u53EF\u6B63\u5E38\u8BFB\u5199\uFF1B\u540E\u53F0\u5B8C\u6210\u8FDC\u7AEF\u8EAB\u4EFD\u6821\u9A8C\u540E\u518D\u5EFA\u540C\u6B65\u5BF9\u3002";
+          continue;
+        }
         const { text, error: error2 } = formatSyncStatuses(snapshot.statuses);
         const failed = snapshot.failed;
         if (failed.length > 0) {
@@ -34128,6 +34624,7 @@ ${result.failed.join("\n")}
         }
         ref.textEl.textContent = text + formatBackendFailureSummary(failed);
         const detailParts = [];
+        if (snapshot.replicaNote) detailParts.push(snapshot.replicaNote);
         if (failed.length > 0) detailParts.push(formatBackendFailureDetail(failed));
         if (error2) detailParts.push(`\u6700\u540E\u9519\u8BEF ${fmtClock(error2.timestamp)} \xB7 ${String(error2.message).slice(0, 120)}`);
         ref.detailEl.textContent = detailParts.join("\n");
@@ -34303,7 +34800,7 @@ ${result.failed.join("\n")}
         nodeId,
         backendInfo
       });
-      const eventNames = ["connected", "backend-added", "backend-removed", "data-group-created", "error"];
+      const eventNames = ["connected", "backend-added", "backend-removed", "data-group-created", "sync", "error"];
       for (const name of eventNames) {
         this.core.on(name, (data) => {
           if (name === "connected") this.lastConnected = data;
