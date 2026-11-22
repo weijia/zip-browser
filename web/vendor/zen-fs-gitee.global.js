@@ -18618,6 +18618,7 @@ var ZenFSGitee = (() => {
     if (!dataPath) return false;
     const dataBase = baseNameOf(dataPath);
     if (dataBase.endsWith(".mtime.mtime") || dataBase.endsWith(".version.version")) return true;
+    if (!base.endsWith(".mtime")) return false;
     return !allDataPaths.has(dataPath);
   }
 
