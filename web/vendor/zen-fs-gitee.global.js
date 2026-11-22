@@ -18595,6 +18595,31 @@ var ZenFSGitee = (() => {
     const base = slash >= 0 ? nameOrPath.slice(slash + 1) : nameOrPath;
     return base === ".keep.mtime";
   }
+  function baseNameOf(pathOrName) {
+    const slash = pathOrName.lastIndexOf("/");
+    return slash >= 0 ? pathOrName.slice(slash + 1) : pathOrName;
+  }
+  function sidecarDataPathAny(sidecarPath) {
+    const slash = sidecarPath.lastIndexOf("/");
+    const dir = slash >= 0 ? sidecarPath.slice(0, slash + 1) : "";
+    const fileName = slash >= 0 ? sidecarPath.slice(slash + 1) : sidecarPath;
+    for (const suffix of DOT_META_SUFFIXES) {
+      if (!fileName.endsWith(suffix)) continue;
+      const dataFilename = fileName.slice(0, -suffix.length);
+      if (dataFilename === "") return null;
+      return `${dir}${dataFilename}`;
+    }
+    return null;
+  }
+  function shouldDeleteSidecar(sidecarPath, allDataPaths) {
+    const base = baseNameOf(sidecarPath);
+    if (base.startsWith("..")) return true;
+    const dataPath = sidecarDataPathAny(sidecarPath);
+    if (!dataPath) return false;
+    const dataBase = baseNameOf(dataPath);
+    if (dataBase.endsWith(".mtime.mtime") || dataBase.endsWith(".version.version")) return true;
+    return !allDataPaths.has(dataPath);
+  }
 
   // node_modules/@richard432/localstorage-logger/dist/index.mjs
   var PREFIX = "debug:";
@@ -19042,11 +19067,12 @@ var ZenFSGitee = (() => {
             return;
           }
         }
-        const stillExists = await this.request(
+        const probe = await this.request(
           `/repos/${this.owner}/${this.repo}/contents/${apiPath(path)}?ref=${this.currentBranch}`,
           void 0,
           { quiet404: true }
-        ).then(() => true).catch(() => false);
+        ).catch(() => null);
+        const stillExists = !!probe && !Array.isArray(probe);
         if (!stillExists) return;
         throw err2;
       }
@@ -19972,38 +19998,22 @@ var ZenFSGitee = (() => {
           snapshot.set(e.relPath, { path: e.relPath, size: e.size, mtimeMs: e.mtimeMs });
         }
         const allDataPaths = /* @__PURE__ */ new Set();
-        const suffixSidecars = [];
-        const metadataSidecars = [];
         for (const item of tree) {
           if (item.type === "tree") continue;
-          if (isMetadataSidecarToDelete(item.path)) {
-            metadataSidecars.push({ path: item.path, sha: item.sha });
-          } else if (isKeepPlaceholderSidecar(item.path)) {
-            metadataSidecars.push({ path: item.path, sha: item.sha });
-          } else {
-            const dataPath = sidecarToDataPath(item.path);
-            if (dataPath) suffixSidecars.push({ path: item.path, sha: item.sha });
-            else allDataPaths.add(item.path);
-          }
+          if (sidecarToDataPath(item.path)) continue;
+          if (baseNameOf(item.path).startsWith("..")) continue;
+          allDataPaths.add(item.path);
         }
-        for (const sc of suffixSidecars) {
-          const dataPath = sidecarToDataPath(sc.path);
-          const orphaned = sc.path.endsWith(".mtime.mtime") || !allDataPaths.has(dataPath);
-          if (!orphaned) continue;
-          const full = "/" + sc.path;
-          log3.warn(`createSnapshot: pruning orphaned mtime sidecar ${full}`);
+        for (const item of tree) {
+          if (item.type === "tree") continue;
+          if (!shouldDeleteSidecar(item.path, allDataPaths)) continue;
+          const full = "/" + item.path;
+          const isDoubleDot = baseNameOf(item.path).startsWith("..");
+          const nested = /\.[^/]*\.(mtime|version)$/.test(item.path);
+          const reason = isDoubleDot ? "Delete stale dotfile" : nested ? "Prune nested sidecar" : "Prune orphaned sidecar";
+          log3.warn(`createSnapshot: ${reason.toLowerCase()} ${full}`);
           if (typeof this.api.deleteFile === "function") {
-            void this.api.deleteFile(full, sc.sha, `Prune orphaned mtime sidecar ${full}`).then(() => {
-              this.shaCache.delete(full);
-              this._deleteSha(full);
-            }).catch((e) => log3.warn(`createSnapshot: failed to prune ${full}:`, e));
-          }
-        }
-        for (const sc of metadataSidecars) {
-          const full = "/" + sc.path;
-          log3.warn(`createSnapshot: deleting stale dotfile ${full}`);
-          if (typeof this.api.deleteFile === "function") {
-            void this.api.deleteFile(full, sc.sha, `Delete stale dotfile ${full}`).then(() => {
+            void this.api.deleteFile(full, item.sha, `${reason} ${full}`).then(() => {
               this.shaCache.delete(full);
               this._deleteSha(full);
             }).catch((e) => log3.warn(`createSnapshot: failed to delete ${full}:`, e));
@@ -20188,28 +20198,39 @@ var ZenFSGitee = (() => {
       return removed;
     }
     /**
-    * Delete stale hidden metadata files in the Gitee repo, unconditionally:
-    *  - single-dot `.version`/`.mtime` sidecars (`.name.mtime` / `.name.version`)
-    *  - any `..`-prefixed file (`..name`, `..name.mtime`, ...)
-    * Detection is OR, never AND (see {@link isMetadataSidecarToDelete}).
-    * Returns the number of files removed. Safe to call at any time; each
-    * deletion is best-effort.
+    * Delete garbage metadata files in the Gitee repo. Unlike the old
+    * "delete every dot-named sidecar" behaviour, a sidecar is removed
+    * ONLY when its data file is missing:
+    *  - `..`-prefixed file                    → always (legacy temp leftover)
+    *  - `*.mtime` / `*.version` with no data  → orphaned sidecar, delete
+    *  - `*.mtime` / `*.version` with data     → KEEP (it carries the real
+    *    mtime; deleting and recreating it would rewrite mtime to "now" and
+    *    make tombstoned paths look re-created to zen-fs-config)
+    * See {@link shouldDeleteSidecar}. Returns the number of files removed.
+    * Safe to call at any time; each deletion is best-effort.
     *
-    * NOTE: `init()` and `createSnapshot()` already delete these sidecars on
-    * the fly during normal operation; this method forces an explicit,
-    * on-demand full cleanup (e.g. from a maintenance task).
+    * NOTE: `createSnapshot()` prunes orphans on the fly during normal sync;
+    * this method forces an explicit, on-demand cleanup (e.g. from a
+    * maintenance task or a remount).
     */
     async deleteMetadataSidecars(root = "/", preloadedTree) {
       const normalizedRoot = root === "/" ? "" : root.replace(/^\/+|\/+$/g, "");
       const tree = preloadedTree ?? await this.api.getTree(true);
+      const allDataPaths = /* @__PURE__ */ new Set();
+      for (const item of tree) {
+        if (item.type === "tree") continue;
+        if (sidecarToDataPath(item.path)) continue;
+        if (baseNameOf(item.path).startsWith("..")) continue;
+        allDataPaths.add(item.path);
+      }
       let removed = 0;
       for (const item of tree) {
         if (item.type === "tree") continue;
         if (normalizedRoot && item.path !== normalizedRoot && !item.path.startsWith(normalizedRoot + "/")) continue;
-        if (!isMetadataSidecarToDelete(item.path) && !isKeepPlaceholderSidecar(item.path)) continue;
+        if (!shouldDeleteSidecar(item.path, allDataPaths)) continue;
         const full = "/" + item.path;
         try {
-          await this.api.deleteFile(full, item.sha, `Delete dot-meta sidecar ${full}`);
+          await this.api.deleteFile(full, item.sha, `Prune stale sidecar ${full}`);
           this.shaCache.delete(full);
           this._deleteSha(full);
           removed++;
