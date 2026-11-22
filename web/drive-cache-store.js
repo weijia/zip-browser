@@ -36,6 +36,12 @@ function cleanEntry(raw) {
     downQuota: text(raw.downQuota),
     upRemaining: text(raw.upRemaining),
     downRemaining: text(raw.downRemaining),
+    volumeId: text(raw.volumeId),
+    drive: text(raw.drive),
+    sourceHost: text(raw.sourceHost),
+    fileCount: text(raw.fileCount),
+    totalSize: text(raw.totalSize),
+    hasChildren: text(raw.hasChildren),
     updatedAt: Number(raw.updatedAt) || 0,
     hasInfo: raw.hasInfo !== false,
   };

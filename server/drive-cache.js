@@ -9,12 +9,14 @@
 //
 // 这里只存信息（类型/大小/剩余空间/月度上下行配额与剩余流量），不缓存任何网盘文件内容，
 // 与 zen-fs-config 同步组无关。条目可登记、原地编辑（目录名/序号不变）、删除。
+// 另支持「从清单导入的卷」：backend 用清单里的 volumeId（安全化后含 '-' 与字母数字），
+// 并额外记录 drive/来源主机/文件数/体积等清单字段，落盘规则与手工登记完全一致。
 // 核心函数接受显式 root，便于测试注入临时目录。
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { isKnownBackend, OPENLIST_BACKENDS } from '../web/drive-backends.js';
+import { OPENLIST_BACKENDS } from '../web/drive-backends.js';
 
 // 由列表推导的后端查表，避免再维护一份数组顺序。
 const BACKENDS_BY_NAME = Object.fromEntries(OPENLIST_BACKENDS.map((name) => [name, true]));
@@ -24,10 +26,18 @@ export const CODES_DIRNAME = 'codes';
 export const INFO_FILE = 'info.json';
 export const DATA_DIRNAME = 'data';
 export const MAX_FIELD_LENGTH = 200;
-const SEQ_RE = (backend) => new RegExp(`^${escapeRe(backend)}-(\\d+)$`);
+const SEQ_RE = /^([A-Za-z0-9._-]+)-(\d+)$/;
+// volumeId（UUID / 盘符身份）允许字母数字、点、下划线与连字符；与 OpenList 后端名共用命名空间。
+const SAFE_BACKEND_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/;
 
 function escapeRe(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** backend 合法：OpenList 白名单内的后端名，或安全化的清单卷 volumeId。 */
+export function isValidBackend(name) {
+  const value = String(name || '');
+  return Boolean(BACKENDS_BY_NAME[value]) || SAFE_BACKEND_RE.test(value);
 }
 
 /** 判定某路径是否为已存在的目录（不跟随创建）。 */
@@ -67,7 +77,7 @@ export async function ensureCacheRoot(options = {}) {
 /** 字段清洗：容量等选填项允许缺省（null），非空一律转字符串并截断。 */
 export function sanitizeInfo(raw = {}) {
   const backend = String(raw.backend || '').trim();
-  if (!isKnownBackend(backend)) {
+  if (!isValidBackend(backend)) {
     throw Object.assign(new Error('未知的后端类型'), { status: 400 });
   }
   const text = (value) => {
@@ -83,6 +93,13 @@ export function sanitizeInfo(raw = {}) {
     downQuota: text(raw.downQuota),
     upRemaining: text(raw.upRemaining),
     downRemaining: text(raw.downRemaining),
+    // 清单导入的卷附带（手工登记不会填这些），原样透传用于展示与去重。
+    volumeId: text(raw.volumeId),
+    drive: text(raw.drive),
+    sourceHost: text(raw.sourceHost),
+    fileCount: text(raw.fileCount),
+    totalSize: text(raw.totalSize),
+    hasChildren: text(raw.hasChildren),
   };
 }
 
@@ -94,7 +111,7 @@ export async function nextSeq(cacheRoot, backend) {
   } catch {
     return 1;
   }
-  const re = SEQ_RE(backend);
+  const re = new RegExp(`^${escapeRe(backend)}-(\\d+)$`);
   let max = 0;
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
@@ -104,15 +121,13 @@ export async function nextSeq(cacheRoot, backend) {
   return max + 1;
 }
 
-/** 校验目录名是否为合法的 <已知后端>-<序号>。 */
+/** 校验目录名是否为合法的 <backend>-<序号>，backend 可为后端名或清单卷 volumeId。 */
 export function parseDirName(dir) {
   const name = String(dir || '');
   if (name.includes('/') || name.includes('\\') || name === '.' || name === '..') return null;
-  for (const backend of Object.keys(BACKENDS_BY_NAME)) {
-    const match = SEQ_RE(backend).exec(name);
-    if (match) return { backend, seq: Number(match[1]) };
-  }
-  return null;
+  const match = SEQ_RE.exec(name);
+  if (!match || !isValidBackend(match[1])) return null;
+  return { backend: match[1], seq: Number(match[2]) };
 }
 
 /** 列出缓存目录下所有 info.json 的信息。 */
@@ -146,6 +161,12 @@ export async function listEntries(cacheRoot) {
       downQuota: typeof info?.downQuota === 'string' ? info.downQuota : null,
       upRemaining: typeof info?.upRemaining === 'string' ? info.upRemaining : null,
       downRemaining: typeof info?.downRemaining === 'string' ? info.downRemaining : null,
+      volumeId: typeof info?.volumeId === 'string' ? info.volumeId : null,
+      drive: typeof info?.drive === 'string' ? info.drive : null,
+      sourceHost: typeof info?.sourceHost === 'string' ? info.sourceHost : null,
+      fileCount: typeof info?.fileCount === 'string' ? info.fileCount : null,
+      totalSize: typeof info?.totalSize === 'string' ? info.totalSize : null,
+      hasChildren: typeof info?.hasChildren === 'string' ? info.hasChildren : null,
       updatedAt: Number(info?.updatedAt) || 0,
       hasInfo: Boolean(info),
     });
@@ -210,6 +231,12 @@ export async function saveEntry(cacheRoot, raw) {
     downQuota: info.downQuota,
     upRemaining: info.upRemaining,
     downRemaining: info.downRemaining,
+    volumeId: info.volumeId,
+    drive: info.drive,
+    sourceHost: info.sourceHost,
+    fileCount: info.fileCount,
+    totalSize: info.totalSize,
+    hasChildren: info.hasChildren,
     updatedAt: Date.now(),
   };
   await writeInfoFile(target, doc);
@@ -238,6 +265,12 @@ export async function updateEntry(cacheRoot, dir, raw) {
     downQuota: info.downQuota,
     upRemaining: info.upRemaining,
     downRemaining: info.downRemaining,
+    volumeId: info.volumeId,
+    drive: info.drive,
+    sourceHost: info.sourceHost,
+    fileCount: info.fileCount,
+    totalSize: info.totalSize,
+    hasChildren: info.hasChildren,
     updatedAt: Date.now(),
   };
   await writeInfoFile(target, doc);

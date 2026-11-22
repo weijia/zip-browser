@@ -19,6 +19,7 @@
     <button id="bookmarksBtn" type="button" title="打开书签面板">书签 <span id="bookmarkCount" class="anno-count">0</span></button>
     <button id="tagsBtn" type="button" title="按标签筛选目录">标签 <span id="tagCount" class="anno-count">0</span></button>
     <button id="driveCacheBtn" type="button" title="登记网盘的类型、容量与月度流量配额">网盘信息 <span id="driveCount" class="anno-count">0</span></button>
+    <button id="importVolBtn" type="button" title="从 zen-fs-config 的目录结构清单导入磁盘并创建本地 Cache">导入清单卷</button>
     <button id="syncBtn" type="button" title="把收藏同步为目录结构清单 v2">同步收藏</button>
     <button id="builderBtn" type="button" title="勾选目录生成 v2 清单与文件列表">清单生成</button>
     <label class="encoding">文件名编码
@@ -151,6 +152,26 @@
     </div>
     <div id="dcList" class="dc-list"></div>
     <div id="dcSync" class="sync-status dc-sync" data-state="idle">同步状态：等待操作</div>
+  </div>
+</div>
+
+<div id="importVolModal" class="modal hidden">
+  <div class="modal-card mv-card">
+    <div class="modal-head">
+      <h2>从清单导入磁盘</h2>
+      <button id="mvClose" type="button" class="modal-x" title="关闭">×</button>
+    </div>
+    <p class="modal-note">读取 zen-fs-config 同步组里 dir-struct-gen 上传的 v2 清单，列出每块磁盘/卷。勾选后在本机创建 Cache：<code>codes/cached/&lt;volumeId&gt;-&lt;序号&gt;/info.json + data/</code>，与手工登记的网盘共用同一套展示与编辑。</p>
+    <div class="dc-list-head">
+      <span>清单里的卷（按 volumeId 去重）</span>
+      <button id="mvRefresh" type="button" class="dc-mini" title="重新读取同步组清单">刷新清单</button>
+    </div>
+    <div id="mvList" class="dc-list"></div>
+    <div id="mvError" class="modal-error"></div>
+    <div class="modal-actions">
+      <button id="mvCreate" type="button" class="primary">创建所选磁盘 Cache</button>
+    </div>
+    <div id="mvStatus" class="sync-status dc-sync" data-state="idle">同步状态：等待操作</div>
   </div>
 </div>
 

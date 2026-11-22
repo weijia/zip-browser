@@ -549,6 +549,16 @@ export function initManifestSync(options = {}) {
   return { ok: true };
 }
 
+/**
+ * 暴露当前已连接的同步组文件视图，供「清单卷导入」等读取侧复用同一连接。
+ * 未连接返回 null；调用方据此给出「请先在同步面板连接」的提示。
+ */
+export function getConnectedFs() {
+  const fp = appFs?.promises || appFs;
+  if (!fp || prefix === null) return null;
+  return { fp, pathFor, blockReason };
+}
+
 /** M4：把用户填写的路径写成 folder-deepen/<volumeId>.json，与远端已有标记取并集。 */
 export async function writeDeepenMarks(marks) {
   const { fp, hostInfo } = await commonContext();

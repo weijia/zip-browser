@@ -10,6 +10,7 @@ import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
 import { initManifestSync, scheduleSync } from './manifest-sync.js';
 import { initDriveCache } from './drive-cache.js';
+import { initManifestVolumeImport } from './manifest-volume-import.js';
 import { createSelectionStore, isDirSelected, isFileSelected, addDirSelection, removeDirSelection, removeFileDirSelection, removePickedFile, selectionPathKey } from './manifest-selection.js';
 import {
   initManifestBuilder, addPickedFromItem, addFileListDir, openCopyRefForItem,
@@ -1595,6 +1596,7 @@ initManifestSync({
 });
 
 const driveCache = initDriveCache({ api, status });
+initManifestVolumeImport({ api, status });
 
 // 网盘登记增删后，磁盘列表里的「网络存储」卡片要立即跟着变。
 window.addEventListener('zb:drive-cache-change', () => {

@@ -777,6 +777,16 @@ button.sel-pill:hover { filter: brightness(.92); }
 .dc-chip-empty { color: var(--text-3); }
 .dc-warn { font-size: 11px; color: #a32d2d; }
 .dc-sync { margin: 14px 0 0; }
+.mv-card { width: min(680px, 94vw); max-height: 88vh; overflow-y: auto; }
+.mv-card code { font: 11px/1.5 ui-monospace, Consolas, monospace; background: var(--bg-soft); padding: 1px 4px; border-radius: 4px; }
+.mv-item { display: flex; align-items: flex-start; gap: 9px; border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; background: #fff; cursor: pointer; }
+.mv-item-done { background: var(--bg-soft); cursor: default; }
+.mv-check { margin-top: 2px; }
+.mv-item-body { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.mv-item-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--text); word-break: break-all; }
+.mv-drive { color: var(--accent); }
+.mv-existing { font-size: 11px; color: #0f6e56; background: #eef8f4; border-radius: 4px; padding: 1px 6px; }
+.mv-item-meta { font-size: 11px; color: var(--text-2); }
 @media (max-width: 640px) {
   .dc-grid { grid-template-columns: 1fr; }
 }

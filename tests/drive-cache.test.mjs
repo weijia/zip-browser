@@ -38,6 +38,36 @@ test('sanitizeInfo：校验后端白名单，选填项缺省为 null，超长截
   assert.equal(info.downRemaining, null);
   assert.equal(info.downQuota.length, dc.MAX_FIELD_LENGTH);
   assert.throws(() => dc.sanitizeInfo({ backend: 'evil/../x' }));
+  assert.throws(() => dc.sanitizeInfo({ backend: 'bad@name' }));
+});
+
+test('清单卷：volumeId 作 backend 落盘，清单字段可回读且序号独立', async () => {
+  const root = await tempRoot();
+  try {
+    const a = await dc.saveEntry(root, {
+      backend: 'A401-6B8F', volumeId: 'A401-6B8F', drive: 'C:',
+      sourceHost: 'LAPTOP-1', fileCount: '12345', totalSize: '987654321',
+      label: '系统盘', total: '500GB',
+    });
+    const b = await dc.saveEntry(root, {
+      backend: 'A401-6B8F', volumeId: 'A401-6B8F', drive: 'D:', sourceHost: 'PC-2',
+    });
+    assert.equal(a.dir, 'A401-6B8F-1');
+    assert.equal(b.dir, 'A401-6B8F-2');
+    const doc = JSON.parse(await fs.readFile(path.join(root, a.dir, 'info.json'), 'utf8'));
+    assert.equal(doc.volumeId, 'A401-6B8F');
+    assert.equal(doc.drive, 'C:');
+    assert.equal(doc.sourceHost, 'LAPTOP-1');
+    assert.equal(doc.fileCount, '12345');
+    assert.equal(doc.totalSize, '987654321');
+    const listed = await dc.listEntries(root);
+    assert.equal(listed.length, 2);
+    assert.equal(listed[0].sourceHost, 'LAPTOP-1');
+    assert.equal(listed[0].drive, 'C:');
+    assert.equal((await fs.stat(path.join(root, a.dir, 'data'))).isDirectory(), true);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test('saveEntry：序号每后端独立从 1 递增，info.json 落盘', async () => {
@@ -88,7 +118,12 @@ test('parseDirName / deleteEntry：拒绝路径穿越与非法目录名', async 
     assert.equal(dc.parseDirName('WebDav-1').backend, 'WebDav');
     assert.equal(dc.parseDirName('../WebDav-1'), null);
     assert.equal(dc.parseDirName('WebDav-1/../x'), null);
-    assert.equal(dc.parseDirName('Unknown-1'), null);
+    assert.equal(dc.parseDirName('WebDav-1\\evil'), null);
+    assert.equal(dc.parseDirName('no-seq'), null);
+    assert.equal(dc.parseDirName('bad@name-1'), null);
+    // 清单卷的 volumeId（含连字符、字母数字）现在也是合法 backend。
+    assert.equal(dc.parseDirName('A401-6B8F-1').backend, 'A401-6B8F');
+    assert.equal(dc.isValidBackend('550e8400-e29b-41d4-a716-446655440000'), true);
     await assert.rejects(() => dc.deleteEntry(root, '../WebDav-1'));
     const removed = await dc.deleteEntry(root, 'WebDav-1');
     assert.equal(removed.removed, true);

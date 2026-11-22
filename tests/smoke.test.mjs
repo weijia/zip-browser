@@ -1034,7 +1034,7 @@ test('hostinfo api and v2 sync assets are served', async () => {
 
   for (const file of [
     '/manifest-export.js', '/manifest-sync.js',
-    '/drive-backends.js', '/drive-cache-store.js', '/drive-cache.js',
+    '/drive-backends.js', '/drive-cache-store.js', '/drive-cache.js', '/manifest-volume-import.js',
     '/vendor/zen-fs-config-ui.js',
     '/vendor/zen-fs-remotestoragejs.global.js',
     '/vendor/zen-fs-gitee.global.js',
@@ -1059,6 +1059,14 @@ test('hostinfo api and v2 sync assets are served', async () => {
   for (const id of ['driveCacheBtn', 'driveCacheModal', 'dcForm', 'dcBackend', 'dcList', 'dcUpLeft', 'dcDownLeft', 'dcEditHint', 'dcCancelEdit']) {
     assert.match(html, new RegExp(`id="${id}"`), `${id} missing from the page`);
   }
+  for (const id of ['importVolBtn', 'importVolModal', 'mvList', 'mvCreate', 'mvStatus']) {
+    assert.match(html, new RegExp(`id="${id}"`), `${id} missing from the page`);
+  }
+  const mvSource = await (await fetch(`${BASE}/manifest-volume-import.js`)).text();
+  assert.match(mvSource, /collectVolumes/, 'volume import must ship the manifest parser');
+  assert.match(appSource, /initManifestVolumeImport/, 'app must initialize the volume import module');
+  const syncSource = await (await fetch(`${BASE}/manifest-sync.js`)).text();
+  assert.match(syncSource, /export function getConnectedFs/, 'sync must expose the connected fs for the import reader');
   const pageRes = await fetch(BASE);
   assert.match(pageRes.headers.get('content-security-policy') || '', /connect-src 'self' https: http:/,
     'remote sync backends must not be blocked by connect-src');
