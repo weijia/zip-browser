@@ -246,13 +246,13 @@ test('importEntries：按 dir 原样落地，不重算序号，已存在跳过�
   }
 });
 
-test('importEntries：拒绝非法目录名/后端不一致/未知后端', async () => {
+test('importEntries：拒绝非法目录名/后端不一致', async () => {
   const root = await tempRoot();
   try {
     const r = await dc.importEntries(root, [
       { dir: '../Local-1', seq: 1, backend: 'Local' },       // 路径穿越
       { dir: 'Local-2', seq: 2, backend: 'SMB' },             // 后端与目录名不符
-      { dir: 'TotallyUnknown-1', seq: 1, backend: 'TotallyUnknown' }, // 未知后端
+      { dir: 'bad name!-1', seq: 1, backend: 'bad name!' },   // 目录名/后端含非法字符
     ]);
     assert.equal(r.imported, 0);
     assert.equal(r.invalid, 3);
