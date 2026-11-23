@@ -882,6 +882,8 @@ button.sel-pill:hover { filter: brightness(.92); }
 /* 标签视图：顶部标签云 + 可逐级展开的目录列表 */
 .tv-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .tv-tools-label { font-size: 11px; color: var(--text-3); }
+.tv-tag-input { width: 170px; font: inherit; font-size: 11px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+.tv-tag-input:focus { outline: none; border-color: var(--accent); }
 .tv-cloud { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .tv-cloud-chip { border: 1px solid #d8dee6; background: #fff; color: #33414e; border-radius: 99px; font-size: 11px; line-height: 1.7; padding: 0 8px; cursor: pointer; }
 .tv-cloud-chip span { color: var(--text-3); font-size: 10px; }

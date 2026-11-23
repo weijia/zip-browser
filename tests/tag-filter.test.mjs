@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { tagEntries, matchTagEntries, tagCounts } from '../web/tag-filter.js';
+import { tagEntries, matchTagEntries, tagCounts, filterTagCounts, pickTagForQuery } from '../web/tag-filter.js';
 
 const DATA = {
   v: 1,
@@ -58,4 +58,25 @@ test('tagCounts：按出现次数降序统计', () => {
   const counts = tagCounts(entries);
   assert.deepEqual(counts.map((item) => item.tag), ['前端', '后端', 'git', 'node']);
   assert.deepEqual(counts.map((item) => item.count), [3, 2, 1, 1]);
+});
+
+test('filterTagCounts：空输入原样返回，非空按子串且不区分大小写', () => {
+  const counts = tagCounts(tagEntries(DATA));
+  assert.equal(filterTagCounts(counts, '').length, counts.length);
+  assert.deepEqual(filterTagCounts(counts, '前').map((item) => item.tag), ['前端']);
+  // 大小写：data 里是 node，输入 NODE 也应命中
+  assert.deepEqual(filterTagCounts(counts, 'NODE').map((item) => item.tag), ['node']);
+  assert.deepEqual(filterTagCounts(counts, '  ').map((item) => item.tag), ['前端', '后端', 'git', 'node']);
+  assert.deepEqual(filterTagCounts(counts, '不存在'), []);
+});
+
+test('pickTagForQuery：完全相等优先，其次首个子串命中，无命中返回 null', () => {
+  const counts = tagCounts(tagEntries(DATA));
+  assert.deepEqual(pickTagForQuery(counts, '前端'), { pick: '前端', matches: 1, exact: true });
+  assert.deepEqual(pickTagForQuery(counts, 'no'), { pick: 'node', matches: 1, exact: false });
+  assert.deepEqual(pickTagForQuery(counts, ' 前端 '), { pick: '前端', matches: 1, exact: true });
+  // 「端」同时命中 前端/后端
+  assert.deepEqual(pickTagForQuery(counts, '端'), { pick: '前端', matches: 2, exact: false });
+  assert.deepEqual(pickTagForQuery(counts, '不存在'), { pick: null, matches: 0, exact: false });
+  assert.deepEqual(pickTagForQuery(counts, ''), { pick: null, matches: 0, exact: false });
 });

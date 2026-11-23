@@ -8,7 +8,7 @@ import {
 } from './location.js';
 import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.js';
 import { addTag, removeTag, rememberPath, listTags, keyForTarget } from './annotations-store.js';
-import { tagEntries, matchTagEntries, tagCounts } from './tag-filter.js';
+import { tagEntries, matchTagEntries, tagCounts, filterTagCounts, pickTagForQuery } from './tag-filter.js';
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
 import { initManifestSync, scheduleSync, fetchLocalHostInfo } from './manifest-sync.js';
 import { initDriveCache } from './drive-cache.js';
@@ -1003,6 +1003,19 @@ async function localHostInfoFor(ttl = 30000) {
 // 本机目录可逐级展开（/api/list），zip 内目录直接跳转打开压缩包。
 const TAG_VIEW_LIMIT = 300;
 const tagExpandState = new Map();
+// 标签云过滤输入框的值（只用于收窄标签云，不进 hash）；tagViewFocus 用于回车选中后把焦点还回输入框。
+let tagViewQuery = '';
+let tagViewFocus = false;
+
+function tagCloudChipsHtml(counts, selection, query) {
+  const visible = filterTagCounts(counts, query);
+  if (!counts.length) return '<span class="tv-empty-inline">还没有标签</span>';
+  if (!visible.length) return `<span class="tv-empty-inline">没有匹配「${esc(query)}」的标签</span>`;
+  return visible.map((item) => {
+    const active = selection.tags.includes(item.tag);
+    return `<button type="button" class="tv-cloud-chip${active ? ' active' : ''}" data-action="tags-pick" data-tag="${esc(item.tag)}">${esc(item.tag)} <span>${item.count}</span></button>`;
+  }).join('');
+}
 
 function tagViewSelection(target) {
   return {
@@ -1109,14 +1122,11 @@ function renderTagView(target) {
   const entries = tagEntries(data);
   const counts = tagCounts(entries);
   const selection = tagViewSelection(target);
-  const chips = counts.map((item) => {
-    const active = selection.tags.includes(item.tag);
-    return `<button type="button" class="tv-cloud-chip${active ? ' active' : ''}" data-action="tags-pick" data-tag="${esc(item.tag)}">${esc(item.tag)} <span>${item.count}</span></button>`;
-  }).join('');
   stage.classList.remove('list-mode');
   stage.innerHTML = `<div class="stage-tools tv-tools">
       <span class="tv-tools-label">标签</span>
-      <div class="tv-cloud">${chips || '<span class="tv-empty-inline">还没有标签</span>'}</div>
+      <input id="tvTagInput" class="tv-tag-input" type="text" placeholder="筛选标签，回车选中" autocomplete="off" value="${esc(tagViewQuery)}">
+      <div class="tv-cloud" id="tvCloud">${tagCloudChipsHtml(counts, selection, tagViewQuery)}</div>
       <div class="tv-actions">
         <button type="button" class="tv-mini${selection.mode === 'or' ? ' active' : ''}" data-action="tags-mode" title="切换多标签匹配方式">${selection.mode === 'and' ? '同时包含' : '任一包含'}</button>
         <button type="button" class="tv-mini" data-action="tags-clear"${selection.tags.length ? '' : ' disabled'}>清空</button>
@@ -1125,8 +1135,52 @@ function renderTagView(target) {
     <div class="stage-scroll"><div class="tv-list" id="tvList">${tagListHtml(entries, target)}</div></div>`;
   sidebar.innerHTML = `<div class="side-title">标签视图</div>
     <div class="side-empty">${entries.length ? `共 ${entries.length} 个带标签的目录` : '还没有带标签的目录'}</div>
-    ${counts.length ? '<div class="side-title side-sub">全部标签</div>' : ''}
-    ${counts.map((item) => `<div class="side-item${selection.tags.includes(item.tag) ? ' active' : ''}" data-action="tags-pick" data-tag="${esc(item.tag)}">${selection.tags.includes(item.tag) ? '· ' : ''}${esc(item.tag)} <span class="anno-count">${item.count}</span></div>`).join('')}`;
+    <div id="tvTagSide"></div>`;
+  const input = document.getElementById('tvTagInput');
+  if (input) {
+    input.addEventListener('input', () => {
+      tagViewQuery = input.value;
+      const cloud = document.getElementById('tvCloud');
+      if (cloud) cloud.innerHTML = tagCloudChipsHtml(counts, tagViewSelection(current()), tagViewQuery);
+      paintTagSideList(counts, tagViewSelection(current()), tagViewQuery);
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        tagViewQuery = '';
+        input.value = '';
+        render(current()).catch(showError);
+        return;
+      }
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      const query = input.value.trim();
+      if (!query) return;
+      const { pick, matches, exact } = pickTagForQuery(counts, query);
+      if (!pick) {
+        status(`没有标签「${query}」`, true);
+        return;
+      }
+      tagViewFocus = true;
+      if (!exact && matches > 1) status(`匹配到 ${matches} 个标签，已选中「${pick}」`);
+      toggleTagSelection(pick);
+    });
+    if (tagViewFocus) {
+      tagViewFocus = false;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+  }
+  paintTagSideList(counts, selection, tagViewQuery);
+}
+
+function paintTagSideList(counts, selection, query) {
+  const side = document.getElementById('tvTagSide');
+  if (!side) return;
+  const visible = filterTagCounts(counts, query);
+  const keyword = String(query || '').trim();
+  side.innerHTML = `${counts.length ? '<div class="side-title side-sub">全部标签</div>' : ''}
+    ${visible.length ? visible.map((item) => `<div class="side-item${selection.tags.includes(item.tag) ? ' active' : ''}" data-action="tags-pick" data-tag="${esc(item.tag)}">${selection.tags.includes(item.tag) ? '· ' : ''}${esc(item.tag)} <span class="anno-count">${item.count}</span></div>`).join('') : (keyword ? '<div class="side-empty">没有匹配的标签</div>' : '')}`;
 }
 
 function toggleTagSelection(tag) {
