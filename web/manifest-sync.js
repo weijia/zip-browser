@@ -40,11 +40,14 @@ const KNOWN_KEY = 'zip-browser:manifest-volumes';
 const LAST_KEY = 'zip-browser:manifest-last';
 const SCAN_BASES_KEY = 'zip-browser:scan-shard-bases';
 const FILE_LIST_PATHS_KEY = 'zip-browser:file-list-paths';
+const DATA_GROUP_KEY = 'zip-browser:data-group-id';
 
 const $ = (id) => document.getElementById(id);
 
 let appFs = null;
 let prefix = null;
+let activeGroupId = null;
+let activeConnection = null;
 let blockReason = '尚未连接同步组';
 let getSnapshot = () => null;
 let getFileSelection = () => null;
@@ -55,6 +58,7 @@ let timer = null;
 let syncGroupsPoll = null;
 let running = false;
 let queued = false;
+let connectRetry = null;
 
 function readRaw(key) {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -95,12 +99,14 @@ function remoteBackends(group) {
 async function applyConnection(detail) {
   const conn = detail || (configurator && typeof configurator.getConnection === 'function'
     ? configurator.getConnection() : null);
+  activeConnection = conn || null;
   if (!conn) {
-    appFs = null; prefix = null;
+    appFs = null; prefix = null; activeGroupId = null;
     // 无连接：撤回已发布的 repo，让 store 退回各自的 localStorage 镜像。
     publishConfigRepo(null);
     blockReason = '尚未连接同步组';
     report(blockReason);
+    scheduleConnectRetry();
     return;
   }
   // 一次 connect 得到的 config repo（appId=dir-struct-gen）发布给三个 store 共用。
@@ -111,26 +117,34 @@ async function applyConnection(detail) {
   if (conn.dataGroup?.fs) group = conn.dataGroup;
   if (!group && conn.repo && typeof conn.repo.listAppDataGroups === 'function') {
     const list = await conn.repo.listAppDataGroups().catch(() => []) || [];
-    for (const entry of list) {
-      const id = typeof entry === 'string' ? entry : entry?.id;
-      if (!id || typeof conn.repo.getAppDataGroup !== 'function') continue;
+    // 多个数据组时选择必须稳定：先用上次生效的组，再优先 default，最后按 id 排序。
+    // 否则同一份数据两次打开页面可能落到不同组，读到的就是「文件不存在」。
+    const ids = list.map((entry) => (typeof entry === 'string' ? entry : entry?.id)).filter(Boolean);
+    const remembered = readRaw(DATA_GROUP_KEY);
+    const rank = (id) => (id === remembered ? 0 : id === 'default' ? 1 : 2);
+    const scored = [];
+    for (const id of ids) {
+      if (typeof conn.repo.getAppDataGroup !== 'function') continue;
       const candidate = await conn.repo.getAppDataGroup(id).catch(() => null);
       if (!candidate?.fs) continue;
-      group = candidate;
-      if (remoteBackends(candidate).connected.length) break;
+      // 有已连接远端后端的组优先：本地专用组（例如刚建还没加后端）不能挡住可用组。
+      scored.push({ id, group: candidate, remote: remoteBackends(candidate).connected.length > 0 });
     }
+    scored.sort((a, b) => (Number(b.remote) - Number(a.remote)) || (rank(a.id) - rank(b.id)));
+    if (scored.length) group = scored[0].group;
   }
   if (!group?.fs) {
-    appFs = null; prefix = null;
+    appFs = null; prefix = null; activeGroupId = null;
     blockReason = '未找到 app-data 数据同步组，请在下方配置并连接一个含远端后端的组';
     report(blockReason, false);
+    scheduleConnectRetry();
     return;
   }
   const { connected, declared } = remoteBackends(group);
   const backends = connected.length ? connected : declared;
   const remotes = backends.filter((b) => b && !LOCAL_BACKEND_TYPES.has(b.type));
   if (!remotes.length) {
-    appFs = null; prefix = null;
+    appFs = null; prefix = null; activeGroupId = null;
     blockReason = '数据组没有远端后端，只有本地后端时不会真正同步到其他设备';
     report(`清单导出不可用：${blockReason}`, false);
     return;
@@ -140,8 +154,16 @@ async function applyConnection(detail) {
   // 组根下的 /struct、/file-list，不能再按后端 basePath 另算前缀。
   appFs = group.fs;
   prefix = '';
+  activeGroupId = group.groupId || group.id || null;
+  if (activeGroupId) writeRaw(DATA_GROUP_KEY, activeGroupId);
   blockReason = '';
+  clearConnectRetry();
   report(`已就绪：${[...new Set(remotes.map((b) => b.type))].join(' / ')} · 写入 /struct/…、/file-list/…`, true);
+  // 连接是异步晚于首屏渲染建立的：首屏 hd 视图可能在未连接时缓存了错误结果，
+  // 就绪后通知虚拟挂载点重渲染一次，避免一直停留在「同步组未连接」提示。
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent(new CustomEvent('zb:host-disks-change'));
+  }
   scheduleSync(0);
 }
 
@@ -446,6 +468,29 @@ export function cancelScheduledSync() {
   timer = null;
 }
 
+// 首屏 restore() 早于同步组连接：config repo 的 connected 事件先到，app-data 数据组
+// 可能还在后台 bootstrap。早期 applyConnection 拿不到组会清空连接句柄，而组件
+// 对延迟加载的组不一定补发 connected/sync。这里在未就绪时做有限次短间隔重试，
+// 覆盖数据组实例化窗口；成功后由 clearConnectRetry 取消。
+const CONNECT_RETRY_MAX = 40;
+const CONNECT_RETRY_DELAY_MS = 800;
+let connectRetryAttempts = 0;
+
+function clearConnectRetry() {
+  if (connectRetry) { clearTimeout(connectRetry); connectRetry = null; }
+  connectRetryAttempts = 0;
+}
+
+function scheduleConnectRetry() {
+  if (connectRetryAttempts >= CONNECT_RETRY_MAX) return;
+  if (connectRetry) clearTimeout(connectRetry);
+  connectRetry = setTimeout(() => {
+    connectRetry = null;
+    connectRetryAttempts += 1;
+    void applyConnection();
+  }, CONNECT_RETRY_DELAY_MS);
+}
+
 /**
  * 配置同步是异步的：组件首次 connect 时会先 loadDataGroups()，此时远端
  * `.config/app-data-groups/<appId>/` 可能还没拉下来，于是显示“暂无数据同步组”。
@@ -552,6 +597,11 @@ export function initManifestSync(options = {}) {
   configurator.addEventListener('connected', (event) => { void applyConnection(event.detail); });
   configurator.addEventListener('backend-added', () => { void applyConnection(); });
   configurator.addEventListener('data-group-created', () => { void applyConnection(); });
+  // 时序兜底：config repo 的 connected 事件先到，此时 app-data 数据组可能还在后台
+  // bootstrap（实例稍后才创建）。早期 applyConnection 拿不到组会清空连接句柄，
+  // 而组就绪后组件只发 sync 事件、不再重发 connected，因此这里监听 sync 重新
+  // 解析一次连接；成功分支会派发 zb:host-disks-change 让视图刷新。
+  configurator.addEventListener('sync', () => { void applyConnection(); });
   void applyConnection();
   return { ok: true };
 }
@@ -564,6 +614,87 @@ export function getConnectedFs() {
   const fp = appFs?.promises || appFs;
   if (!fp || prefix === null) return null;
   return { fp, pathFor, blockReason };
+}
+
+/**
+ * 全部已加载数据组的文件视图（当前选中的排最前）。
+ * 多个数据组并存时，写回与读取可能落在不同的组，读取侧在选中组缺文件时逐个兜底，
+ * 比让用户手工排查「到底写到哪个组」可靠。
+ */
+export async function listDataGroupFs() {
+  const out = [];
+  const push = (id, fs) => {
+    const fp = fs?.promises || fs;
+    if (!fp) return;
+    if (out.some((item) => item.fp === fp)) return;
+    out.push({ id: id || '', fp, pathFor });
+  };
+  if (appFs && prefix !== null) push(activeGroupId, appFs);
+  const repo = activeConnection?.repo;
+  if (!repo || typeof repo.listAppDataGroups !== 'function') return out;
+  const list = await repo.listAppDataGroups().catch(() => []) || [];
+  const ids = list.map((entry) => (typeof entry === 'string' ? entry : entry?.id)).filter(Boolean);
+  ids.sort((a, b) => (a === 'default' ? -1 : b === 'default' ? 1 : String(a).localeCompare(String(b))));
+  for (const id of ids) {
+    if (typeof repo.getAppDataGroup !== 'function') continue;
+    const group = await repo.getAppDataGroup(id).catch(() => null);
+    if (group?.fs) push(group.groupId || id, group.fs);
+  }
+  return out;
+}
+
+/** 当前选中的数据组 id（诊断/日志用）。 */
+export function getActiveGroupId() { return activeGroupId; }
+
+/**
+ * 取当前已连接的数据组实例（AppDataGroup），供写回前清理该路径上的残留删除墓碑。
+ * 未连接 / 组不可用时返回 null；调用方必须容错，墓碑清理失败不阻断写回。
+ */
+export async function getActiveDataGroup() {
+  const repo = activeConnection?.repo;
+  if (!repo || activeGroupId == null || typeof repo.getAppDataGroup !== 'function') return null;
+  return repo.getAppDataGroup(activeGroupId).catch(() => null);
+}
+
+/**
+ * 从当前已连接的同步组里提取第一个 RemoteStorage 后端的凭据（href/token）。
+ * 供「主机磁盘监控」用同一账号直连 RS 账户根读 ufs-nodes/（数据组 fs 只挂载到
+ * basePath，读不到账户根的 ufs-nodes）。返回 { href, token, basePath } 或 null。
+ * 只读取已配置的连接，不新建 configurator、不发起 OAuth。
+ */
+export function getRsCredentials() {
+  const conn = activeConnection || (configurator && typeof configurator.getConnection === 'function'
+    ? configurator.getConnection() : null);
+  if (!conn) return null;
+  const groups = [];
+  if (conn.dataGroup) groups.push(conn.dataGroup);
+  // 配置组也能提供 listBackends（账户级凭据），一并扫描。
+  const repo = conn.repo;
+  if (repo && typeof repo.listBackends === 'function') {
+    try {
+      for (const d of repo.listBackends() || []) {
+        groups.push({ listBackends: () => [d] });
+      }
+    } catch { /* ignore */ }
+  }
+  const scan = (g) => {
+    if (!g || typeof g.listBackends !== 'function') return null;
+    let list = [];
+    try { list = g.listBackends() || []; } catch { return null; }
+    for (const d of list) {
+      if (!d || d.type !== 'RemoteStorage') continue;
+      const o = d.options || {};
+      const href = String(o.href || '').trim();
+      const token = String(o.token || '').trim();
+      if (href && token) return { href, token, basePath: o.basePath || '/' };
+    }
+    return null;
+  };
+  for (const g of groups) {
+    const found = scan(g);
+    if (found) return found;
+  }
+  return null;
 }
 
 /** M4：把用户填写的路径写成 folder-deepen/<volumeId>.json，与远端已有标记取并集。 */

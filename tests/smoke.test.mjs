@@ -114,6 +114,14 @@ test('location hash round-trips a chinese windows path and view settings', () =>
   assert.deepEqual(localTargetFromCompact(snap.t), { kind: 'dir', path });
 });
 
+test('location hash round-trips the virtual host-disks mount', () => {
+  const target = { kind: 'hd', path: '/volume/8694cae7-490c-4668-9fb8-929e7d82f80c' };
+  const hash = encodeLocation({ t: compactTarget(target), view: 'list' });
+  const snap = decodeLocation(hash);
+  assert.equal(snap.t.k, 'hd');
+  assert.deepEqual(localTargetFromCompact(snap.t), target);
+});
+
 test('compact zip target keeps url small and rebuilds preview paths', () => {
   const zip = {
     kind: 'zip', id: 'abc123', zipName: 'a.zip', zipDir: 'C:\\samples',
@@ -1036,7 +1044,9 @@ test('hostinfo api and v2 sync assets are served', async () => {
     '/manifest-export.js', '/manifest-sync.js',
     '/drive-backends.js', '/drive-cache-store.js', '/drive-cache.js', '/manifest-volume-import.js',
     '/config-repo.js',
+    '/ufs-nodes-reader.js', '/host-disk-merge.js', '/host-disks-panel.js', '/host-disks-browser.js', '/device-registry-store.js', '/text-selection-guard.js',
     '/vendor/zen-fs-config-ui.js',
+    '/vendor/zen-rs-client.global.js',
     '/vendor/zen-fs-remotestoragejs.global.js',
     '/vendor/zen-fs-gitee.global.js',
   ]) {

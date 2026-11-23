@@ -59,6 +59,8 @@ const VENDOR_FILES = new Map([
   // 不导出 createConfigRepo；上面的 zen-fs-config.js 仍需保留给 /annotations 与密码库。
   ['/vendor/zen-fs-config-ui.js', path.join(WEB_DIR, 'vendor', 'zen-fs-config-ui.js')],
   ['/vendor/zen-fs-remotestoragejs.global.js', path.join(WEB_DIR, 'vendor', 'zen-fs-remotestoragejs.global.js')],
+  // 独立 RS 客户端：暴露 RemoteStorageFileSystem 类，供主机磁盘面板按需加载直读 ufs-nodes/。
+  ['/vendor/zen-rs-client.global.js', path.join(WEB_DIR, 'vendor', 'zen-rs-client.global.js')],
   ['/vendor/zen-fs-gitee.global.js', path.join(WEB_DIR, 'vendor', 'zen-fs-gitee.global.js')],
 ]);
 
@@ -320,7 +322,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && pathname.startsWith('/vendor/')) {
       return await serveVendor(res, pathname);
     }
-    if (req.method === 'GET' && ['/host.js', '/app.js', '/vault.js', '/style.css', '/location.js', '/update-checker.js', '/annotations-store.js', '/annotations-ui.js', '/image-viewer.js', '/manifest-export.js', '/manifest-sync.js', '/manifest-selection.js', '/manifest-payload.js', '/manifest-builder.js', '/file-list-export.js', '/zip-writer.js', '/trash-ui.js', '/drive-backends.js', '/drive-cache-store.js', '/drive-cache.js', '/manifest-volume-import.js', '/config-repo.js'].includes(pathname)) {
+    if (req.method === 'GET' && ['/host.js', '/app.js', '/vault.js', '/style.css', '/location.js', '/update-checker.js', '/annotations-store.js', '/annotations-ui.js', '/image-viewer.js', '/manifest-export.js', '/manifest-sync.js', '/manifest-selection.js', '/manifest-payload.js', '/manifest-builder.js', '/file-list-export.js', '/zip-writer.js', '/trash-ui.js', '/drive-backends.js', '/drive-cache-store.js', '/drive-cache.js', '/manifest-volume-import.js', '/config-repo.js', '/ufs-nodes-reader.js', '/host-disk-merge.js', '/host-disks-panel.js', '/host-disks-browser.js', '/device-registry-store.js', '/text-selection-guard.js'].includes(pathname)) {
       return await serveStatic(res, pathname);
     }
     if (pathname.startsWith('/api/')) return await handleApi(req, res, url);

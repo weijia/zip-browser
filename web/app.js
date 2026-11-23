@@ -11,6 +11,8 @@ import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSe
 import { initManifestSync, scheduleSync } from './manifest-sync.js';
 import { initDriveCache } from './drive-cache.js';
 import { initManifestVolumeImport } from './manifest-volume-import.js';
+import { initHostDisksPanel } from './host-disks-panel.js';
+import { loadHostDisksDoc, describeVirtual } from './host-disks-browser.js';
 import { createSelectionStore, isDirSelected, isFileSelected, addDirSelection, removeDirSelection, removeFileDirSelection, removePickedFile, selectionPathKey } from './manifest-selection.js';
 import {
   initManifestBuilder, addPickedFromItem, addFileListDir, openCopyRefForItem,
@@ -129,6 +131,7 @@ let sizeSort = (() => {
 })();
 const state = { index: 0, depth: 0, target: { kind: 'drives' } };
 let crumbTargets = [];
+let hdCrumbParts = [{ label: '主机磁盘（数据组）', path: '' }];
 
 // 手机端行操作菜单：把一行里被 CSS 收起的按钮原样搬到底部面板，
 // 复用原有 data-action 事件委托，不复制任何业务逻辑。
@@ -843,7 +846,9 @@ function renderCrumbs(target) {
   const rootLabel = LABELS.root || '此电脑';
   const parts = [{ label: rootLabel, target: { kind: 'drives' } }];
 
-  if (target.kind === 'dir' || (target.kind === 'preview' && target.scope === 'local')) {
+  if (target.kind === 'hd') {
+    for (const part of hdCrumbParts) parts.push({ label: part.label, target: { kind: 'hd', path: part.path } });
+  } else if (target.kind === 'dir' || (target.kind === 'preview' && target.scope === 'local')) {
     appendPathCrumbs(parts, target.kind === 'dir' ? target.path : target.dir);
     if (target.kind === 'preview') parts.push({ label: target.label });
   } else if (target.kind === 'zip') {
@@ -863,15 +868,24 @@ function renderCrumbs(target) {
       : `<span class="crumb current">${label}</span>`;
     return `${index ? '<span class="crumb-sep">/</span>' : ''}${node}`;
   }).join('');
-  $('mode').textContent = target.kind === 'zip' ? '压缩包内' : (target.kind === 'preview' ? '文件预览' : (LABELS.mode || '本地磁盘'));
+  $('mode').textContent = target.kind === 'zip' ? '压缩包内'
+    : (target.kind === 'preview' ? '文件预览'
+      : (target.kind === 'hd' ? '数据组视图' : (LABELS.mode || '本地磁盘')));
   const label = parts[parts.length - 1].label;
   const siteTitle = HOST.siteTitle || '文件浏览器';
   document.title = label === rootLabel ? siteTitle : `${label} · ${siteTitle}`;
 }
 
 async function renderDrives() {
-  const { drives, networkDrives } = await api('/api/drives');
+  const [{ drives, networkDrives }, hdState] = await Promise.all([
+    api('/api/drives'),
+    loadHostDisksDoc(),
+  ]);
   const registered = Array.isArray(networkDrives) ? networkDrives : [];
+  const hdDoc = hdState.doc;
+  const hdMeta = hdDoc
+    ? `主机 ${hdDoc.hosts?.length || 0} · 卷 ${hdDoc.volumes?.length || 0}${hdDoc.generatedAt ? ` · 更新 ${esc(hdDoc.generatedAt)}` : ''}`
+    : '未写回数据组（点顶部「主机磁盘」读取并写回）';
   const mounts = HOST.drivesMode === 'mounts';
   const cards = drives.map((drive) => {
     const used = drive.total ? Math.round(((drive.total - drive.free) / drive.total) * 100) : 0;
@@ -916,13 +930,19 @@ async function renderDrives() {
     </div>`;
   }).join('');
 
+  // 虚拟挂载点：读数据组写回的 host-disks.json，不是本机真实磁盘。
+  const hdCard = `<div class="drive-card network-storage" data-action="hd" data-path="" title="数据同步组里的主机磁盘归并结果，只读">
+    <div class="drive-head"><span class="drive-letter net">主</span><span class="drive-name">主机磁盘（数据组）</span></div>
+    <div class="drive-meta net-meta">${hdMeta}</div>
+  </div>`;
+
   const title = LABELS.drivesTitle || '此电脑 · 磁盘';
   const unit = LABELS.drivesUnit || '磁盘';
   const empty = LABELS.drivesEmpty || '没有检测到可用磁盘';
   const hint = LABELS.drivesHint || '';
   stage.classList.remove('list-mode');
-  stage.innerHTML = `<h2 class="stage-title">${esc(title)}（${drives.length + registered.length}）</h2>
-    <div class="drive-grid">${cards}${networkCards || (drives.length ? '' : `<div class="empty">${esc(empty)}</div>`)}</div>
+  stage.innerHTML = `<h2 class="stage-title">${esc(title)}（${drives.length + registered.length + 1}）</h2>
+    <div class="drive-grid">${hdCard}${cards}${networkCards || (drives.length ? '' : `<div class="empty">${esc(empty)}</div>`)}</div>
     ${hint ? `<p class="stage-hint">${esc(hint)}</p>` : ''}`;
   const sidebarRoot = LABELS.sidebarRoot || LABELS.root || '此电脑';
   const localSidebar = drives.map((drive) => {
@@ -938,7 +958,44 @@ async function renderDrives() {
         : `<div class="side-item net-side-item" title="${esc(nameTip)}">网 ${esc(name)}</div>`;
     }).join('')}`
     : '';
-  sidebar.innerHTML = `<div class="side-title">${esc(sidebarRoot)}</div>${localSidebar}${networkSidebar}`;
+  const hdSidebar = `<div class="side-title side-sub">数据组视图</div><div class="side-item" data-action="hd" data-path=""><span class="icon icon-dir"></span>主机磁盘（数据组）</div>`;
+  sidebar.innerHTML = `<div class="side-title">${esc(sidebarRoot)}</div>${localSidebar}${networkSidebar}${hdSidebar}`;
+}
+
+async function renderHostDisks(target) {
+  const { doc, error } = await loadHostDisksDoc();
+  const view = describeVirtual(doc, target.path || '');
+  hdCrumbParts = view.crumbs;
+  const sections = view.sections.map((section) => {
+    const rows = section.rows.length
+      ? section.rows.map((item) => {
+        const canOpen = item.path !== undefined && item.path !== null;
+        const attrs = canOpen ? ` data-action="hd" data-path="${esc(item.path)}" style="cursor:pointer"` : '';
+        return `<tr${attrs}><td>${esc(item.label)}</td><td>${esc(item.meta)}</td></tr>`;
+      }).join('')
+      : '<tr><td colspan="2" class="dc-empty">无</td></tr>';
+    return `<details class="hd-host hd-fold" open><summary class="hd-host-title">${esc(section.title)}</summary><table class="file-table"><tbody>${rows}</tbody></table></details>`;
+  }).join('');
+  stage.classList.add('list-mode');
+  let html;
+  if (!doc) {
+    html = `<h2 class="stage-title">${esc(view.title)}</h2>
+      <div class="empty">${esc(error || '数据组中没有主机磁盘文件')}
+        <div class="stage-hint">请先点顶部「主机磁盘」读取遥测，再点「写回同步组数据组」，然后回到本页。</div>
+        <button type="button" class="primary" data-action="hd-reload">重新读取</button>
+      </div>`;
+  } else {
+    html = `<h2 class="stage-title">${esc(view.title)}</h2>
+      ${view.empty ? `<div class="empty">${esc(view.empty)}</div>` : ''}
+      ${sections}
+      <p class="stage-hint">此视图只读，数据来自数据组 /host-disks/host-disks.json；刷新本地缓存不会重新拉取 RS 遥测。</p>`;
+  }
+  stage.innerHTML = `<div class="hd-virtual-scroll">${html}</div>`;
+  const side = view.crumbs.map((part, index) => {
+    const active = index === view.crumbs.length - 1;
+    return `<div class="side-item${active ? ' active' : ''}" data-action="hd" data-path="${esc(part.path)}">${active ? '· ' : '<span class="icon icon-dir"></span>'}${esc(part.label)}</div>`;
+  }).join('');
+  sidebar.innerHTML = `<div class="side-title">主机磁盘（数据组）</div>${side}`;
 }
 
 function parentOf(abs) {
@@ -1205,6 +1262,7 @@ async function render(target) {
   status('正在加载…');
   try {
     if (target.kind === 'drives') await renderDrives();
+    else if (target.kind === 'hd') await renderHostDisks(target);
     else if (target.kind === 'dir') await renderDir(target.path);
     else if (target.kind === 'zip') renderZip(target);
     else if (target.kind === 'preview') renderPreview(target);
@@ -1500,7 +1558,12 @@ document.addEventListener('click', async (event) => {
   const target = current();
   const dir = target.kind === 'dir' ? target.path : (target.dir || target.zipDir);
   try {
-    if (action === 'drive' || action === 'dir') {
+    if (action === 'hd') {
+      navigate({ kind: 'hd', path: element.dataset.path || '' });
+    } else if (action === 'hd-reload') {
+      await loadHostDisksDoc({ force: true });
+      await render(current());
+    } else if (action === 'drive' || action === 'dir') {
       navigate({ kind: 'dir', path: element.dataset.path });
     } else if (action === 'crumb') {
       const crumbTarget = crumbTargets[Number(element.dataset.index)];
@@ -1597,10 +1660,22 @@ initManifestSync({
 
 const driveCache = initDriveCache({ api, status });
 initManifestVolumeImport({ api, status });
+initHostDisksPanel({ status });
+
+// 文本选择保护按需加载：未重启的旧服务没有该模块白名单时也不影响主程序。
+import('./text-selection-guard.js')
+  .then((m) => m.installTextSelectionGuard())
+  .catch((err) => console.warn('text selection guard unavailable', err));
 
 // 网盘登记增删后，磁盘列表里的「网络存储」卡片要立即跟着变。
 window.addEventListener('zb:drive-cache-change', () => {
   if (current().kind === 'drives') render(current());
+});
+
+// 主机磁盘面板写回后，此电脑的虚拟挂载点 / 当前虚拟视图立即刷新。
+window.addEventListener('zb:host-disks-change', () => {
+  const kind = current().kind;
+  if (kind === 'drives' || kind === 'hd') render(current());
 });
 
 initManifestBuilder({

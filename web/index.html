@@ -20,6 +20,7 @@
     <button id="tagsBtn" type="button" title="按标签筛选目录">标签 <span id="tagCount" class="anno-count">0</span></button>
     <button id="driveCacheBtn" type="button" title="登记网盘的类型、容量与月度流量配额">网盘信息 <span id="driveCount" class="anno-count">0</span></button>
     <button id="importVolBtn" type="button" title="从 zen-fs-config 的目录结构清单导入磁盘并创建本地 Cache">导入清单卷</button>
+    <button id="hostDiskBtn" type="button" title="从 RemoteStorage 读取主机/磁盘遥测，与卷清单归并后写回同步组">主机磁盘</button>
     <button id="syncBtn" type="button" title="把收藏同步为目录结构清单 v2">同步收藏</button>
     <button id="builderBtn" type="button" title="勾选目录生成 v2 清单与文件列表">清单生成</button>
     <label class="encoding">文件名编码
@@ -172,6 +173,81 @@
       <button id="mvCreate" type="button" class="primary">创建所选磁盘 Cache</button>
     </div>
     <div id="mvStatus" class="sync-status dc-sync" data-state="idle">同步状态：等待操作</div>
+  </div>
+</div>
+
+<div id="hostDiskModal" class="modal hidden">
+  <div class="modal-card hd-card">
+    <div class="modal-head">
+      <h2>主机磁盘 · RS 遥测与卷清单归并</h2>
+      <button id="hdClose" type="button" class="modal-x" title="关闭">×</button>
+    </div>
+    <p class="modal-note">从 RemoteStorage 账户根 <code>ufs-nodes/</code> 读取 CPP daemon / home_cloud 上报的主机与磁盘信息，与 dir-struct-gen 卷清归并。可手工把磁盘 SN 映射到 volumeId（人工确认的强关联，优先于主机名+盘符软关联）；映射与归并结果一并写回。凭据复用已连的 RemoteStorage 同步后端。</p>
+    <div class="hd-tabs" role="tablist">
+      <button id="hdTabVolumes" type="button" class="hd-tab active" data-view="volumes" role="tab">按卷</button>
+      <button id="hdTabHosts" type="button" class="hd-tab" data-view="hosts" role="tab">按主机 / 磁盘</button>
+      <button id="hdTabMappings" type="button" class="hd-tab" data-view="mappings" role="tab">SN 映射 <span id="hdMapCount">0</span></button>
+      <button id="hdTabHostAliases" type="button" class="hd-tab" data-view="hostaliases" role="tab">UUID 归并 <span id="hdHostAliasCount">0</span></button>
+      <button id="hdTabDiskAliases" type="button" class="hd-tab" data-view="diskaliases" role="tab">磁盘归并 <span id="hdDiskAliasCount">0</span></button>
+      <button id="hdFoldAll" type="button" class="dc-mini hd-tab-right" title="折叠/展开主机、磁盘与卷">全部折叠</button>
+      <button id="hdRefresh" type="button" class="dc-mini" title="重新读取 RS 遥测与清单">重新读取</button>
+    </div>
+    <div id="hdStats" class="hd-stats"></div>
+    <div class="hd-scroll">
+    <div id="hdViewVolumes">
+      <div id="hdList" class="dc-list hd-list"></div>
+      <details class="hd-candidates-wrap">
+        <summary id="hdCandSummary">设备身份注册表候选（0）</summary>
+        <div id="hdCandidates" class="hd-candidates"></div>
+      </details>
+    </div>
+    <div id="hdViewHosts" class="hidden">
+      <label class="hd-filter" title="只影响「按主机 / 磁盘」视图的列表，不改变遥测数据">
+        <input id="hdHideNoDisk" type="checkbox">
+        <span>隐藏无磁盘的主机</span>
+        <span id="hdHideNoDiskHint" class="hd-filter-hint"></span>
+      </label>
+      <div id="hdHostList" class="dc-list hd-list"></div>
+    </div>
+    <div id="hdViewMappings" class="hidden">
+      <p class="modal-note">手工确认的 <code>SN → volumeId</code> 映射，存于设备身份注册表 <code>/device-registry/identities</code>，优先于软关联。一个 SN 只能映射到一台卷。</p>
+      <div id="hdMapForm" class="hd-map-form">
+        <label>磁盘 SN <input id="hdMapSerial" type="text" placeholder="SMART SerialNumber" autocomplete="off"></label>
+        <label>卷 volumeId <input id="hdMapVolume" type="text" list="hdMapVolumeOptions" placeholder="选择或输入 volumeId" autocomplete="off"></label>
+        <datalist id="hdMapVolumeOptions"></datalist>
+        <button id="hdMapAdd" type="button" class="primary">添加映射</button>
+      </div>
+      <div id="hdMapError" class="modal-error"></div>
+      <div id="hdMapList" class="dc-list hd-list"></div>
+    </div>
+    <div id="hdViewHostAliases" class="hidden">
+      <p class="modal-note">同一台主机换系统 / 换网卡后 <code>device_uuid</code> 会变。把旧 UUID 归并到一个规范 UUID，主机、磁盘与卷会自动合并显示。归并关系存在设备身份注册表的 <code>type:host</code> 实体。</p>
+      <div id="hdHostAliasForm" class="hd-map-form">
+        <label>规范 UUID <input id="hdHostAliasCanonical" type="text" list="hdHostAliasUuidOptions" placeholder="保留使用的 device_uuid" autocomplete="off"></label>
+        <label>别名 UUID <input id="hdHostAliasUuid" type="text" list="hdHostAliasUuidOptions" placeholder="要归并进来的旧 device_uuid" autocomplete="off"></label>
+        <datalist id="hdHostAliasUuidOptions"></datalist>
+        <button id="hdHostAliasAdd" type="button" class="primary">添加归并</button>
+      </div>
+      <div id="hdHostAliasError" class="modal-error"></div>
+      <div id="hdHostAliasList" class="dc-list hd-list"></div>
+    </div>
+    <div id="hdViewDiskAliases" class="hidden">
+      <p class="modal-note">同一块物理磁盘在 SMART 与主机明细里可能用不同的标识（磁盘 UUID 或 SN）。把多个标识归并到一个规范标识，磁盘、逻辑分区与卷会自动合并显示。归并关系存在设备身份注册表的 <code>type:disk</code> 实体。</p>
+      <div id="hdDiskAliasForm" class="hd-map-form">
+        <label>规范标识（SN 或 UUID） <input id="hdDiskAliasCanonical" type="text" list="hdDiskAliasIdOptions" placeholder="保留使用的 SN / 磁盘 UUID" autocomplete="off"></label>
+        <label>别名标识（SN 或 UUID） <input id="hdDiskAliasId" type="text" list="hdDiskAliasIdOptions" placeholder="要归并进来的 SN / 磁盘 UUID" autocomplete="off"></label>
+        <datalist id="hdDiskAliasIdOptions"></datalist>
+        <button id="hdDiskAliasAdd" type="button" class="primary">添加归并</button>
+      </div>
+      <div id="hdDiskAliasError" class="modal-error"></div>
+      <div id="hdDiskAliasList" class="dc-list hd-list"></div>
+    </div>
+    </div>
+    <div id="hdError" class="modal-error"></div>
+    <div class="modal-actions">
+      <button id="hdWriteBack" type="button" class="primary">写回同步组数据组</button>
+    </div>
+    <div id="hdStatus" class="sync-status dc-sync" data-state="idle">状态：等待操作</div>
   </div>
 </div>
 
