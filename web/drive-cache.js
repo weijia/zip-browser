@@ -109,7 +109,7 @@ function renderList(info) {
     const name = item.label || item.backend || item.dir;
     return `<div class="dc-item${shown ? '' : ' dc-off'}" data-dir="${esc(item.dir)}">
       <div class="dc-item-head">
-        <label class="dc-visible" title="勾选后显示在「此电脑」磁盘列表；取消勾选只是隐藏入口，登记仍然保留">
+        <label class="dc-visible" title="勾选后显示在「此电脑」磁盘列表（本机未落地时会自动建缓存目录）；取消勾选只是隐藏入口，登记仍然保留">
           <input type="checkbox" data-visible="${esc(item.dir)}"${shown ? ' checked' : ''}> 显示
         </label>
         <span class="dc-item-name">${esc(name)}</span>
@@ -177,6 +177,10 @@ async function loadList({ quiet = false } = {}) {
   }
   const localEntries = Array.isArray(info.entries) ? info.entries : [];
   const merged = mergeEntries(remoteEntries, localEntries);
+  // 清单里的 hasInfo 是「写入清单那台机器」的状态，跨机不可信：
+  // 本机是否落地以本机 cached 目录为准，否则会把「只在清单里」的条目当成已落地。
+  const localDirs = new Set(localEntries.map((item) => item.dir));
+  for (const entry of merged) entry.hasInfo = localDirs.has(entry.dir);
   store.adoptDoc({ v: 1, updatedAt: remote.doc?.updatedAt || 0, entries: merged });
   const aligned = await alignLocalVisibility(merged, localEntries);
   if (aligned) notifyDiskList(); // 本机可见性和清单对齐过，磁盘列表要重绘
@@ -458,15 +462,46 @@ async function copyEntry(dir) {
   }
 }
 
+const togglingDirs = new Set();
+
 async function toggleVisible(dir, visible) {
   const entry = currentEntries.find((item) => item.dir === dir);
-  if (!entry) return;
+  if (!entry || togglingDirs.has(dir)) return;
+  togglingDirs.add(dir);
+  try {
+    await applyVisibleToggle(dir, entry, visible);
+  } finally {
+    togglingDirs.delete(dir);
+  }
+}
+
+async function applyVisibleToggle(dir, entry, visible) {
+  // 本机是否已落地在开始时快照下来：导入完成后 entry 会变，后续分支必须用同一个判断，
+  // 否则并发切换时会出现「刚落地又被隐藏写回 info.json」的错位。
+  const hadLocal = entry.hasInfo !== false;
   setSync(visible ? `正在显示 ${dir}…` : `正在隐藏 ${dir}…`);
-  // 数据组清单是跨机事实源：先写清单；本机 info.json 供 /api/drives 决定是否列出，
-  // 因此能落地时也同步一份（本机未落地条目只写清单）。
-  const write = await store.upsert([{ ...entry, visible }]);
+  // 勾选「显示」但本机还没落地时，先落地（建 cached/<dir> + info.json + data/）：
+  // /api/drives 只枚举本机目录，没有落地副本的条目即使显示也不会出现在磁盘列表。
+  let landed = null;
+  if (visible && !hadLocal && apiFetch) {
+    setSync(`正在把 ${dir} 落地到本机…`);
+    try {
+      const result = await apiFetch('/api/drive-cache/import', {
+        method: 'POST',
+        body: JSON.stringify({ entries: [{ ...entry, visible: true }] }),
+      });
+      landed = (Array.isArray(result.entries) ? result.entries : []).some((item) => item.dir === dir);
+      if (!landed) setError(`本机落地失败：服务端没有返回 ${dir}`);
+    } catch (err) {
+      landed = false;
+      setError(`本机落地失败：${err?.message || err}`);
+    }
+  }
+  const hasLocal = hadLocal || landed === true;
+  // 数据组清单是跨机事实源：先写清单；本机 info.json 供 /api/drives 决定是否列出。
+  const write = await store.upsert([{ ...entry, visible, hasInfo: hasLocal }]);
   let localOk = null;
-  if (apiFetch && entry.hasInfo !== false) {
+  if (apiFetch && hasLocal) {
     try {
       await apiFetch('/api/drive-cache/update', {
         method: 'POST',
@@ -476,14 +511,18 @@ async function toggleVisible(dir, visible) {
     } catch (err) {
       localOk = err?.message || String(err);
     }
-  } else if (entry.hasInfo === false) {
+  } else if (!hasLocal) {
     localOk = '本机未落地，只写了数据组清单';
   }
   renderList({ entries: store.snapshot().entries, cacheRoot: currentCacheRoot });
   notifyDiskList();
   const action = visible ? '显示' : '隐藏';
+  if (landed === false) {
+    setSync(`已${action} ${dir}（数据组 ${REMOTE_MANIFEST}；本机落地失败，磁盘列表看不到它）`, false);
+    return;
+  }
   if (write.ok && localOk === true) {
-    setSync(`已${action} ${dir}（数据组 ${REMOTE_MANIFEST} + 本机 info.json）`, true);
+    setSync(`${landed === true ? '已落地并' : '已'}${action} ${dir}（数据组 ${REMOTE_MANIFEST} + 本机 info.json）`, true);
     if (statusFn) statusFn(`已${action}网盘入口：${dir}`, false);
     return;
   }
