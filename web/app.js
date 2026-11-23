@@ -8,6 +8,7 @@ import {
 } from './location.js';
 import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.js';
 import { addTag, removeTag, rememberPath, listTags, keyForTarget } from './annotations-store.js';
+import { tagEntries, matchTagEntries, tagCounts } from './tag-filter.js';
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
 import { initManifestSync, scheduleSync, fetchLocalHostInfo } from './manifest-sync.js';
 import { initDriveCache } from './drive-cache.js';
@@ -661,8 +662,8 @@ function commitRowTag(path, value) {
   const key = dirTagKey(path);
   const descriptor = { kind: 'dir', path, label: winBasename(path) || path };
   store.mutate((data) => {
-    const next = rememberPath(data, key, descriptor);
-    for (const tag of tags) addTag(next, key, tag);
+    let next = rememberPath(data, key, descriptor);
+    for (const tag of tags) next = addTag(next, key, tag);
     return next;
   });
   status(`已给「${descriptor.label}」加标签：${tags.join('、')}`);
@@ -953,6 +954,8 @@ function renderCrumbs(target) {
 
   if (target.kind === 'hd') {
     for (const part of hdCrumbParts) parts.push({ label: part.label, target: { kind: 'hd', path: part.path } });
+  } else if (target.kind === 'tags') {
+    parts.push({ label: '标签视图' });
   } else if (target.kind === 'dir' || (target.kind === 'preview' && target.scope === 'local')) {
     appendPathCrumbs(parts, target.kind === 'dir' ? target.path : target.dir);
     if (target.kind === 'preview') parts.push({ label: target.label });
@@ -975,7 +978,8 @@ function renderCrumbs(target) {
   }).join('');
   $('mode').textContent = target.kind === 'zip' ? '压缩包内'
     : (target.kind === 'preview' ? '文件预览'
-      : (target.kind === 'hd' ? '数据组视图' : (LABELS.mode || '本地磁盘')));
+      : (target.kind === 'hd' ? '数据组视图'
+        : (target.kind === 'tags' ? '标签视图' : (LABELS.mode || '本地磁盘'))));
   const label = parts[parts.length - 1].label;
   const siteTitle = HOST.siteTitle || '文件浏览器';
   document.title = label === rootLabel ? siteTitle : `${label} · ${siteTitle}`;
@@ -993,6 +997,198 @@ async function localHostInfoFor(ttl = 30000) {
     // 读不到（兼容层没有 /api/hostinfo）时沿用上次结果；一次都没有就返回 null，磁盘列表照常显示。
     return localHostCache.value;
   }
+}
+
+// 标签视图：只认手动标签（annotations），列出带选中标签的目录。
+// 本机目录可逐级展开（/api/list），zip 内目录直接跳转打开压缩包。
+const TAG_VIEW_LIMIT = 300;
+const tagExpandState = new Map();
+
+function tagViewSelection(target) {
+  return {
+    tags: Array.isArray(target?.tags) ? target.tags.filter(Boolean) : [],
+    mode: target?.mode === 'or' ? 'or' : 'and',
+  };
+}
+
+function tagViewSnapshot() {
+  const store = getAnnotationStore();
+  return store ? store.snapshot() : { tags: {}, paths: {} };
+}
+
+function tvChipHtml(tag, key) {
+  return `<span class="tv-chip">${esc(tag)}<button type="button" data-action="tags-remove" data-key="${esc(key)}" data-tag="${esc(tag)}" title="移除这个标签">×</button></span>`;
+}
+
+function tvArrow(path, open, canExpand) {
+  if (!canExpand) return '<span class="tv-arrow tv-arrow-gap"></span>';
+  return `<button type="button" class="tv-arrow${open ? ' open' : ''}" data-action="tags-expand" data-path="${esc(path)}" title="${open ? '收起' : '展开这个目录'}">${open ? '▾' : '▸'}</button>`;
+}
+
+function tvChildrenHtml(path, depth) {
+  const expand = tagExpandState.get(path);
+  if (!expand) return '';
+  if (expand.loading && !expand.items) return `<div class="tv-children"><div class="tv-empty">正在读取…</div></div>`;
+  if (expand.error) return `<div class="tv-children"><div class="tv-empty tv-error">${esc(expand.error)}</div></div>`;
+  const items = expand.items || [];
+  if (!items.length) return `<div class="tv-children"><div class="tv-empty">空目录</div></div>`;
+  const data = tagViewSnapshot();
+  return `<div class="tv-children">${items.map((item) => tvChildRowHtml(item, depth, data)).join('')}</div>`;
+}
+
+function tvChildRowHtml(item, depth, data) {
+  const expand = tagExpandState.get(item.path);
+  const open = Boolean(expand?.open);
+  const key = item.dir ? keyForTarget({ kind: 'dir', path: item.path }) : '';
+  const tags = item.dir ? (data?.tags?.[key] || []) : [];
+  const action = item.dir
+    ? `data-action="tags-expand" data-path="${esc(item.path)}"`
+    : `data-action="tags-file" data-path="${esc(item.path)}" data-name="${esc(item.name)}"`;
+  return `<div class="tv-node">
+    <div class="tv-row tv-child${open ? ' open' : ''}" ${action} style="--tv-depth:${depth}">
+      ${tvArrow(item.path, open, Boolean(item.dir))}
+      <span class="icon ${item.dir ? 'icon-dir' : 'icon-file'}"></span>
+      <span class="tv-name">${esc(item.name)}</span>
+      ${item.dir ? '' : `<span class="tv-meta">${esc(formatSize(item.size))}</span>`}
+      <span class="tv-tags">${tags.map((tag) => tvChipHtml(tag, key)).join('')}</span>
+    </div>
+    ${item.dir && open ? tvChildrenHtml(item.path, depth + 1) : ''}
+  </div>`;
+}
+
+function tvEntryHtml(entry) {
+  const expand = tagExpandState.get(entry.path);
+  const open = Boolean(expand?.open);
+  const canExpand = entry.kind === 'dir';
+  const pos = `${entry.path}${entry.entry ? ` / ${entry.entry}` : ''}`;
+  const action = canExpand
+    ? `data-action="tags-expand" data-path="${esc(entry.path)}"`
+    : `data-action="tags-open-zip" data-key="${esc(entry.key)}"`;
+  return `<div class="tv-node">
+    <div class="tv-row${open ? ' open' : ''}" ${action}>
+      ${tvArrow(entry.path, open, canExpand)}
+      <span class="icon ${canExpand ? 'icon-dir' : 'icon-file'}"></span>
+      <span class="tv-name">${esc(entry.label)}</span>
+      <span class="tv-path" title="${esc(pos)}">${esc(pos)}</span>
+      <span class="tv-tags">${entry.tags.map((tag) => tvChipHtml(tag, entry.key)).join('')}</span>
+    </div>
+    ${canExpand && open ? tvChildrenHtml(entry.path, 1) : ''}
+  </div>`;
+}
+
+function tagListHtml(entries, target) {
+  if (!entries.length) {
+    return '<div class="tv-empty">还没有任何手动标签。在目录行上点「+标签」加一个，再回到这里筛选。</div>';
+  }
+  const selection = tagViewSelection(target);
+  if (!selection.tags.length) {
+    return `<div class="tv-empty">从上面的标签里选一个或多个（${selection.mode === 'and' ? '同时包含' : '任一包含'}），这里会列出带这些标签的目录。</div>`;
+  }
+  const matched = matchTagEntries(entries, selection.tags, selection.mode);
+  if (!matched.length) {
+    return `<div class="tv-empty">没有${selection.mode === 'and' ? '同时' : ''}带「${esc(selection.tags.join('、'))}」的目录。</div>`;
+  }
+  const shown = matched.slice(0, TAG_VIEW_LIMIT);
+  const more = matched.length > shown.length
+    ? `<div class="tv-empty">还有 ${matched.length - shown.length} 个未显示，请缩小标签范围。</div>`
+    : '';
+  return `<div class="tv-summary">${matched.length} 个目录${selection.mode === 'and' ? '同时带全部选中标签' : '带任一选中标签'}${matched.length > shown.length ? `（只显示前 ${shown.length} 个）` : ''}</div>
+    ${shown.map((entry) => tvEntryHtml(entry)).join('')}${more}`;
+}
+
+function paintTagList() {
+  const list = document.getElementById('tvList');
+  if (!list) return;
+  const target = current();
+  if (!target || target.kind !== 'tags') return;
+  list.innerHTML = tagListHtml(tagEntries(tagViewSnapshot()), target);
+}
+
+function renderTagView(target) {
+  const data = tagViewSnapshot();
+  const entries = tagEntries(data);
+  const counts = tagCounts(entries);
+  const selection = tagViewSelection(target);
+  const chips = counts.map((item) => {
+    const active = selection.tags.includes(item.tag);
+    return `<button type="button" class="tv-cloud-chip${active ? ' active' : ''}" data-action="tags-pick" data-tag="${esc(item.tag)}">${esc(item.tag)} <span>${item.count}</span></button>`;
+  }).join('');
+  stage.classList.remove('list-mode');
+  stage.innerHTML = `<div class="stage-tools tv-tools">
+      <span class="tv-tools-label">标签</span>
+      <div class="tv-cloud">${chips || '<span class="tv-empty-inline">还没有标签</span>'}</div>
+      <div class="tv-actions">
+        <button type="button" class="tv-mini${selection.mode === 'or' ? ' active' : ''}" data-action="tags-mode" title="切换多标签匹配方式">${selection.mode === 'and' ? '同时包含' : '任一包含'}</button>
+        <button type="button" class="tv-mini" data-action="tags-clear"${selection.tags.length ? '' : ' disabled'}>清空</button>
+      </div>
+    </div>
+    <div class="stage-scroll"><div class="tv-list" id="tvList">${tagListHtml(entries, target)}</div></div>`;
+  sidebar.innerHTML = `<div class="side-title">标签视图</div>
+    <div class="side-empty">${entries.length ? `共 ${entries.length} 个带标签的目录` : '还没有带标签的目录'}</div>
+    ${counts.length ? '<div class="side-title side-sub">全部标签</div>' : ''}
+    ${counts.map((item) => `<div class="side-item${selection.tags.includes(item.tag) ? ' active' : ''}" data-action="tags-pick" data-tag="${esc(item.tag)}">${selection.tags.includes(item.tag) ? '· ' : ''}${esc(item.tag)} <span class="anno-count">${item.count}</span></div>`).join('')}`;
+}
+
+function toggleTagSelection(tag) {
+  const target = current();
+  if (!target || target.kind !== 'tags' || !tag) return;
+  const tags = tagViewSelection(target).tags.slice();
+  const index = tags.indexOf(tag);
+  if (index >= 0) tags.splice(index, 1);
+  else tags.push(tag);
+  target.tags = tags;
+  syncLocation(false);
+  render(current()).catch(showError);
+}
+
+function toggleTagMode() {
+  const target = current();
+  if (!target || target.kind !== 'tags') return;
+  target.mode = tagViewSelection(target).mode === 'or' ? 'and' : 'or';
+  syncLocation(false);
+  render(current()).catch(showError);
+}
+
+async function toggleTagExpand(path) {
+  if (!path) return;
+  const expand = tagExpandState.get(path) || { open: false, items: null, error: '', loading: false };
+  if (expand.open) {
+    expand.open = false;
+    tagExpandState.set(path, expand);
+    paintTagList();
+    return;
+  }
+  expand.open = true;
+  tagExpandState.set(path, expand);
+  if (!expand.items && !expand.loading) {
+    expand.loading = true;
+    paintTagList();
+    try {
+      const result = await api(`/api/list?path=${encodeURIComponent(path)}`);
+      expand.items = Array.isArray(result.items) ? result.items : [];
+      expand.error = '';
+    } catch (err) {
+      expand.items = [];
+      expand.error = `读取失败：${err?.message || err}`;
+    }
+    expand.loading = false;
+    tagExpandState.set(path, expand);
+  }
+  paintTagList();
+}
+
+function removeTagInView(key, tag) {
+  const store = getAnnotationStore();
+  if (!store || !key || !tag) return;
+  store.mutate((data) => removeTag(data, key, tag));
+  status(`已移除标签：${tag}`);
+  render(current()).catch(showError);
+}
+
+function describeKeyForTags(key) {
+  const entry = tagEntries(tagViewSnapshot()).find((item) => item.key === key);
+  if (!entry || entry.kind !== 'zip' || !entry.zipPath) return null;
+  return { kind: 'zip', zipPath: entry.zipPath, entry: entry.entry, label: entry.label };
 }
 
 async function renderDrives() {
@@ -1093,7 +1289,9 @@ async function renderDrives() {
     }).join('')}`
     : '';
   const hdSidebar = `<div class="side-title side-sub">数据组视图</div><div class="side-item" data-action="hd" data-path=""><span class="icon icon-dir"></span>主机磁盘（数据组）</div>`;
-  sidebar.innerHTML = `<div class="side-title">${esc(sidebarRoot)}</div>${localSidebar}${networkSidebar}${hdSidebar}`;
+  const taggedCount = tagEntries(getAnnotationStore()?.snapshot() || { tags: {}, paths: {} }).length;
+  const tagSidebar = `<div class="side-title side-sub">标签</div><div class="side-item" data-action="tags-view"><span class="icon icon-dir"></span>标签视图${taggedCount ? ` <span class="anno-count">${taggedCount}</span>` : ''}</div>`;
+  sidebar.innerHTML = `<div class="side-title">${esc(sidebarRoot)}</div>${localSidebar}${networkSidebar}${hdSidebar}${tagSidebar}`;
   // 卷身份晚到也不阻塞首屏：拿到之后直接补进对应卡片/侧栏，不重绘整页。
   void hostInfoPending.then((info) => {
     if (!info || current().kind !== 'drives') return;
@@ -1806,6 +2004,7 @@ async function render(target) {
   status('正在加载…');
   try {
     if (target.kind === 'drives') await renderDrives();
+    else if (target.kind === 'tags') renderTagView(target);
     else if (target.kind === 'hd') await renderHostDisks(target);
     else if (target.kind === 'dir') await renderDir(target.path);
     else if (target.kind === 'zip') renderZip(target);
@@ -2006,6 +2205,50 @@ document.addEventListener('click', async (event) => {
   }
   if (action === 'row-tag-remove') {
     removeRowTag(element.dataset.path, element.dataset.tag);
+    return;
+  }
+  if (action === 'tags-view') {
+    navigate({ kind: 'tags', tags: [], mode: 'and' });
+    return;
+  }
+  if (action === 'tags-pick') {
+    toggleTagSelection(element.dataset.tag || '');
+    return;
+  }
+  if (action === 'tags-mode') {
+    toggleTagMode();
+    return;
+  }
+  if (action === 'tags-clear') {
+    const tagTarget = current();
+    if (tagTarget?.kind === 'tags') {
+      tagTarget.tags = [];
+      syncLocation(false);
+      render(current()).catch(showError);
+    }
+    return;
+  }
+  if (action === 'tags-remove') {
+    removeTagInView(element.dataset.key || '', element.dataset.tag || '');
+    return;
+  }
+  if (action === 'tags-expand') {
+    await toggleTagExpand(element.dataset.path || '');
+    return;
+  }
+  if (action === 'tags-file') {
+    const filePath = element.dataset.path || '';
+    await previewFile(filePath, element.dataset.name || winBasename(filePath), winDirname(filePath));
+    return;
+  }
+  if (action === 'tags-open-zip') {
+    const key = element.dataset.key || '';
+    const desc = describeKeyForTags(key);
+    if (!desc) {
+      status('这个标签条目缺少路径信息，无法打开压缩包', true);
+      return;
+    }
+    await openZipBookmark(desc);
     return;
   }
   // 行内勾选/删除控件优先处理，否则 closest 会落到带 data-action 的行上触发导航
@@ -2267,6 +2510,7 @@ selectionStore.init()
 
 initAnnotations({
   navigate, openZipBookmark, status,
+  openTagView: () => navigate({ kind: 'tags', tags: [], mode: 'and' }),
   // 收藏（含多标签页同步过来的变更）一变，就把 v2 清单重导一次。
   onMutate: () => {
     dirTagAnnoData = null; // 行上自定义标签的缓存跟着失效，下次渲染/刷新重取

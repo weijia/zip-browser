@@ -34,6 +34,13 @@ export function decodeLocation(hash) {
 
 export function compactTarget(target) {
   if (!target || target.kind === 'drives') return { k: 'drives' };
+  if (target.kind === 'tags') {
+    return {
+      k: 'tags',
+      s: Array.isArray(target.tags) ? target.tags.slice(0, 24) : [],
+      m: target.mode === 'or' ? 'or' : 'and',
+    };
+  }
   if (target.kind === 'hd') return { k: 'hd', p: target.path || '' };
   if (target.kind === 'dir') return { k: 'dir', p: target.path };
   if (target.kind === 'preview') {
@@ -79,6 +86,13 @@ export function winDirname(abs) {
 // 从 URL 快照重建本地目录 / 预览目标；zip 需要额外的服务端会话，由调用方处理。
 export function localTargetFromCompact(snap) {
   if (!snap) return { kind: 'drives' };
+  if (snap.k === 'tags') {
+    return {
+      kind: 'tags',
+      tags: Array.isArray(snap.s) ? snap.s.filter((tag) => typeof tag === 'string' && tag.trim()).slice(0, 24) : [],
+      mode: snap.m === 'or' ? 'or' : 'and',
+    };
+  }
   if (snap.k === 'hd') return { kind: 'hd', path: snap.p || '' };
   if (snap.k === 'dir' && typeof snap.p === 'string' && snap.p) {
     return { kind: 'dir', path: snap.p };

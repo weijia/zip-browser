@@ -322,7 +322,11 @@ export function initAnnotations(options) {
   });
 
   $('bookmarksBtn').addEventListener('click', () => openPanel('bookmarks'));
-  $('tagsBtn').addEventListener('click', () => openPanel('tags'));
+  // 顶部「标签」直达标签视图；没有接入视图的实现时退回旧面板。
+  $('tagsBtn').addEventListener('click', () => {
+    if (hooks && typeof hooks.openTagView === 'function') hooks.openTagView();
+    else openPanel('tags');
+  });
   $('annoBackdrop').addEventListener('click', closePanel);
   document.addEventListener('click', onDocumentClick);
   document.addEventListener('keydown', onKeyDown);
