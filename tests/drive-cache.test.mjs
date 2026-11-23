@@ -188,7 +188,58 @@ test('updateEntry：拒绝非法目录名与不存在的登记', async () => {
   }
 });
 
-test('drive-cache-store：setEntries 写入镜像并触发 onChange，可禁用 repo', async () => {
+test('drive-registry-store：本地镜像不覆盖数据组清单，只逐条 upsert', async () => {
+  const storeMod = await import('../web/drive-cache-store.js');
+  const files = new Map();
+  files.set('/drive-cache.json', JSON.stringify({
+    v: 1,
+    updatedAt: 111,
+    entries: [
+      { dir: 'WebDav-1', seq: 1, backend: 'WebDav', label: '旧名' },
+      { dir: 'S3-2', seq: 2, backend: 'S3', label: '冷备' },
+      { dir: 'S3-3', seq: 3, backend: 'S3', label: '归档' },
+    ],
+  }));
+  const fsApi = {
+    readFile: async (p) => {
+      if (!files.has(p)) { const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err; }
+      return files.get(p);
+    },
+    writeFile: async (p, text) => { files.set(p, text); },
+  };
+  const map = new Map([
+    // 本机镜像里只有一条（旧名 STORAGE_KEY，验证兼容读）
+    [storeMod.LEGACY_STORAGE_KEY, JSON.stringify({ v: 1, updatedAt: 222, entries: [{ dir: 'S3-3', seq: 3, backend: 'S3', label: '本机镜像' }] })],
+  ]);
+  const storage = {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => map.set(k, v),
+    removeItem: (k) => map.delete(k),
+  };
+  let flushed = 0;
+  const store = storeMod.createDriveRegistryStore({
+    storage, readFs: () => fsApi, flush: async () => { flushed += 1; }, onChange: () => {},
+  });
+  const init = await store.init();
+  assert.equal(init.backend, 'data-group');
+  assert.equal(init.remote.path, storeMod.LEGACY_REGISTRY_PATH, '旧文件名可读');
+  assert.equal(store.snapshot().entries.length, 3, '远端清单不被本机空/旧镜像覆盖');
+  assert.equal(files.has(storeMod.REGISTRY_PATH), false, 'init 不写远端');
+
+  const up = await store.upsert([{ dir: 'S3-4', seq: 4, backend: 'S3', label: '新登记' }]);
+  assert.equal(up.ok, true);
+  assert.equal(flushed, 1);
+  const written = JSON.parse(files.get(storeMod.REGISTRY_PATH));
+  assert.deepEqual(written.entries.map((e) => e.dir), ['S3-2', 'S3-3', 'S3-4', 'WebDav-1']);
+  assert.equal(files.has(storeMod.LEGACY_REGISTRY_PATH), true, '旧文件保留不删');
+
+  const del = await store.remove('S3-2');
+  assert.equal(del.ok, true);
+  assert.deepEqual(JSON.parse(files.get(storeMod.REGISTRY_PATH)).entries.map((e) => e.dir), ['S3-3', 'S3-4', 'WebDav-1']);
+  assert.equal(JSON.parse(map.get(storeMod.STORAGE_KEY)).entries.length, 3, '本地镜像跟随更新');
+});
+
+test('drive-registry-store：同步组未连接时明确失败，不谎报已同步', async () => {
   const storeMod = await import('../web/drive-cache-store.js');
   const map = new Map();
   const storage = {
@@ -196,73 +247,43 @@ test('drive-cache-store：setEntries 写入镜像并触发 onChange，可禁用 
     setItem: (k, v) => map.set(k, v),
     removeItem: (k) => map.delete(k),
   };
-  let notified = 0;
-  const store = storeMod.createDriveCacheStore({
-    storage, repoFactory: null, onChange: () => { notified += 1; },
-  });
+  const store = storeMod.createDriveRegistryStore({ storage, readFs: () => null, flush: async () => {} });
   await store.init();
   assert.equal(store.backend, 'local');
-  const entries = [{ dir: 'S3-1', seq: 1, backend: 'S3', total: '5TB' }];
-  store.setEntries(entries);
-  assert.equal(notified, 1);
-  assert.equal(store.snapshot().entries.length, 1);
-  assert.equal(store.snapshot().entries[0].total, '5TB');
-  const mirrored = JSON.parse(map.get(storeMod.STORAGE_KEY));
-  assert.equal(mirrored.entries[0].dir, 'S3-1');
+  const result = await store.upsert([{ dir: 'S3-1', seq: 1, backend: 'S3' }]);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /同步组未连接/);
+  assert.equal(result.data.entries.length, 1, '仍保留在本机镜像');
 });
 
-test('config-repo：一次 connect 的 repo 延迟注入后被三个 store 共享', async () => {
-  const repoBus = await import('../web/config-repo.js');
+test('mergeEntries：按 dir 合并，overlay 覆盖同名，base 多出的保留', async () => {
   const storeMod = await import('../web/drive-cache-store.js');
-  const annMod = await import('../web/annotations-store.js');
-  const selMod = await import('../web/manifest-selection.js');
+  const merged = storeMod.mergeEntries(
+    [{ dir: 'S3-1', seq: 1, backend: 'S3', label: '远端名' }, { dir: 'S3-2', seq: 2, backend: 'S3', hasInfo: false }],
+    [{ dir: 'S3-1', seq: 1, backend: 'S3', label: '本机名' }, { dir: 'WebDav-1', seq: 1, backend: 'WebDav' }],
+  );
+  assert.equal(merged.length, 3);
+  assert.equal(merged.find((e) => e.dir === 'S3-1').label, '本机名');
+  assert.equal(merged.find((e) => e.dir === 'S3-2').hasInfo, false);
+});
 
-  function memStore() {
-    const map = new Map();
-    return {
-      getItem: (k) => (map.has(k) ? map.get(k) : null),
-      setItem: (k, v) => map.set(k, v),
-      removeItem: (k) => map.delete(k),
-    };
-  }
-
-  // 三个 store 都在 connect 之前 init：此时公告板为空，应落到本地镜像。
-  const dcStore = storeMod.createDriveCacheStore({ storage: memStore(), repoFactory: undefined });
-  const annStore = annMod.createAnnotationStore({ storage: memStore(), repoFactory: undefined });
-  const selStore = selMod.createSelectionStore({ storage: memStore(), repoFactory: undefined });
-  assert.equal((await dcStore.init()).backend, 'local');
-  await annStore.init();
-  await selStore.init();
-  assert.equal(dcStore.backend, 'local');
-  assert.equal(annStore.backend, 'local');
-  assert.equal(selStore.backend, 'local');
-
-  // 模拟 manifest-sync 那一次 connect 发布 repo。
-  const future = Date.now() + 60000;
-  const repoData = {
-    '/drive-cache': { v: 1, updatedAt: future, entries: [{ dir: 'WebDav-1', seq: 1, backend: 'WebDav', label: '共享盘' }] },
-    '/annotations': { v: 1, updatedAt: future, tags: { 'C:\\Docs': ['资料'] }, paths: {}, bookmarks: [] },
-  };
-  const fakeRepo = {
-    getConfig: (key) => repoData[key] ?? null,
-    setConfig: () => {},
-    flush: async () => {},
-  };
-  repoBus.publishConfigRepo(fakeRepo);
-
-  // 三处同时拿到同一个 repo（backend 变 zenfs），且较重的数据被读入。
-  assert.equal(dcStore.backend, 'zenfs');
-  assert.equal(annStore.backend, 'zenfs');
-  assert.equal(selStore.backend, 'zenfs');
-  assert.equal(dcStore.snapshot().entries[0].label, '共享盘');
-  assert.deepEqual(annMod.listTags(annStore.snapshot(), 'C:\\Docs'), ['资料']);
-
-  // 断开连接：退回本地镜像，但已读入的内存数据不被清空。
-  repoBus.publishConfigRepo(null);
-  assert.equal(dcStore.backend, 'local');
-  assert.equal(annStore.backend, 'local');
-  assert.equal(selStore.backend, 'local');
-  assert.equal(dcStore.snapshot().entries[0].label, '共享盘');
+test('makeCopyPayload：照搬字段并给副本改名', async () => {
+  const storeMod = await import('../web/drive-cache-store.js');
+  const payload = storeMod.makeCopyPayload({
+    dir: 'WebDav-1', seq: 1, backend: 'WebDav', label: '我的网盘',
+    total: '2TB', free: '800GB', upQuota: '1TB', downQuota: '2TB',
+    upRemaining: '300GB', downRemaining: '1TB',
+    updatedAt: 123, hasInfo: true,
+  });
+  assert.deepEqual(payload, {
+    backend: 'WebDav', label: '我的网盘 副本',
+    total: '2TB', free: '800GB', upQuota: '1TB', downQuota: '2TB',
+    upRemaining: '300GB', downRemaining: '1TB',
+  });
+  const blank = storeMod.makeCopyPayload({ backend: 'S3', label: '', total: null });
+  assert.equal(blank.label, 'S3 副本');
+  assert.equal(blank.free, null);
+  assert.equal(blank.upRemaining, null);
 });
 
 test('importEntries：按 dir 原样落地，不重算序号，已存在跳过，沿用清单时间戳', async () => {
@@ -304,9 +325,9 @@ test('importEntries：拒绝非法目录名/后端不一致', async () => {
   const root = await tempRoot();
   try {
     const r = await dc.importEntries(root, [
-      { dir: '../Local-1', seq: 1, backend: 'Local' },       // 路径穿越
-      { dir: 'Local-2', seq: 2, backend: 'SMB' },             // 后端与目录名不符
-      { dir: 'bad name!-1', seq: 1, backend: 'bad name!' },   // 目录名/后端含非法字符
+      { dir: '../Local-1', seq: 1, backend: 'Local' },
+      { dir: 'Local-2', seq: 2, backend: 'SMB' },
+      { dir: 'bad name!-1', seq: 1, backend: 'bad name!' },
     ]);
     assert.equal(r.imported, 0);
     assert.equal(r.invalid, 3);
@@ -317,21 +338,47 @@ test('importEntries：拒绝非法目录名/后端不一致', async () => {
   }
 });
 
-test('makeCopyPayload：照搬字段并给副本改名', async () => {
-  const storeMod = await import('../web/drive-cache-store.js');
-  const payload = storeMod.makeCopyPayload({
-    dir: 'WebDav-1', seq: 1, backend: 'WebDav', label: '我的网盘',
-    total: '2TB', free: '800GB', upQuota: '1TB', downQuota: '2TB',
-    upRemaining: '300GB', downRemaining: '1TB',
-    updatedAt: 123, hasInfo: true,
-  });
-  assert.deepEqual(payload, {
-    backend: 'WebDav', label: '我的网盘 副本',
-    total: '2TB', free: '800GB', upQuota: '1TB', downQuota: '2TB',
-    upRemaining: '300GB', downRemaining: '1TB',
-  });
-  const blank = storeMod.makeCopyPayload({ backend: 'S3', label: '', total: null });
-  assert.equal(blank.label, 'S3 副本');
-  assert.equal(blank.free, null);
-  assert.equal(blank.upRemaining, null);
+test('config-repo：一次 connect 的 repo 延迟注入后被标注/选择集 store 共享', async () => {
+  const repoBus = await import('../web/config-repo.js');
+  const annMod = await import('../web/annotations-store.js');
+  const selMod = await import('../web/manifest-selection.js');
+
+  function memStore() {
+    const map = new Map();
+    return {
+      getItem: (k) => (map.has(k) ? map.get(k) : null),
+      setItem: (k, v) => map.set(k, v),
+      removeItem: (k) => map.delete(k),
+    };
+  }
+
+  // 两个 store 都在 connect 之前 init：此时公告板为空，应落到本地镜像。
+  const annStore = annMod.createAnnotationStore({ storage: memStore(), repoFactory: undefined });
+  const selStore = selMod.createSelectionStore({ storage: memStore(), repoFactory: undefined });
+  await annStore.init();
+  await selStore.init();
+  assert.equal(annStore.backend, 'local');
+  assert.equal(selStore.backend, 'local');
+
+  const future = Date.now() + 60000;
+  const repoData = {
+    '/annotations': { v: 1, updatedAt: future, tags: { 'C:\\Docs': ['资料'] }, paths: {}, bookmarks: [] },
+  };
+  const fakeRepo = {
+    getConfig: (key) => repoData[key] ?? null,
+    setConfig: () => {},
+    flush: async () => {},
+  };
+  repoBus.publishConfigRepo(fakeRepo);
+
+  assert.equal(annStore.backend, 'zenfs');
+  assert.equal(selStore.backend, 'zenfs');
+  assert.deepEqual(annMod.listTags(annStore.snapshot(), 'C:\\Docs'), ['资料']);
+
+  // 断开连接：退回本地镜像，但已读入的内存数据不被清空。
+  repoBus.publishConfigRepo(null);
+  assert.equal(annStore.backend, 'local');
+  assert.equal(selStore.backend, 'local');
 });
+
+

@@ -1,23 +1,30 @@
-// 网盘信息登记的 UI：顶部按钮 → 弹窗表单 → 服务端落盘 + zen-fs-config 同步。
-// 本机磁盘（服务端 /api/drive-cache/*）是权威来源；登记/删除后刷新列表并写 store。
-// 在 OpenList /zb 托管模式下这些本机 API 不存在，此时给出明确提示而不是静默失败。
+// 网盘信息登记的 UI：顶部按钮 → 弹窗表单 → 登记清单写进数据组（网络磁盘）。
+// 登记清单是数据组根下的 /drive-registry.json（跨机唯一来源）；
+// 本机 codes/cached/<后端>-<序号>/info.json 只是该条目在本机的落地副本，服务端 /api/drive-cache/* 读写它。
+// 不再读写 zen-fs-config 的配置组；数据组未连接时明确提示「只保存在本机」，不谎报已同步。
 
 import { OPENLIST_BACKENDS } from './drive-backends.js';
-import { createDriveCacheStore, makeCopyPayload, sanitizeData } from './drive-cache-store.js';
-import { getDataGroupFs } from './manifest-sync.js';
+import { createDriveRegistryStore, makeCopyPayload, mergeEntries, REGISTRY_PATH } from './drive-cache-store.js';
+import { getDataGroupFs, getActiveDataGroup } from './manifest-sync.js';
 
 const $ = (id) => document.getElementById(id);
 
-const store = createDriveCacheStore({
+const store = createDriveRegistryStore({
   onChange: () => refreshBadge(),
+  readFs: () => getDataGroupFs(),
+  flush: async () => {
+    const group = await getActiveDataGroup();
+    if (group && typeof group.flush === 'function') await group.flush();
+  },
 });
 
-const REMOTE_MANIFEST = '/drive-cache.json'; // app_data 数据组根下的同步清单
+const REMOTE_MANIFEST = REGISTRY_PATH; // 数据组根下的登记清单
 
 let apiFetch = null;
 let statusFn = null;
 let ready = false;
 let currentEntries = [];
+let currentCacheRoot = null;
 let editingDir = null;
 
 function esc(value) {
@@ -71,14 +78,15 @@ function renderList(info) {
   if (!box) return;
   const entries = Array.isArray(info?.entries) ? info.entries : [];
   currentEntries = entries;
+  if (info?.cacheRoot !== undefined) currentCacheRoot = info.cacheRoot || null;
   refreshBadge();
   const countEl = $('dcCount');
   if (countEl) countEl.textContent = String(entries.length);
   const rootEl = $('dcRoot');
   if (rootEl) {
     rootEl.textContent = info?.cacheRoot
-      ? `缓存目录：${info.cacheRoot}`
-      : '缓存目录：未知（当前宿主不提供本机缓存接口）';
+      ? `本机落地目录：${info.cacheRoot}（登记清单在数据组 ${REMOTE_MANIFEST}）`
+      : `本机落地目录：未知（当前宿主不提供本机接口）`;
   }
   if (!entries.length) {
     box.innerHTML = '<div class="dc-empty">还没有登记网盘，用上面的表单添加第一个。</div>';
@@ -109,7 +117,7 @@ function renderList(info) {
           <button type="button" class="dc-del dc-mini" data-del="${esc(item.dir)}" title="删除这条登记">删除</button>
         </span>
       </div>
-      <div class="dc-item-meta">${missing ? '<span class="dc-warn">info.json 缺失或损坏</span>' : meta}</div>
+      <div class="dc-item-meta">${missing ? '<span class="dc-warn">数据组有登记，本机未落地（点「从同步清单导入」）</span>' : meta}</div>
     </div>`;
   }).join('');
   box.innerHTML = rows;
@@ -117,52 +125,73 @@ function renderList(info) {
 
 async function loadList({ quiet = false } = {}) {
   if (!apiFetch) return;
-  if (!quiet) setSync('正在读取本机缓存目录…');
+  if (!quiet) setSync('正在读取登记清单…');
+  const remote = await store.readRemote();
+  const remoteEntries = remote.doc?.entries || [];
+  let info = null;
   try {
-    const info = await apiFetch('/api/drive-cache/info');
-    renderList(info);
-    if (editingDir && !(info.entries || []).some((e) => e.dir === editingDir)) exitEditMode();
-    store.setEntries(info.entries || []);
-    setSync(`已读取 ${info.entries?.length || 0} 条登记 · 已同步到 zen-fs-config`, true);
+    info = await apiFetch('/api/drive-cache/info');
   } catch (err) {
-    currentEntries = store.snapshot().entries || [];
-    refreshBadge();
-    renderList({ entries: currentEntries, cacheRoot: null });
+    // 服务端不可用（OpenList /zb 模式）：只展示数据组里的登记清单，标注「本机未落地」。
     const msg = (err && err.status === 404)
-      ? '当前宿主不提供本机缓存接口（可能运行在 OpenList /zb 模式），无法读写 codes/cached'
-      : `读取失败：${err?.message || err}`;
+      ? '当前宿主不提供本机接口（可能运行在 OpenList /zb 模式），只能读数据组清单，无法登记'
+      : `读取本机落地副本失败：${err?.message || err}`;
+    store.adoptDoc({ v: 1, updatedAt: remote.doc?.updatedAt || 0, entries: remoteEntries });
+    renderList({ entries: remoteEntries, cacheRoot: null });
     setSync(msg, false);
     if (statusFn && !quiet) statusFn(`${msg}；网盘信息登记不可用`, true);
+    return;
+  }
+  const localEntries = Array.isArray(info.entries) ? info.entries : [];
+  const merged = mergeEntries(remoteEntries, localEntries);
+  store.adoptDoc({ v: 1, updatedAt: remote.doc?.updatedAt || 0, entries: merged });
+  renderList({ entries: merged, cacheRoot: info.cacheRoot });
+  if (editingDir && !merged.some((e) => e.dir === editingDir)) exitEditMode();
+
+  // 本机有、数据组清单里没有的条目（新登记或以前没写成功）补写到数据组；
+  // 只做逐条 upsert，绝不用本机列表整体覆盖远端。
+  const pending = localEntries.filter((e) => !remoteEntries.some((r) => r.dir === e.dir));
+  let write = null;
+  if (!remote.doc || pending.length) {
+    write = await store.upsert(localEntries);
+  }
+  const count = merged.length;
+  if (write?.ok) {
+    setSync(`已读取 ${count} 条登记 · 已写入数据组 ${REMOTE_MANIFEST}`, true);
+  } else if (write && !write.ok) {
+    setSync(`已读取 ${count} 条登记 · 写入数据组失败：${write.error}`, false);
+  } else if (!remote.doc && remote.error === 'no-group') {
+    setSync(`已读取 ${count} 条登记 · 同步组未连接，只保存在本机 codes/cached`, false);
+  } else {
+    setSync(`已读取 ${count} 条登记（数据组 ${REMOTE_MANIFEST}）`, true);
   }
 }
 
 /**
- * 从 configurator 已同步到本机的 dataGroup 读 drive-cache.json（本地 fs 读，不碰 RS）。
+ * 读数据组里的登记清单（本地 fs 读，不碰 RS）。
  * 返回 sanitize 后的清单；未连接同步组或清单不存在时返回 null 并给出状态提示。
  */
 async function readRemoteManifest() {
-  const fp = getDataGroupFs();
-  if (!fp) {
+  const remote = await store.readRemote();
+  if (remote.error === 'no-group') {
     setSync('同步组未连接：请先在「收藏同步」面板连接并等待清单同步完成', false);
     return null;
   }
-  let raw;
-  try {
-    raw = await fp.readFile(REMOTE_MANIFEST, 'utf8');
-  } catch {
+  if (remote.error === 'not-found') {
     setSync(`数据组里没有 ${REMOTE_MANIFEST}（远端尚未写入或尚未同步）`, false);
     return null;
   }
-  let doc;
-  try {
-    doc = JSON.parse(raw);
-  } catch {
-    setSync('同步清单不是合法 JSON', false);
+  if (remote.error === 'parse') {
+    setSync('登记清单不是合法 JSON', false);
     return null;
   }
-  const clean = sanitizeData(doc);
+  if (remote.error) {
+    setSync(`读取登记清单失败：${remote.error}`, false);
+    return null;
+  }
+  const clean = remote.doc;
   if (!clean || !clean.entries.length) {
-    setSync('同步清单为空或格式不符（需要 { v, updatedAt, entries[] }）', false);
+    setSync('登记清单为空或格式不符（需要 { v, updatedAt, entries[] }）', false);
     return null;
   }
   return clean;
@@ -217,7 +246,7 @@ async function onImportRemote() {
     const bad = result.invalid || 0;
     setSync(
       `导入完成：新增 ${result.imported || 0}、跳过 ${result.skipped || 0}`
-      + (bad ? `、非法 ${bad}` : '') + ' · 已同步到 zen-fs-config',
+      + (bad ? `、非法 ${bad}` : '') + ` · 数据组 ${REMOTE_MANIFEST}`,
       bad === 0,
     );
     if (statusFn) statusFn(`从同步清单导入 ${result.imported || 0} 个网盘`, false);
@@ -244,6 +273,10 @@ function resetForm() {
 function enterEditMode(entry) {
   if (!entry?.dir || !entry?.backend) {
     setSync('编辑失败：找不到原登记的后端类型', false);
+    return;
+  }
+  if (entry.hasInfo === false) {
+    setSync(`「${entry.dir}」只在数据组登记清单里，本机还没有落地副本；先点「从同步清单导入」`, false);
     return;
   }
   editingDir = entry.dir;
@@ -333,18 +366,23 @@ async function onSave(event) {
   const body = isEdit ? { ...payload, dir: editingDir } : payload;
   const saveBtn = $('dcSave');
   if (saveBtn) saveBtn.disabled = true;
-  setSync(isEdit ? '正在保存修改…' : '正在写入本机缓存目录…');
+  setSync(isEdit ? '正在保存修改…' : '正在写入本机落地副本…');
   try {
     const result = await apiFetch(endpoint, {
       method: 'POST',
       body: JSON.stringify(body),
     });
-    const info = await apiFetch('/api/drive-cache/info');
-    renderList(info);
-    store.setEntries(info.entries || []);
-    await store.flush();
+    const entry = { ...(result.entry || {}), hasInfo: true };
+    const write = await store.upsert([entry]);
+    renderList({ entries: store.snapshot().entries, cacheRoot: currentCacheRoot });
     notifyDiskList();
-    setSync(`已${isEdit ? '更新' : '登记'} ${result.entry?.dir || '本机'} · 已同步到 zen-fs-config`, true);
+    const dir = result.entry?.dir || '本机';
+    setSync(
+      write.ok
+        ? `已${isEdit ? '更新' : '登记'} ${dir} · 已写入数据组 ${REMOTE_MANIFEST}`
+        : `已${isEdit ? '更新' : '登记'} ${dir} · 数据组写入失败：${write.error}`,
+      write.ok,
+    );
     exitEditMode();
     if (statusFn) statusFn(`已${isEdit ? '更新' : '登记'}网盘：${backend}`, false);
   } catch (err) {
@@ -369,12 +407,16 @@ async function copyEntry(dir) {
       method: 'POST',
       body: JSON.stringify(payload),
     });
-    const info = await apiFetch('/api/drive-cache/info');
-    renderList(info);
-    store.setEntries(info.entries || []);
-    await store.flush();
+    const entry = { ...(result.entry || {}), hasInfo: true };
+    const write = await store.upsert([entry]);
+    renderList({ entries: store.snapshot().entries, cacheRoot: currentCacheRoot });
     notifyDiskList();
-    setSync(`已复制为 ${result.entry?.dir || '新登记'} · 已同步到 zen-fs-config`, true);
+    setSync(
+      write.ok
+        ? `已复制为 ${result.entry?.dir || '新登记'} · 已写入数据组 ${REMOTE_MANIFEST}`
+        : `已复制为 ${result.entry?.dir || '新登记'} · 数据组写入失败：${write.error}`,
+      write.ok,
+    );
     if (statusFn) statusFn(`已复制网盘：${result.entry?.dir || ''}`, false);
   } catch (err) {
     setSync(`复制失败：${err?.message || err}`, false);
@@ -398,20 +440,23 @@ async function onListClick(event) {
   if (!del) return;
   const dir = del.getAttribute('data-del');
   if (!dir || !apiFetch) return;
-  if (!window.confirm(`删除网盘登记「${dir}」？这会移除本机缓存目录下的 info.json，并同步删除 zen-fs-config 中的对应记录。`)) return;
+  if (!window.confirm(`删除网盘登记「${dir}」？这会移除本机 codes/cached 下的 info.json，并从数据组 ${REMOTE_MANIFEST} 里删除这条记录。`)) return;
   setSync('正在删除…');
   try {
     await apiFetch('/api/drive-cache/delete', {
       method: 'POST',
       body: JSON.stringify({ dir }),
     });
-    const info = await apiFetch('/api/drive-cache/info');
-    renderList(info);
-    store.setEntries(info.entries || []);
-    await store.flush();
+    const write = await store.remove(dir);
+    renderList({ entries: store.snapshot().entries, cacheRoot: currentCacheRoot });
     notifyDiskList();
     if (editingDir === dir) exitEditMode();
-    setSync('已删除并同步到 zen-fs-config', true);
+    setSync(
+      write.ok
+        ? `已删除 ${dir} · 已从数据组 ${REMOTE_MANIFEST} 移除`
+        : `已删除本机副本 ${dir} · 数据组写入失败：${write.error}`,
+      write.ok,
+    );
   } catch (err) {
     setSync(`删除失败：${err?.message || err}`, false);
   }

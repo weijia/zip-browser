@@ -1,20 +1,22 @@
-// 网盘信息登记的数据层：本机磁盘（由服务端 API 落盘）是权威来源，
-// zen-fs-config 的 /drive-cache 配置是同步副本，localStorage 是同步失败时的兜底镜像。
+// 网盘信息登记的数据层：登记清单是「数据组（网络磁盘）上的一个文件」，
+// 不是配置组配置，也不是本机缓存。
 //
-// 数据流：用户登记 → 服务端写 codes/cached/<后端>-<序号>/info.json →
-// 前端拿到最新条目列表 → 写 zen-fs-config + localStorage → 其他设备可见。
-// 这里不缓存网盘文件内容，也不与配置同步组的数据组发生关系。
+// 权威来源：数据组根下 `/drive-registry.json`（跨机可见，和 host-disks.v2.json 同一条链路）。
+// 本机 `codes/cached/<后端>-<序号>/info.json` 只是该条目在本机的落地副本（服务端 API 读写），
+// localStorage 只是 UI 加速的镜像，两者都不参与跨机判断。
 //
-// repo 来源：不再自己 createConfigRepo('zip-browser')（那是没有 replica 的孤岛）。
-// 改为订阅 config-repo 公告板——全应用只 connect 一次（manifest-sync 的
-// configurator），拿到的 repo（appId=dir-struct-gen）由 store 共享。
-// 显式传 repoFactory（含 null）时仍按调用方控制，供单测使用。
+// 旧名兼容：数据组根下历史文件 `/drive-cache.json` 只读一次，读到就迁到新文件名；
+// 旧的配置组配置 `/dir-struct-gen/drive-cache.json` 不再读写（用户要求只用数据组）。
+//
+// 写入规则：
+//   - init 阶段绝不写远端（避免「本地空镜像覆盖远端登记」）；
+//   - 合并按 dir 逐条进行，不整表覆盖；
+//   - 写完再 flush，并返回真实结果供 UI 显示。
 
-import { getConfigRepo, onConfigRepo } from './config-repo.js';
-
-export const STORAGE_KEY = 'zip-browser:drive-cache:v1';
-export const CONFIG_KEY = '/drive-cache';
-export const APP_ID = 'dir-struct-gen';
+export const STORAGE_KEY = 'zip-browser:drive-registry:v1';
+export const LEGACY_STORAGE_KEY = 'zip-browser:drive-cache:v1';
+export const REGISTRY_PATH = '/drive-registry.json';
+export const LEGACY_REGISTRY_PATH = '/drive-cache.json';
 
 function memoryStorage() {
   const map = new Map();
@@ -62,6 +64,22 @@ export function sanitizeData(raw) {
   return { v: 1, updatedAt: Number(raw.updatedAt) || 0, entries };
 }
 
+/** 按 dir 合并：overlay 覆盖 base 的同名条目，base 里多出来的保留。 */
+export function mergeEntries(base, overlay) {
+  const byDir = new Map();
+  for (const entry of (Array.isArray(base) ? base : [])) {
+    const clean = cleanEntry(entry);
+    if (clean) byDir.set(clean.dir, clean);
+  }
+  for (const entry of (Array.isArray(overlay) ? overlay : [])) {
+    const clean = cleanEntry(entry);
+    if (clean) byDir.set(clean.dir, clean);
+  }
+  return [...byDir.values()].sort((a, b) => (
+    a.backend === b.backend ? a.seq - b.seq : a.backend.localeCompare(b.backend)
+  ));
+}
+
 /** 以已有登记为模板生成新登记的提交内容：字段照搬，名称加「副本」以便区分。 */
 export function makeCopyPayload(entry) {
   const raw = entry && typeof entry === 'object' ? entry : {};
@@ -79,32 +97,32 @@ export function makeCopyPayload(entry) {
   };
 }
 
+function isMissingError(err) {
+  const code = err?.code || err?.name || '';
+  return code === 'ENOENT' || code === 'NotFoundError' || /not found|ENOENT/i.test(String(err?.message || ''));
+}
+
 /**
- * 创建网盘信息仓库。repoFactory 传 null 可禁用 zen-fs-config（单测用）。
- * onChange(data) 在每次本地修改后触发。
+ * 创建网盘登记仓库。
+ *
+ * @param {object} options
+ * @param {Storage} [options.storage]  localStorage 兼容对象（单测注入）
+ * @param {() => object|null} [options.readFs] 返回数据组 fs（带 promises 的 writeFile/readFile）
+ * @param {() => Promise<any>} [options.flush] 写完后触发数据组 flush
+ * @param {(data) => void} [options.onChange]
  */
-export function createDriveCacheStore({ storage, repoFactory, onChange } = {}) {
+export function createDriveRegistryStore({ storage, readFs, flush, onChange } = {}) {
   const globals = typeof window !== 'undefined' ? window : globalThis;
   const local = storage || globals.localStorage || memoryStorage();
-  // 显式传 repoFactory 时按调用方（单测）控制；否则订阅共享的 connect repo。
-  const useShared = repoFactory === undefined;
-  const factory = useShared ? null : repoFactory;
 
-  let repo = null;
-  let backend = 'local';
   let data = emptyData();
+  let lastRemote = null; // { doc, path } | null
+  let backend = 'local';
 
   function readLocal() {
     try {
-      return sanitizeData(JSON.parse(local.getItem(STORAGE_KEY) || 'null'));
-    } catch {
-      return null;
-    }
-  }
-
-  function readRepo() {
-    try {
-      return sanitizeData(repo?.getConfig?.(CONFIG_KEY));
+      const raw = local.getItem(STORAGE_KEY) || local.getItem(LEGACY_STORAGE_KEY) || 'null';
+      return sanitizeData(JSON.parse(raw));
     } catch {
       return null;
     }
@@ -116,91 +134,120 @@ export function createDriveCacheStore({ storage, repoFactory, onChange } = {}) {
     } catch { /* 隐私模式：仍有内存态可用 */ }
   }
 
-  function writeRepo(next) {
-    if (!repo || typeof repo.setConfig !== 'function') return;
-    try {
-      repo.setConfig(CONFIG_KEY, next);
-    } catch { /* 降级由 localStorage 兜底 */ }
-  }
-
   function snapshot() {
     return JSON.parse(JSON.stringify(data));
   }
 
   function adopt(next) {
-    data = next || emptyData();
+    data = sanitizeData(next) || emptyData();
     writeLocal(data);
     return snapshot();
   }
 
-  /** 合并 repo 与本地镜像（取 updatedAt 较新者），并把较新一侧补写到另一侧。 */
-  function mergeFromRepo(notify = false) {
-    const fromRepo = readRepo();
-    const fromLocal = readLocal();
-    let chosen = fromRepo && fromLocal
-      ? (fromRepo.updatedAt >= fromLocal.updatedAt ? fromRepo : fromLocal)
-      : (fromRepo || fromLocal);
-    if (!chosen) chosen = { ...emptyData(), updatedAt: Date.now() };
-    const changed = chosen.updatedAt !== data.updatedAt;
-    adopt(chosen);
-    if (readRepo()?.updatedAt !== data.updatedAt) writeRepo(data);
-    if (changed && notify && onChange) onChange(snapshot());
-    return snapshot();
-  }
-
-  /** 收到 connect 的 repo（或断开时的 null）：重合并并通知 UI。 */
-  function attachRepo(next) {
-    repo = next || null;
-    backend = repo ? 'zenfs' : 'local';
-    mergeFromRepo(true);
-  }
-
-  async function init() {
-    if (useShared) {
-      // connected 事件晚于 init；先根据当前快照初始化本地，订阅会在 repo 到达时回调。
-      repo = getConfigRepo();
-      backend = repo ? 'zenfs' : 'local';
-      onConfigRepo(attachRepo);
-    } else if (factory) {
+  /** 读数据组里的登记文件（新名优先，旧名兜底）。不写、不抛。 */
+  async function readRemote() {
+    const fp = typeof readFs === 'function' ? readFs() : null;
+    if (!fp || typeof fp.readFile !== 'function') {
+      lastRemote = null;
+      backend = 'local';
+      return { doc: null, path: null, error: 'no-group' };
+    }
+    for (const path of [REGISTRY_PATH, LEGACY_REGISTRY_PATH]) {
       try {
-        repo = await factory();
-        backend = 'zenfs';
-      } catch {
-        repo = null;
-        backend = 'local';
+        const raw = await fp.readFile(path, 'utf8');
+        const doc = sanitizeData(JSON.parse(raw));
+        if (!doc) return { doc: null, path, error: 'parse' };
+        lastRemote = { doc, path };
+        backend = 'data-group';
+        return { doc, path, error: null };
+      } catch (err) {
+        if (isMissingError(err)) continue;
+        backend = 'data-group';
+        return { doc: null, path, error: String(err?.message || err) };
       }
     }
-    const fromRepo = readRepo();
-    const fromLocal = readLocal();
-    // 取 updatedAt 较新的一侧作为初值：远端同步过来的登记优先于本地镜像。
-    let chosen = fromRepo && fromLocal
-      ? (fromRepo.updatedAt >= fromLocal.updatedAt ? fromRepo : fromLocal)
-      : (fromRepo || fromLocal);
-    if (!chosen) chosen = { ...emptyData(), updatedAt: Date.now() };
-    adopt(chosen);
-    if (readRepo()?.updatedAt !== data.updatedAt) writeRepo(data);
-    return { backend, data: snapshot() };
+    lastRemote = null;
+    backend = 'data-group';
+    return { doc: null, path: null, error: 'not-found' };
   }
 
-  /** 用服务端落盘后的权威条目列表覆盖本地状态并同步到 zen-fs-config。 */
-  function setEntries(entries) {
-    const cleaned = (Array.isArray(entries) ? entries : []).map(cleanEntry).filter(Boolean);
-    data = { v: 1, updatedAt: Date.now(), entries: cleaned };
+  /** 写数据组登记文件并 flush，返回 { ok, path, error }。 */
+  async function writeRemote(next) {
+    const fp = typeof readFs === 'function' ? readFs() : null;
+    if (!fp || typeof fp.writeFile !== 'function') {
+      return { ok: false, error: '同步组未连接，登记只保存在本机' };
+    }
+    const doc = sanitizeData(next) || emptyData();
+    const text = `${JSON.stringify(doc, null, 2)}\n`;
+    try {
+      await fp.writeFile(REGISTRY_PATH, text);
+    } catch (err) {
+      return { ok: false, error: String(err?.message || err) };
+    }
+    try {
+      if (typeof flush === 'function') await flush();
+    } catch (err) {
+      return { ok: false, path: REGISTRY_PATH, error: `已写入本地副本，同步失败：${err?.message || err}` };
+    }
+    lastRemote = { doc, path: REGISTRY_PATH };
+    backend = 'data-group';
+    return { ok: true, path: REGISTRY_PATH, error: null };
+  }
+
+  /** 启动：只读，不写远端；本地镜像用于首屏。 */
+  async function init() {
+    const fromLocal = readLocal();
+    if (fromLocal) adopt(fromLocal);
+    const remote = await readRemote();
+    if (remote.doc) adopt(remote.doc);
+    return { backend, data: snapshot(), remote };
+  }
+
+  /** 合并一组本机条目（服务端落盘结果）进当前登记清单，再写回数据组。 */
+  async function upsert(entries) {
+    const merged = mergeEntries(data.entries, entries);
+    data = { v: 1, updatedAt: Date.now(), entries: merged };
     writeLocal(data);
-    writeRepo(data);
+    const result = await writeRemote(data);
+    if (onChange) onChange(snapshot());
+    return { ...result, data: snapshot() };
+  }
+
+  /** 从登记清单里移除一条（删除登记），再写回数据组。 */
+  async function remove(dir) {
+    const key = String(dir || '');
+    if (!key) return { ok: false, error: '缺少登记目录名', data: snapshot() };
+    data = {
+      v: 1,
+      updatedAt: Date.now(),
+      entries: data.entries.filter((entry) => entry.dir !== key),
+    };
+    writeLocal(data);
+    const result = await writeRemote(data);
+    if (onChange) onChange(snapshot());
+    return { ...result, data: snapshot() };
+  }
+
+  /** 只更新内存/本地镜像（远端清单已读过时用），不写数据组。 */
+  function adoptRemote(entries) {
+    const merged = mergeEntries(data.entries, entries);
+    data = { v: 1, updatedAt: Date.now(), entries: merged };
+    writeLocal(data);
     if (onChange) onChange(snapshot());
     return snapshot();
   }
 
-  async function flush() {
-    if (repo && typeof repo.flush === 'function') {
-      try { await repo.flush(); } catch { /* 离线时忽略 */ }
-    }
+  /** 直接用一份文档替换内存/本地镜像（不写数据组）。 */
+  function adoptDoc(doc) {
+    adopt(doc);
+    if (onChange) onChange(snapshot());
+    return snapshot();
   }
 
   return {
-    init, setEntries, snapshot, flush,
+    init, upsert, remove, readRemote, writeRemote, adoptRemote, adoptDoc, snapshot,
     get backend() { return backend; },
     get data() { return data; },
+    get lastRemote() { return lastRemote; },
   };
 }
