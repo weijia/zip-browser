@@ -51,6 +51,8 @@ function cleanEntry(raw) {
     fileCount: text(raw.fileCount),
     totalSize: text(raw.totalSize),
     hasChildren: text(raw.hasChildren),
+    // 是否显示在「此电脑」磁盘列表；缺省显示，隐藏不影响登记本身。
+    visible: raw.visible !== false,
     updatedAt: Number(raw.updatedAt) || 0,
     hasInfo: raw.hasInfo !== false,
   };
@@ -96,7 +98,6 @@ export function makeCopyPayload(entry) {
     downRemaining: raw.downRemaining ?? null,
   };
 }
-
 function isMissingError(err) {
   const code = err?.code || err?.name || '';
   return code === 'ENOENT' || code === 'NotFoundError' || /not found|ENOENT/i.test(String(err?.message || ''));

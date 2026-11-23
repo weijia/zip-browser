@@ -134,10 +134,13 @@ async function handleApi(req, res, url) {
       cacheRoot = cache.cacheRoot;
       // 每条登记带上真正缓存内容目录（cached/<dir>/data）的绝对路径，
       // 前端据此把卡片做成可进入的目录；info.json 留在父目录，点进去看不到它。
-      networkDrives = await Promise.all(cache.entries.map(async (entry) => ({
-        ...entry,
-        path: await ensureDataDir(cache.cacheRoot, entry.dir),
-      })));
+      // visible=false 的登记只保留在「网盘信息登记」清单里，不进磁盘列表。
+      networkDrives = await Promise.all(cache.entries
+        .filter((entry) => entry.visible !== false)
+        .map(async (entry) => ({
+          ...entry,
+          path: await ensureDataDir(cache.cacheRoot, entry.dir),
+        })));
     } catch {
       // 忽略：codes/cached 不可读时仍返回本机磁盘。
     }

@@ -94,6 +94,7 @@ function renderList(info) {
   }
   const rows = entries.map((item) => {
     const missing = item.hasInfo === false;
+    const shown = item.visible !== false;
     const fields = [
       ['总容量', item.total],
       ['剩余', item.free],
@@ -106,8 +107,11 @@ function renderList(info) {
       ? fields.map(([key, value]) => `<span class="dc-chip">${esc(key)}: ${esc(value)}</span>`).join('')
       : '<span class="dc-chip dc-chip-empty">未填写容量信息</span>';
     const name = item.label || item.backend || item.dir;
-    return `<div class="dc-item" data-dir="${esc(item.dir)}">
+    return `<div class="dc-item${shown ? '' : ' dc-off'}" data-dir="${esc(item.dir)}">
       <div class="dc-item-head">
+        <label class="dc-visible" title="勾选后显示在「此电脑」磁盘列表；取消勾选只是隐藏入口，登记仍然保留">
+          <input type="checkbox" data-visible="${esc(item.dir)}"${shown ? ' checked' : ''}> 显示
+        </label>
         <span class="dc-item-name">${esc(name)}</span>
         <span class="dc-item-backend">${esc(item.backend || '?')}</span>
         <span class="dc-item-seq">#${esc(item.seq)}</span>
@@ -121,6 +125,35 @@ function renderList(info) {
     </div>`;
   }).join('');
   box.innerHTML = rows;
+}
+
+/**
+ * 把数据组清单里的显示开关同步到本机 info.json。
+ * /api/drives 只读本机 info.json 决定是否列出条目，所以别处（另一台机器）改过开关后，
+ * 本机要在加载清单时对齐，否则会出现「清单里隐藏了、此电脑里还在」。
+ * 只处理两边状态不同的条目；失败不阻塞列表，下次加载再对齐。
+ */
+async function alignLocalVisibility(merged, localEntries) {
+  if (!apiFetch) return 0;
+  let changed = 0;
+  const localByDir = new Map(localEntries.map((item) => [item.dir, item]));
+  for (const entry of merged) {
+    const local = localByDir.get(entry.dir);
+    if (!local || entry.hasInfo === false) continue;
+    const wantShown = entry.visible !== false;
+    if ((local.visible !== false) === wantShown) continue;
+    try {
+      await apiFetch('/api/drive-cache/update', {
+        method: 'POST',
+        body: JSON.stringify({ dir: entry.dir, visible: wantShown }),
+      });
+      local.visible = wantShown;
+      changed += 1;
+    } catch {
+      // 本机副本不可写：保留当前状态，下次加载再试
+    }
+  }
+  return changed;
 }
 
 async function loadList({ quiet = false } = {}) {
@@ -145,6 +178,8 @@ async function loadList({ quiet = false } = {}) {
   const localEntries = Array.isArray(info.entries) ? info.entries : [];
   const merged = mergeEntries(remoteEntries, localEntries);
   store.adoptDoc({ v: 1, updatedAt: remote.doc?.updatedAt || 0, entries: merged });
+  const aligned = await alignLocalVisibility(merged, localEntries);
+  if (aligned) notifyDiskList(); // 本机可见性和清单对齐过，磁盘列表要重绘
   renderList({ entries: merged, cacheRoot: info.cacheRoot });
   if (editingDir && !merged.some((e) => e.dir === editingDir)) exitEditMode();
 
@@ -423,6 +458,42 @@ async function copyEntry(dir) {
   }
 }
 
+async function toggleVisible(dir, visible) {
+  const entry = currentEntries.find((item) => item.dir === dir);
+  if (!entry) return;
+  setSync(visible ? `正在显示 ${dir}…` : `正在隐藏 ${dir}…`);
+  // 数据组清单是跨机事实源：先写清单；本机 info.json 供 /api/drives 决定是否列出，
+  // 因此能落地时也同步一份（本机未落地条目只写清单）。
+  const write = await store.upsert([{ ...entry, visible }]);
+  let localOk = null;
+  if (apiFetch && entry.hasInfo !== false) {
+    try {
+      await apiFetch('/api/drive-cache/update', {
+        method: 'POST',
+        body: JSON.stringify({ dir, visible }),
+      });
+      localOk = true;
+    } catch (err) {
+      localOk = err?.message || String(err);
+    }
+  } else if (entry.hasInfo === false) {
+    localOk = '本机未落地，只写了数据组清单';
+  }
+  renderList({ entries: store.snapshot().entries, cacheRoot: currentCacheRoot });
+  notifyDiskList();
+  const action = visible ? '显示' : '隐藏';
+  if (write.ok && localOk === true) {
+    setSync(`已${action} ${dir}（数据组 ${REMOTE_MANIFEST} + 本机 info.json）`, true);
+    if (statusFn) statusFn(`已${action}网盘入口：${dir}`, false);
+    return;
+  }
+  if (write.ok) {
+    setSync(`已${action} ${dir}（数据组 ${REMOTE_MANIFEST}；本机副本未同步：${localOk}）`, localOk === null ? null : false);
+    return;
+  }
+  setSync(`本机可能已${action} ${dir}，但写入数据组失败：${write.error}`, false);
+}
+
 async function onListClick(event) {
   const edit = event.target?.closest?.('[data-edit]');
   if (edit) {
@@ -475,6 +546,11 @@ export function initDriveCache({ api, status } = {}) {
   $('dcImport')?.addEventListener('click', () => void onImportRemote());
   $('dcForm')?.addEventListener('submit', (event) => { void onSave(event); });
   $('dcList')?.addEventListener('click', (event) => { void onListClick(event); });
+  $('dcList')?.addEventListener('change', (event) => {
+    const box = event.target?.closest?.('[data-visible]');
+    if (!box) return;
+    void toggleVisible(box.getAttribute('data-visible'), box.checked);
+  });
   $('driveCacheModal')?.addEventListener('click', (event) => {
     if (event.target?.id === 'driveCacheModal') closeModal();
   });

@@ -382,3 +382,41 @@ test('config-repo：一次 connect 的 repo 延迟注入后被标注/选择集 s
 });
 
 
+
+test('显示开关：默认显示，可只提交 visible，编辑其他字段不改变隐藏状态', async () => {
+  const root = await tempRoot();
+  try {
+    const saved = await dc.saveEntry(root, { backend: 'BaiduNetdisk', label: '甲', total: '1TB' });
+    assert.equal(saved.visible, true);
+
+    const hidden = await dc.updateEntry(root, saved.dir, { visible: false });
+    assert.equal(hidden.visible, false);
+    assert.equal(hidden.label, '甲', '只提交 visible 时其他字段应保留');
+    assert.equal(hidden.total, '1TB');
+
+    // 回归：编辑表单不带 visible 字段，应保持此前的隐藏状态，不被重置为显示。
+    const edited = await dc.updateEntry(root, saved.dir, { label: '乙' });
+    assert.equal(edited.visible, false);
+    assert.equal(edited.label, '乙');
+
+    const listed = await dc.listEntries(root);
+    assert.equal(listed[0].visible, false);
+
+    await dc.updateEntry(root, saved.dir, { visible: true });
+    const relisted = await dc.listEntries(root);
+    assert.equal(relisted[0].visible, true);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('显示开关：清单条目 cleanEntry 缺省为 true，合并时按 dir 覆盖', async () => {
+  const mod = await import('../web/drive-cache-store.js');
+  const merged = mod.mergeEntries(
+    [{ dir: 'A-1', backend: 'A', seq: 1, visible: true }, { dir: 'B-1', backend: 'B', seq: 1 }],
+    [{ dir: 'A-1', backend: 'A', seq: 1, visible: false }],
+  );
+  const byDir = Object.fromEntries(merged.map((entry) => [entry.dir, entry]));
+  assert.equal(byDir['A-1'].visible, false, 'overlay 的隐藏状态生效');
+  assert.equal(byDir['B-1'].visible, true, '缺省按显示处理');
+});

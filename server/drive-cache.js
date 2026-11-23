@@ -100,6 +100,8 @@ export function sanitizeInfo(raw = {}) {
     fileCount: text(raw.fileCount),
     totalSize: text(raw.totalSize),
     hasChildren: text(raw.hasChildren),
+    // 是否显示在「此电脑」磁盘列表：缺省为 true；取消勾选只是隐藏入口，登记本身保留。
+    visible: raw.visible !== false,
   };
 }
 
@@ -167,6 +169,8 @@ export async function listEntries(cacheRoot) {
       fileCount: typeof info?.fileCount === 'string' ? info.fileCount : null,
       totalSize: typeof info?.totalSize === 'string' ? info.totalSize : null,
       hasChildren: typeof info?.hasChildren === 'string' ? info.hasChildren : null,
+      // 没有 info.json 的占位记录也按「显示」处理，隐藏状态由前端/数据组清单决定。
+      visible: info?.visible !== false,
       updatedAt: Number(info?.updatedAt) || 0,
       hasInfo: Boolean(info),
     });
@@ -237,6 +241,7 @@ export async function saveEntry(cacheRoot, raw) {
     fileCount: info.fileCount,
     totalSize: info.totalSize,
     hasChildren: info.hasChildren,
+    visible: info.visible,
     updatedAt: Date.now(),
   };
   await writeInfoFile(target, doc);
@@ -254,7 +259,14 @@ export async function updateEntry(cacheRoot, dir, raw) {
   } catch {
     throw Object.assign(new Error('登记不存在'), { status: 404 });
   }
-  const info = sanitizeInfo({ ...(raw || {}), backend: parsed.backend });
+  // 允许只提交部分字段（例如只切显示开关）：先用已有 info.json 打底，再覆盖本次提交的字段。
+  let existing = null;
+  try {
+    existing = JSON.parse(await fs.readFile(path.join(target, INFO_FILE), 'utf8'));
+  } catch {
+    existing = null;
+  }
+  const info = sanitizeInfo({ ...(existing || {}), ...(raw || {}), backend: parsed.backend });
   const doc = {
     v: 1,
     backend: parsed.backend,
@@ -271,6 +283,7 @@ export async function updateEntry(cacheRoot, dir, raw) {
     fileCount: info.fileCount,
     totalSize: info.totalSize,
     hasChildren: info.hasChildren,
+    visible: info.visible,
     updatedAt: Date.now(),
   };
   await writeInfoFile(target, doc);
@@ -332,6 +345,7 @@ export async function importEntries(cacheRoot, rawEntries) {
       downQuota: info.downQuota,
       upRemaining: info.upRemaining,
       downRemaining: info.downRemaining,
+      visible: info.visible,
       // 沿用清单里的时间戳，便于两端对账；缺失时才用当前时间。
       updatedAt: Number(raw?.updatedAt) || Date.now(),
     };
