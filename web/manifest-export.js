@@ -12,7 +12,8 @@
 //     v2 的历史分片语义会让远端迅速堆积垃圾。文档明确「分片文件名不参与合并判定」，
 //     所以自定义基名是合法的；分片内容仍是标准 v2 结构。
 //     基名带主机名，多台机器写同一 volumeId 也不会互相覆盖。
-//   * tags 绝不回写 struct（文档硬性要求），只落在 file-tags；
+//   * 用户自定义标签绝不回写 struct（文档硬性要求），只落在 file-tags；
+//     自动标签（按目录直接子项名识别）按 dir-struct-gen 口径写进 struct 节点 tags。
 //     file-tags 的 key = 卷稳定身份 volumeId，回退 <host>::<盘符>。
 //   * 本工具只读本地磁盘，不写 .dir-struct-id；volumeId 由 /api/hostinfo 只读探测。
 
@@ -125,7 +126,7 @@ export function manifestPrefixFor(backends) {
 }
 
 /** 由一组 host-relative 目录路径搭出「仅文件夹」的 children 树。 */
-export function buildFolderTree(rels, now) {
+export function buildFolderTree(rels, now, tagsByRel = {}) {
   const root = [];
   const sortLevel = (level) => {
     level.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
@@ -133,15 +134,25 @@ export function buildFolderTree(rels, now) {
   };
   for (const rel of rels || []) {
     if (typeof rel !== 'string' || !rel) continue;
-    const parts = rel.split('/').filter(Boolean).slice(1); // 丢掉盘符段
+    const allParts = rel.split('/').filter(Boolean);
+    const parts = allParts.slice(1); // 丢掉盘符段
+    const drivePart = allParts[0];
     let level = root;
-    for (const part of parts) {
+    for (let index = 0; index < parts.length; index += 1) {
+      const part = parts[index];
       let node = level.find((item) => item.name === part && item.type === 'folder');
       if (!node) {
         node = { name: part, type: 'folder', updatedAt: now, children: [] };
         level.push(node);
       }
       if (!Array.isArray(node.children)) node.children = [];
+      // 自动标签（git/node/python…）挂在对应节点上，口径同 dir-struct-gen：
+      // 只有探测出标签才输出 tags 字段，无标签不写空数组。
+      const nodeRel = [drivePart, ...parts.slice(0, index + 1)].join('/');
+      const tags = tagsByRel[nodeRel];
+      if (Array.isArray(tags) && tags.length) {
+        node.tags = [...new Set([...(node.tags || []), ...tags])];
+      }
       level = node.children;
     }
   }
@@ -217,7 +228,7 @@ function addTags(bucket, rel, tags) {
  */
 export function buildV2Export({
   data, host, volumes = {}, now = Date.now(), revision = 1,
-  existing = {}, knownVolumes = [],
+  existing = {}, knownVolumes = [], autoTags = {},
 } = {}) {
   const safeHost = String(host || 'pc').trim() || 'pc';
   const source = `${safeHost} (${GENERATOR})`;
@@ -283,7 +294,7 @@ export function buildV2Export({
 
   for (const volume of allVolumes) {
     const bucket = [...buckets.values()].find((item) => item.volumeKey === volume.key);
-    const children = buildFolderTree(bucket?.rels || [], now);
+    const children = buildFolderTree(bucket?.rels || [], now, autoTags);
     folderCount += children.length;
     const volumeId = volume.volumeId || bucket?.volumeId || null;
     const drive = volume.drive || bucket?.drive || '';

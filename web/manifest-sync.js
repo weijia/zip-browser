@@ -204,13 +204,13 @@ function mergeVolumeDescriptors(bookmarkVolumes, scanVolumes, remoteShards) {
 export function composeExport({
   scan = null, hostInfo = {}, snapshot = null, fileSelection = null,
   copyRefs = null, remoteNames = [], existing = {}, knownVolumes = [], cachedScanBases = [],
-  now = Date.now(), revision = 1,
+  now = Date.now(), revision = 1, autoTags = {},
 } = {}) {
   const host = hostInfo.host || 'pc';
   const volumes = hostInfo.volumes || {};
   const data = snapshot || { tags: {}, paths: {}, bookmarks: [] };
   const bookmark = buildV2Export({
-    data, host, volumes, now, revision, existing, knownVolumes,
+    data, host, volumes, now, revision, existing, knownVolumes, autoTags,
   });
   const bookmarkShards = renameBookmarkShards(
     bookmark.files.filter((file) => file.kind === 'shard'), host, volumes,
@@ -279,6 +279,42 @@ export function composeExport({
     scanShards,
     fileListPaths: fileList.files.map((file) => file.path),
   };
+}
+
+/**
+ * 取「本次会进 struct 的目录」的自动标签，按 host-relative 归位。
+ * 口径同 dir-struct-gen：标签只看目录的直接子项名；探测失败/超时就是没有标签。
+ * 本机服务不在（或 POSIX 宿主）时返回空表，导出照旧、只是节点不带 tags。
+ */
+async function fetchAutoTagsByRel(snapshot) {
+  if (typeof window !== 'undefined' && window.ZB?.posix) return {};
+  const absDirs = new Set();
+  for (const desc of Object.values(snapshot?.paths || {})) {
+    if (desc && desc.kind === 'dir' && typeof desc.path === 'string' && desc.path) absDirs.add(desc.path);
+  }
+  for (const item of snapshot?.bookmarks || []) {
+    if (item && item.kind === 'dir' && typeof item.path === 'string' && item.path) absDirs.add(item.path);
+  }
+  if (!absDirs.size) return {};
+  const paths = [...absDirs].slice(0, 150); // 防止收藏很多目录时把导出拖慢
+  let payload;
+  try {
+    const response = await fetch(apiUrlOf('/api/tags'), {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths }),
+    });
+    if (!response.ok) return {};
+    payload = await response.json();
+  } catch {
+    return {};
+  }
+  const byRel = {};
+  for (const [abs, tags] of Object.entries(payload?.tags || {})) {
+    const rel = hostRelativePath(abs);
+    if (rel && Array.isArray(tags) && tags.length) byRel[rel] = [...new Set(tags)];
+  }
+  return byRel;
 }
 
 async function listRemoteStruct(fp) {
@@ -381,10 +417,12 @@ export async function syncNow(withScan = null, { fileSelection = null, copyRefs 
   const knownVolumes = readJson(KNOWN_KEY, []);
   const cachedScanBases = readJson(SCAN_BASES_KEY, []);
   const remoteNames = await listRemoteStruct(fp);
+  const snapshot = getSnapshot();
+  const autoTags = await fetchAutoTagsByRel(snapshot);
   const args = {
-    scan: withScan, hostInfo, snapshot: getSnapshot(), fileSelection,
+    scan: withScan, hostInfo, snapshot, fileSelection,
     copyRefs: copyRefs === null ? getCopyRefs() : copyRefs,
-    knownVolumes, cachedScanBases, remoteNames, now, revision,
+    knownVolumes, cachedScanBases, remoteNames, now, revision, autoTags,
   };
   const probe = composeExport(args);
   const existing = await readExistingTags(fp, probe.files);

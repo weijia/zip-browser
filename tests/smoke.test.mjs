@@ -973,7 +973,7 @@ test('v2 export builds host index, per-volume shards and file-tags without pollu
   const dShard = shards.find((s) => s.json.name === 'D:');
   assert.equal(dShard.json.volumeId, null);
   assert.deepEqual(dShard.json.children.map((n) => n.name), ['private']);
-  // 文档硬性要求：用户标签绝不回写 struct 清单。
+  // 文档硬性要求：用户自定义标签绝不回写 struct 清单（自动标签另走 autoTags，未传即为空）。
   assert.equal(JSON.stringify(shards).includes('"tags"'), false, 'no tags inside struct files');
   assert.equal(JSON.stringify(shards).includes('zip:'), false, 'zip pseudo paths never become tree nodes');
 

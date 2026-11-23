@@ -11,6 +11,11 @@ import { probeArchiveEncryption } from './archive-flags.js';
 const execFileAsync = promisify(execFile);
 // 一个目录里最多探测这么多压缩包，避免成百上千个归档把列目录拖慢。
 const ARCHIVE_PROBE_LIMIT = 200;
+// 目录自动标签探测：与 dir-struct-gen 的 probeDir 同口径（只读直接子项名、1.5s 超时），
+// 并发受控，避免列目录被几百个子目录的 readdir 拖住。
+const DIR_TAG_TIMEOUT_MS = 1500;
+const DIR_TAG_CONCURRENCY = 8;
+const DIR_TAG_MAX_DIRS = 400;
 const PS_COMMAND = 'Get-CimInstance Win32_LogicalDisk | Select-Object DeviceID,VolumeName,Size,FreeSpace,DriveType | ConvertTo-Json -Compress';
 
 const allowedPrefixes = new Set();
@@ -141,6 +146,41 @@ export async function listDrives() {
   return found;
 }
 
+// 单个目录的自动标签：直接子项名 → 规则表；读失败/超时按「无标签」处理（同 dir-struct-gen）。
+async function readDirTagsSafe(dir) {
+  let timer = null;
+  try {
+    const names = await Promise.race([
+      fs.readdir(dir),
+      new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('tag-probe-timeout')), DIR_TAG_TIMEOUT_MS);
+      }),
+    ]);
+    return detectTags(names);
+  } catch {
+    return [];
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * 批量探测目录自动标签：dir -> tags[]。
+ * 每批 DIR_TAG_CONCURRENCY 个并行，单目录 1.5s 超时；超过 DIR_TAG_MAX_DIRS 的只探测前 N 个。
+ */
+export async function detectTagsForDirs(dirs) {
+  const out = {};
+  const list = (Array.isArray(dirs) ? dirs : [])
+    .filter((dir) => typeof dir === 'string' && dir.trim())
+    .slice(0, DIR_TAG_MAX_DIRS);
+  for (let index = 0; index < list.length; index += DIR_TAG_CONCURRENCY) {
+    const batch = list.slice(index, index + DIR_TAG_CONCURRENCY);
+    const results = await Promise.all(batch.map((dir) => readDirTagsSafe(dir)));
+    batch.forEach((dir, offset) => { out[dir] = results[offset]; });
+  }
+  return out;
+}
+
 export async function listDirectory(abs) {
   let entries;
   try {
@@ -185,6 +225,13 @@ export async function listDirectory(abs) {
     for (const { item } of probes.slice(ARCHIVE_PROBE_LIMIT)) item.encrypted = 'unknown';
   }
   // 自动标签口径与 dir-struct-gen 一致：只看该目录的直接子项名，不递归读盘。
+  // 子目录行也要带自己的自动标签（dir-struct-gen 是每行都能看到的），这里按批量并发探测。
+  const dirItems = items.filter((item) => item.dir);
+  if (dirItems.length) {
+    const tagsByDir = await detectTagsForDirs(dirItems.map((item) => item.path));
+    for (const item of dirItems) item.tags = tagsByDir[item.path] || [];
+  }
+  for (const item of items) if (!item.dir) item.tags = [];
   return { path: abs, items, tags: detectTags(entries.map((entry) => entry.name)) };
 }
 

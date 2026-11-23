@@ -858,3 +858,17 @@ button.sel-pill:hover { filter: brightness(.92); }
 @media (max-width: 640px) {
   .dc-grid { grid-template-columns: 1fr; }
 }
+
+/* 目录标签：自动标签（按直接子项名识别，口径同 dir-struct-gen）+ 自定义标签（可增删）。 */
+.row-tags { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-left: 6px; vertical-align: middle; }
+.tz-auto { font-size: 10px; line-height: 1.6; padding: 0 6px; border-radius: 99px; color: #4a5568; background: #f1f3f5; border: 1px dashed #cbd2d9; white-space: nowrap; }
+.tz-manual { display: inline-flex; align-items: center; gap: 2px; font-size: 10px; line-height: 1.6; padding: 0 5px 0 7px; border-radius: 99px; color: #0b5c46; background: #e1f5ee; border: 1px solid #b7e3d3; white-space: nowrap; }
+.tz-x { border: 0; background: transparent; color: inherit; font-size: 12px; line-height: 1; padding: 0 1px; cursor: pointer; opacity: .65; }
+.tz-x:hover { opacity: 1; }
+.tz-add { border: 1px dashed #c3cbd4; background: #fff; color: #5b6572; border-radius: 99px; font-size: 10px; line-height: 1.6; padding: 0 6px; cursor: pointer; }
+.tz-add:hover { border-color: var(--accent); color: var(--accent); }
+.tz-add.hidden { display: none; }
+.row-tag-input { width: 108px; font: inherit; font-size: 11px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+.row-tag-input:focus { outline: none; border-color: var(--accent); }
+.auto-tag-strip { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.auto-tag-label { font-size: 10px; color: var(--text-3, #9aa3ad); }

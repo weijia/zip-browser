@@ -10,6 +10,7 @@ import {
   listDrives,
   listDirectory,
   normalizeLocalPath,
+  detectTagsForDirs,
 } from './fs-service.js';
 import {
   openArchive,
@@ -151,6 +152,20 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && pathname === '/api/list') {
     const abs = normalizeLocalPath(url.searchParams.get('path') || '');
     return json(res, 200, await listDirectory(abs));
+  }
+
+  // 批量取目录自动标签（导出 struct 时写入节点 tags，口径同 dir-struct-gen）。
+  if (req.method === 'POST' && pathname === '/api/tags') {
+    const body = await readJson(req);
+    const paths = [];
+    for (const item of Array.isArray(body.paths) ? body.paths : []) {
+      try {
+        paths.push(normalizeLocalPath(item));
+      } catch {
+        // 非法路径跳过，不因单个坏路径让整批探测失败
+      }
+    }
+    return json(res, 200, { tags: await detectTagsForDirs(paths) });
   }
 
   // 网盘信息本地缓存：只登记类型/容量/配额等元信息，不缓存网盘文件内容。

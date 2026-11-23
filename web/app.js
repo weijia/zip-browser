@@ -7,6 +7,7 @@ import {
   winDirname,
 } from './location.js';
 import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.js';
+import { addTag, removeTag, rememberPath, listTags, keyForTarget } from './annotations-store.js';
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
 import { initManifestSync, scheduleSync, fetchLocalHostInfo } from './manifest-sync.js';
 import { initDriveCache } from './drive-cache.js';
@@ -603,6 +604,110 @@ function addSelectedToDirList() {
   status(`已把 ${dirs.length} 个目录加入${recursive ? '含所有子目录' : '仅本层'}的目录清单`);
 }
 
+
+// 目录自动标签（server/tag-rules.js 按直接子项名识别：.git→git、package.json→node…）
+// 与用户自定义标签（annotations-store，落在 file-tags / zen-fs-config）在行上合并展示：
+// 自动标签只读，自定义标签可点 × 移除，行尾「+标签」就地新增。
+let lastDirAutoTags = new Map();
+// 一次渲染内复用同一份收藏快照，避免每个目录行都深拷贝一遍 annotations。
+let dirTagAnnoData = null;
+
+function dirTagKey(path) {
+  return keyForTarget({ kind: 'dir', path });
+}
+
+function manualTagsForDir(path) {
+  const store = getAnnotationStore();
+  const data = dirTagAnnoData || (store ? store.snapshot() : null);
+  if (!data) return [];
+  try {
+    return listTags(data, dirTagKey(path));
+  } catch {
+    return [];
+  }
+}
+
+function autoTagChip(tag) {
+  return `<span class="tz-auto" title="自动标签：按目录的直接子项名识别（git / node / python 等），只读">${esc(tag)}</span>`;
+}
+
+function manualTagChip(tag, path) {
+  return `<span class="tz-manual">${esc(tag)}<button type="button" class="tz-x" data-action="row-tag-remove" data-path="${esc(path)}" data-tag="${esc(tag)}" title="移除这个自定义标签">×</button></span>`;
+}
+
+function dirTagsHtml(item) {
+  if (!item || !item.dir) return '';
+  const auto = Array.isArray(item.tags) ? item.tags : (lastDirAutoTags.get(item.path) || []);
+  const manual = manualTagsForDir(item.path).filter((tag) => !auto.includes(tag));
+  const chips = [
+    ...auto.map((tag) => autoTagChip(tag)),
+    ...manual.map((tag) => manualTagChip(tag, item.path)),
+  ].join('');
+  return `<span class="row-tags" data-tag-path="${esc(item.path)}">${chips}<button type="button" class="tz-add" data-action="row-tag-add" data-path="${esc(item.path)}" title="给这个目录加自定义标签">+标签</button></span>`;
+}
+
+function refreshRowTags(path) {
+  const auto = lastDirAutoTags.get(path) || [];
+  document.querySelectorAll('.row-tags[data-tag-path]').forEach((node) => {
+    if (node.dataset.tagPath !== path) return;
+    node.outerHTML = dirTagsHtml({ dir: true, path, tags: auto });
+  });
+}
+
+function commitRowTag(path, value) {
+  const store = getAnnotationStore();
+  const tags = String(value || '').split(/[,，、]+/).map((tag) => tag.trim()).filter(Boolean).slice(0, 8);
+  if (!store || !path || !tags.length) return;
+  const key = dirTagKey(path);
+  const descriptor = { kind: 'dir', path, label: winBasename(path) || path };
+  store.mutate((data) => {
+    const next = rememberPath(data, key, descriptor);
+    for (const tag of tags) addTag(next, key, tag);
+    return next;
+  });
+  status(`已给「${descriptor.label}」加标签：${tags.join('、')}`);
+  dirTagAnnoData = null;
+  refreshRowTags(path);
+}
+
+function removeRowTag(path, tag) {
+  const store = getAnnotationStore();
+  if (!store || !path || !tag) return;
+  store.mutate((data) => removeTag(data, dirTagKey(path), tag));
+  status(`已移除标签：${tag}`);
+  dirTagAnnoData = null;
+  refreshRowTags(path);
+}
+
+function openRowTagInput(button) {
+  const host = button.closest('.row-tags');
+  if (!host || host.querySelector('.row-tag-input')) return;
+  button.classList.add('hidden');
+  const input = document.createElement('input');
+  input.className = 'row-tag-input';
+  input.maxLength = 32;
+  input.placeholder = '标签名，回车确认';
+  input.autocomplete = 'off';
+  host.appendChild(input);
+  input.focus();
+  const finish = (commit) => {
+    if (!input.isConnected) return;
+    const value = input.value;
+    input.remove();
+    button.classList.remove('hidden');
+    if (commit) commitRowTag(host.dataset.tagPath, value);
+  };
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
 
 // 选择集在清单页、目录行按钮、右键菜单里都可能变化；只刷新标签，
 // 不重列目录，避免把删除勾选状态一并清掉。
@@ -1502,6 +1607,10 @@ async function renderDir(abs) {
   // 每次重列目录都清空勾选，避免上一目录的选中项被误删
   resetTrashSelection();
   const items = sortedDirItems(data.items);
+  dirTagAnnoData = getAnnotationStore() ? getAnnotationStore().snapshot() : null;
+  // 自动标签随 /api/list 一起回来：子目录行显示自己的标签，当前目录的标签显示在工具栏。
+  lastDirAutoTags = new Map(items.filter((item) => item.dir).map((item) => [item.path, item.tags || []]));
+  const currentAutoTags = Array.isArray(data.tags) ? data.tags : [];
   const images = items.filter((item) => !item.dir && isImageName(item.name));
   const zips = items.filter((item) => item.zip);
   const vsid = getVaultSessionId() || undefined;
@@ -1537,7 +1646,7 @@ async function renderDir(abs) {
     </div>`).join('');
     const allCards = imageCards + zipCards;
     body = `<div class="thumb-head">图片/压缩包 · ${thumbsCount} 项<span>仅当前目录 · 点击缩略图查看原图或打开压缩包</span></div>
-      ${folders.length ? `<div class="folder-chips">${folders.map((item) => `<span class="folder-chip" data-action="dir" data-path="${esc(item.path)}">${esc(item.name)}${trashChipControls({ ...item, dir: true })}${flControls({ ...item, dir: true })}${dirListControls({ ...item, dir: true })}${explorerControls({ ...item, dir: true })}${rowMenuButton({ ...item, dir: true })}</span>`).join('')}</div>` : ''}
+      ${folders.length ? `<div class="folder-chips">${folders.map((item) => `<span class="folder-chip" data-action="dir" data-path="${esc(item.path)}">${esc(item.name)}${dirTagsHtml({ ...item, dir: true })}${trashChipControls({ ...item, dir: true })}${flControls({ ...item, dir: true })}${dirListControls({ ...item, dir: true })}${explorerControls({ ...item, dir: true })}${rowMenuButton({ ...item, dir: true })}</span>`).join('')}</div>` : ''}
       <div class="thumb-grid">${allCards || '<div class="thumb-empty">当前目录没有图片或压缩包，可切换到列表视图</div>'}</div>`;
   } else {
     const rows = items.map((item) => {
@@ -1551,7 +1660,7 @@ async function renderDir(abs) {
         : `<span class="icon ${icon}"></span>`;
       return `<tr class="${manifestRowClass(item)}" data-action="${action}" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
         ${trashRowStart(item)}
-        <td><span class="file-name"><span class="sel-state">${manifestSelectionBadge(item)}</span>${thumb}${esc(item.name)}${hint}${encBadge(item)}${flControls(item)}${dirListControls(item)}${copyControls(item)}${explorerControls(item)}${rowMenuButton(item)}</span></td>
+        <td><span class="file-name"><span class="sel-state">${manifestSelectionBadge(item)}</span>${thumb}${esc(item.name)}${hint}${encBadge(item)}${dirTagsHtml(item)}${flControls(item)}${dirListControls(item)}${copyControls(item)}${explorerControls(item)}${rowMenuButton(item)}</span></td>
         <td class="file-size${item.dir ? ' dir-size-cell' : ''}"${item.dir ? ` data-size-path="${esc(item.path)}"` : ''}>${item.dir ? '文件夹' : formatSize(item.size)}</td>
         <td class="file-time">${formatTime(item.mtime)}</td>
         ${trashRowEnd(item)}
@@ -1562,7 +1671,10 @@ async function renderDir(abs) {
   }
   // 当前路径只由顶部面包屑显示；这里不再重复一条完整路径标题。
   stage.classList.add('list-mode');
-  stage.innerHTML = `<div class="stage-tools">${switcher}${trashToolbarHtml()}</div><div class="stage-scroll">${body}</div>`;
+  const autoStrip = currentAutoTags.length
+    ? `<div class="auto-tag-strip" title="自动标签按本目录的直接子项名识别，只读；子目录的标签显示在各自行上"><span class="auto-tag-label">自动标签</span>${currentAutoTags.map((tag) => autoTagChip(tag)).join('')}</div>`
+    : '';
+  stage.innerHTML = `<div class="stage-tools">${switcher}${trashToolbarHtml()}${autoStrip}</div><div class="stage-scroll">${body}</div>`;
   // 新工具栏插入后再同步一次数量/按钮状态（勾选状态已由行模板带出）。
   resetTrashSelection();
   applyDirSizeCache();
@@ -1882,9 +1994,20 @@ async function openZipBookmark({ zipPath, entry, label }) {
 }
 
 document.addEventListener('click', async (event) => {
+  // 行内标签区（含就地输入框）没有要导航的动作，避免 closest 落到行上触发目录导航。
+  const tagHost = event.target.closest?.('.row-tags');
+  if (tagHost && !event.target.closest?.('[data-action="row-tag-add"], [data-action="row-tag-remove"]')) return;
   const element = event.target.closest('[data-action]');
   if (!element) return;
   const action = element.dataset.action;
+  if (action === 'row-tag-add') {
+    openRowTagInput(element);
+    return;
+  }
+  if (action === 'row-tag-remove') {
+    removeRowTag(element.dataset.path, element.dataset.tag);
+    return;
+  }
   // 行内勾选/删除控件优先处理，否则 closest 会落到带 data-action 的行上触发导航
   if (action === 'net-drive-edit') {
     driveCache?.edit(element.dataset.dir);
@@ -2145,7 +2268,10 @@ selectionStore.init()
 initAnnotations({
   navigate, openZipBookmark, status,
   // 收藏（含多标签页同步过来的变更）一变，就把 v2 清单重导一次。
-  onMutate: () => scheduleSync(),
+  onMutate: () => {
+    dirTagAnnoData = null; // 行上自定义标签的缓存跟着失效，下次渲染/刷新重取
+    scheduleSync();
+  },
 }).catch((err) => {
   console.warn('annotations store unavailable', err);
 });
