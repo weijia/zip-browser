@@ -351,15 +351,23 @@ async function writeExport(fp, composed, host, now) {
   return { written, removed };
 }
 
-async function commonContext() {
-  const fp = appFs?.promises || appFs;
-  if (!fp || prefix === null) throw new Error(blockReason || '同步组未就绪');
+/**
+ * 读本机卷身份：`/api/hostinfo` → { host, volumes: { C: '<.dir-struct-id 或卷序列号>' } }。
+ * 与清单导出用的是同一份数据；「主机磁盘」面板也用它把本机卷 ID 并入归并结果。
+ */
+export async function fetchLocalHostInfo() {
   const response = await fetch(apiUrlOf('/api/hostinfo'), {
     headers: authHeaders(),
     credentials: typeof window !== 'undefined' && window.ZB_HOST?.auth === 'bearer' ? 'same-origin' : undefined,
   });
   if (!response.ok) throw new Error(`读取本机信息失败：HTTP ${response.status}`);
-  return { fp, hostInfo: await response.json() };
+  return await response.json();
+}
+
+async function commonContext() {
+  const fp = appFs?.promises || appFs;
+  if (!fp || prefix === null) throw new Error(blockReason || '同步组未就绪');
+  return { fp, hostInfo: await fetchLocalHostInfo() };
 }
 
 /**

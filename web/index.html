@@ -182,7 +182,7 @@
       <h2>主机磁盘 · RS 遥测与卷清单归并</h2>
       <button id="hdClose" type="button" class="modal-x" title="关闭">×</button>
     </div>
-    <p class="modal-note">从 RemoteStorage 账户根 <code>ufs-nodes/</code> 读取 CPP daemon / home_cloud 上报的主机与磁盘信息，与 dir-struct-gen 卷清归并。可手工把磁盘 SN 映射到 volumeId（人工确认的强关联，优先于主机名+盘符软关联）；映射与归并结果一并写回。凭据复用已连的 RemoteStorage 同步后端。</p>
+    <p class="modal-note">从 RemoteStorage 账户根 <code>ufs-nodes/</code> 读取 CPP daemon / home_cloud 上报的主机与磁盘信息，与 dir-struct-gen 卷清单归并；同时读本机 <code>/api/hostinfo</code> 的卷身份（<code>.dir-struct-id</code> 或 Windows 卷序列号），按 volumeId 与清单卷精确配对并归档到 <code>localHost</code>。可手工把磁盘 SN 映射到 volumeId（人工确认的强关联，优先于主机名+盘符软关联）；映射与归并结果一并写回。凭据复用已连的 RemoteStorage 同步后端。</p>
     <div class="hd-tabs" role="tablist">
       <button id="hdTabVolumes" type="button" class="hd-tab active" data-view="volumes" role="tab">按卷</button>
       <button id="hdTabHosts" type="button" class="hd-tab" data-view="hosts" role="tab">按主机 / 磁盘</button>
@@ -193,6 +193,7 @@
       <button id="hdRefresh" type="button" class="dc-mini" title="重新读取 RS 遥测与清单">重新读取</button>
     </div>
     <div id="hdStats" class="hd-stats"></div>
+    <div id="hdLocalVolumes"></div>
     <div class="hd-scroll">
     <div id="hdViewVolumes">
       <div id="hdList" class="dc-list hd-list"></div>

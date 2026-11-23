@@ -1,5 +1,5 @@
 // 「主机磁盘」面板 UI 层：读 RS 遥测 → 读清单卷 → 读手工 SN 映射 → 归并 → 三视图展示 → 写回。
-import { getConnectedFs, getRsCredentials, getActiveDataGroup } from './manifest-sync.js';
+import { getConnectedFs, getRsCredentials, getActiveDataGroup, fetchLocalHostInfo } from './manifest-sync.js';
 const getManifestFs = getConnectedFs;
 import { collectVolumes } from './manifest-volume-import.js';
 import { fetchUfsNodesRaw, normalizeUfsNodes, getLastReadDiagnostic } from './ufs-nodes-reader.js';
@@ -8,14 +8,16 @@ import {
   createDeviceRegistryStore, mappingBySerial, listVolumeMappings,
   hostAliasIndex, listHostAliases, diskAliasIndex, listDiskAliases,
 } from './device-registry-store.js';
-import { invalidateHostDisksDoc, readHostDisksFrom } from './host-disks-browser.js';
+import { invalidateHostDisksDoc, readHostDisksFrom, readHideNoDisk, writeHideNoDisk, HOST_DISKS_V2_PATH, HOST_DISKS_MIRROR_PATH, attachVolumeAliases } from './host-disks-browser.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[c]));
 
-const HOST_DISK_PATH = 'host-disks/host-disks.json';
+// 写回主路径用 v2：旧的 host-disks.json 已被同步组记成"删除过"，继续往它写会不断被同步删掉。
+const HOST_DISK_PATH = HOST_DISKS_V2_PATH;
+const HOST_DISK_MIRROR_PATH = HOST_DISKS_MIRROR_PATH;
 
 /** 折叠状态（跨重新读取保留）：vol:<volumeId> / host:<hostId> / disk:<hostId>:<serial> / orphan */
 const collapsedKeys = new Set();
@@ -28,17 +30,16 @@ let currentTree = null;
 let currentView = 'volumes';
 let currentRaw = [];
 let volumesCache = [];
+/** /api/hostinfo 的本机卷身份：{ host, volumes: { C: '<volumeId>' } }。读不到时为 null。 */
+let localHostInfo = null;
+let localHostError = '';
 const registry = createDeviceRegistryStore();
 
-/** 「隐藏无磁盘的主机」开关，跨会话记忆。 */
-const HIDE_NO_DISK_KEY = 'zip-browser:hd-hide-no-disk';
-function readHideNoDisk() {
-  try { return localStorage.getItem(HIDE_NO_DISK_KEY) === '1'; } catch { return false; }
-}
+/** 「隐藏无磁盘的主机」开关，与虚拟挂载点共用同一份设置（见 host-disks-browser.js）。 */
 let hideNoDiskHosts = readHideNoDisk();
 function setHideNoDisk(on) {
   hideNoDiskHosts = !!on;
-  try { localStorage.setItem(HIDE_NO_DISK_KEY, hideNoDiskHosts ? '1' : '0'); } catch { /* 隐私模式忽略 */ }
+  writeHideNoDisk(hideNoDiskHosts);
 }
 
 function setStatus(text, ok = null) {
@@ -86,6 +87,8 @@ async function loadVolumes() {
 const MATCH_BADGE = {
   'manual-sn': '<span class="hd-match hd-match-manual">手工 SN 映射</span>',
   'manual-sn-unverified': '<span class="hd-match hd-match-part">手工映射 · 遥测未见</span>',
+  'local-volume-id': '<span class="hd-match hd-match-ok">本机卷 ID</span>',
+  'local-only': '<span class="hd-match hd-match-part">本机卷 · 清单未见</span>',
   'host+drive': '<span class="hd-match hd-match-ok">主机名+盘符</span>',
   'host-only': '<span class="hd-match hd-match-part">仅主机名</span>',
   unmatched: '<span class="hd-match hd-match-none">未关联</span>',
@@ -94,12 +97,16 @@ const MATCH_BADGE = {
 function rowCard(r) {
   const badge = MATCH_BADGE[r.matchBy] || MATCH_BADGE.unmatched;
   const t = r.telemetry;
+  // 本机读到的卷 ID 与清单 volumeId 不一致时单独标出来：两个都是同一块盘的身份，不能丢。
+  const localId = r.localVolumeId && r.localVolumeId !== r.volumeId ? `本机卷 ID ${r.localVolumeId}` : null;
   const meta = t
     ? [t.hostname || t.deviceName, t.serial ? `SN ${t.serial}` : null,
        t.volumeName, t.sizeGB != null ? `容量 ${t.sizeGB} GB` : null,
        t.freeSpaceGB != null ? `剩余 ${t.freeSpaceGB} GB` : null,
-       t.health ? `SMART ${t.health}` : null].filter(Boolean).map(esc).join(' · ')
-    : (r.manualSerial ? `映射 SN ${esc(r.manualSerial)} · （遥测无记录）` : '（遥测无匹配记录）');
+       t.health ? `SMART ${t.health}` : null, localId].filter(Boolean).map(esc).join(' · ')
+    : (r.localOnly
+      ? `本机卷 ID ${esc(r.localVolumeId || r.volumeId)} · 本机磁盘还没导出清单，文件列表未知`
+      : (r.manualSerial ? `映射 SN ${esc(r.manualSerial)} · （遥测无记录）` : '（遥测无匹配记录）'));
   const key = foldKey('vol', r.volumeId);
   return `<details class="hd-item hd-fold" ${foldAttrs(key)}>
     <summary class="hd-item-title"><code>${esc(r.volumeId)}</code>${r.drive ? ` · <span class="mv-drive">${esc(r.drive)}</span>` : ''} ${badge}</summary>
@@ -212,9 +219,10 @@ function renderHosts() {
         </details>`
       : '';
     const online = h.online == null ? '' : ` <span class="hd-match ${h.online ? 'hd-match-ok' : 'hd-match-none'}">${h.online ? '在线' : '离线（无心跳）'}</span>`;
+    const localMark = h.local ? ' <span class="hd-match hd-match-ok">本机</span>' : '';
     const hostKey = foldKey('host', h.hostId);
     return `<details class="hd-host hd-fold" ${foldAttrs(hostKey)}>
-      <summary class="hd-host-title">${esc(label)}${h.deviceUuid ? ` <span class="hd-host-uuid">${esc(h.deviceUuid)}</span>` : ''}${online}</summary>
+      <summary class="hd-host-title">${esc(label)}${h.deviceUuid ? ` <span class="hd-host-uuid">${esc(h.deviceUuid)}</span>` : ''}${online}${localMark}</summary>
       ${disks || '<div class="dc-empty">该主机无遥测磁盘</div>'}
       ${unassigned}
     </details>`;
@@ -324,11 +332,35 @@ function renderStats() {
   if (!el) return;
   if (!currentMerge) { el.textContent = ''; return; }
   const s = currentMerge.stats;
-  el.innerHTML = `卷 <b>${s.volumes}</b> · 遥测主机 <b>${s.hosts}</b> · 已关联 <b>${s.matched}</b>（手工 <b>${s.manualMatched}</b>） · 未关联 <b>${s.unmatched}</b>`;
+  const local = s.localVolumes
+    ? ` · 本机卷 <b>${s.localVolumes}</b>（ID 精确 <b>${s.localMatched}</b>${s.localOnly ? ` · 未入清单 <b>${s.localOnly}</b>` : ''}）`
+    : '';
+  el.innerHTML = `卷 <b>${s.volumes}</b> · 遥测主机 <b>${s.hosts}</b> · 已关联 <b>${s.matched}</b>（手工 <b>${s.manualMatched}</b>） · 未关联 <b>${s.unmatched}</b>${local}`;
+}
+
+/** 本机卷身份：把 /api/hostinfo 读到的「盘符 → volumeId」明明白白列出来，写回文档的 localHost 就是这个。 */
+function renderLocalVolumes() {
+  const el = $('hdLocalVolumes');
+  if (!el) return;
+  if (!localHostInfo) {
+    el.innerHTML = localHostError
+      ? `<div class="hd-unassigned dc-warn">本机卷身份读取失败：${esc(localHostError)}（归并结果里不会有本机卷 ID）</div>`
+      : '';
+    return;
+  }
+  const entries = Object.entries(localHostInfo.volumes || {});
+  if (!entries.length) {
+    el.innerHTML = '<div class="hd-unassigned">本机没有读到卷身份：盘根没有 <code>.dir-struct-id</code>，卷序列号也取不到。</div>';
+    return;
+  }
+  el.innerHTML = `<details class="hd-candidates-wrap"><summary>本机卷身份（${entries.length}） · ${esc(localHostInfo.host || '本机')}</summary>
+    ${entries.map(([drive, id]) => `<div class="hd-unassigned">${esc(drive)}: → <code>${esc(id)}</code></div>`).join('')}
+  </details>`;
 }
 
 function render() {
   renderStats();
+  renderLocalVolumes();
   renderVolumes();
   renderHosts();
   renderMappings();
@@ -352,7 +384,7 @@ function recompute() {
   const index = mappingBySerial(registry.data);
   const aliases = hostAliasIndex(registry.data);
   const diskAliases = diskAliasIndex(registry.data);
-  currentMerge = mergeHostsWithVolumes(hosts, volumesCache, index, aliases, diskAliases);
+  currentMerge = mergeHostsWithVolumes(hosts, volumesCache, index, aliases, diskAliases, localHostInfo);
   currentTree = buildHostTree(currentMerge);
   currentDoc = buildHostDiskDocument(currentMerge, 'zip-browser');
   render();
@@ -362,6 +394,14 @@ async function reload() {
   setError('');
   setStatus('正在读取 RemoteStorage 遥测…');
   try {
+    // 本机卷身份先读：/api/hostinfo 不依赖 RS，读不到（如兼容层没有该接口）只降级提示，不阻断归并。
+    localHostError = '';
+    try {
+      localHostInfo = await fetchLocalHostInfo();
+    } catch (err) {
+      localHostInfo = null;
+      localHostError = err?.message || String(err);
+    }
     const creds = getRsCredentials();
     if (!creds) {
       throw new Error('未找到 RemoteStorage 凭据：请先在「同步收藏」面板连接一个含 RemoteStorage 后端的同步组');
@@ -374,12 +414,15 @@ async function reload() {
     const index = mappingBySerial(registry.data);
     const aliases = hostAliasIndex(registry.data);
     const diskAliases = diskAliasIndex(registry.data);
-    currentMerge = mergeHostsWithVolumes(hosts, volumesCache, index, aliases, diskAliases);
+    currentMerge = mergeHostsWithVolumes(hosts, volumesCache, index, aliases, diskAliases, localHostInfo);
     currentTree = buildHostTree(currentMerge);
     currentDoc = buildHostDiskDocument(currentMerge, 'zip-browser');
     render();
     const s = currentMerge.stats;
-    setStatus(`归并完成：${s.volumes} 卷 / ${s.hosts} 主机 / ${s.matched} 已关联（手工 ${s.manualMatched}）`, true);
+    const local = s.localVolumes
+      ? ` · 本机卷 ${s.localVolumes}（ID 精确 ${s.localMatched}${s.localOnly ? ` / 未入清单 ${s.localOnly}` : ''}）`
+      : '';
+    setStatus(`归并完成：${s.volumes} 卷 / ${s.hosts} 主机 / ${s.matched} 已关联（手工 ${s.manualMatched}）${local}${localHostError ? `｜本机卷身份读取失败：${localHostError}` : ''}`, true);
   } catch (err) {
     currentMerge = null;
     currentDoc = null;
@@ -524,9 +567,84 @@ async function clearStaleTombstone(relPath) {
       if (p === normalized || p.startsWith(`${normalized}/`) ||
         (p.startsWith(dirPrefix) && /^\.host-disks\..*\.tmp$/.test(p.slice(dirPrefix.length)))) {
         await tombstones.remove(t).catch(() => {});
+        // 只删本地记录不够：远端副本（gitee / RemoteStorage）里的同一条墓碑会在下一轮
+        // 同步时被重新拉回本地，再次把刚写回的文件删掉。这里把三端的墓碑记录一起删。
+        await clearTombstoneOnBackends(group, p);
       }
     }
   } catch { /* 同步组未就绪 / 无墓碑能力：忽略 */ }
+}
+
+/** `.meta/tombstones/<编码路径>.json`：与 zen-fs-config 的 encodeMetaPath 同一套编码。 */
+function tombstoneRecordPath(p) {
+  return `/.meta/tombstones/${String(p).replace(/^\//, '').replace(/\//g, '__').replace(/\./g, '++')}.json`;
+}
+
+/**
+ * 在数据组的每个后端副本上删除同一条墓碑记录。
+ *
+ * `.meta/tombstones` 自身参与同步，所以本地 `remove()` 只清掉本地副本时，远端会把它
+ * 重新同步回来；墓碑回来后 tombstone pass 会按它再删一次文件（用户看到「又不行了」）。
+ */
+async function clearTombstoneOnBackends(group, path) {
+  try {
+    if (typeof group?.tombstoneTargets !== 'function') return;
+    const targets = group.tombstoneTargets() || [];
+    const record = tombstoneRecordPath(path);
+    // 三端并行删，避免逐个等网络往返把写回拖到十几秒。
+    await Promise.all(targets.map(async (target) => {
+      const fs = target?.fs?.promises || target?.fs;
+      if (!fs || typeof fs.unlink !== 'function') return;
+      await fs.unlink(record).catch(() => {});
+    }));
+  } catch { /* 忽略：清不掉也不阻断写回 */ }
+}
+
+/**
+ * 最近一次成功写回的文档快照。
+ *
+ * 用于「数据组里的文件被别的端用墓碑删掉」时一键恢复：本机缓存里的文档是刚归并出的
+ * 完整结果，重建时不必要再花十几秒重读 RS 遥测。
+ */
+const DOC_CACHE_KEY = 'zip-browser:hd-doc-cache';
+
+function saveDocCache(doc) {
+  try {
+    localStorage.setItem(DOC_CACHE_KEY, JSON.stringify({ at: Date.now(), doc }));
+  } catch { /* 容量/隐私模式：忽略 */ }
+}
+
+function readDocCache() {
+  try {
+    const raw = localStorage.getItem(DOC_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && parsed.doc ? parsed : null;
+  } catch { return null; }
+}
+
+/** 完整缓存快照 { at, doc }，供「主机磁盘」视图在连接建立前先渲染首屏。 */
+export function hostDisksCachedDoc() {
+  const cache = readDocCache();
+  if (!cache) return null;
+  return { at: Number(cache.at) || 0, doc: cache.doc };
+}
+
+/** 读到数据组里的真实文档时顺手刷新本机快照，保证下次冷启动有内容可显示。 */
+export function cacheHostDisksDoc(doc) {
+  if (doc) saveDocCache(doc);
+}
+
+/** 缓存摘要，供「主机磁盘」视图在文件缺失时提示一键恢复。 */
+export function hostDisksCacheInfo() {
+  const cache = readDocCache();
+  if (!cache) return null;
+  const doc = cache.doc;
+  return {
+    at: Number(cache.at) || 0,
+    volumes: Number(doc?.stats?.volumes) || 0,
+    hosts: Array.isArray(doc?.hosts) ? doc.hosts.length : 0,
+  };
 }
 
 /**
@@ -545,45 +663,116 @@ async function ensureDir(fp, dir) {
   }
   const st = await fp.stat(dir).catch(() => null);
   if (st && st.mode != null && !isDirMode(st.mode)) {
-    await fp.unlink(dir).catch(() => {});
-    await fp.mkdir(dir, { recursive: true });
+    // 目录位置上是个同名文件：这里**不能** unlink —— 数据组会把 unlink 转成 deleteFile，
+    // 于是写出一条删除墓碑，下一轮同步再把刚写回的文件删掉。直接报错让用户处理。
+    throw new Error(`/${dir} 位置上是同名文件，无法建立目录（请先手动处理该路径）`);
   }
 }
 
 /**
- * 写文本文件，返回是否走了兜底路径。
+ * 写文本文件。
  *
  * 缓存层可能把「文件不存在」缓存成否定结果：VFS 于是走 createFile 分支，
  * 而底层存储的目录项里其实已有同名文件 → EEXIST（file already exists）。
- * 兜底两级：
- *   1) unlink（顺带清缓存）后再写；
- *   2) 写到临时文件再 rename 覆盖（rename 不经过 createFile，不受陈旧 stat 影响）。
+ *
+ * 这里**绝不使用 unlink / rename**：数据组把 unlink 转成 deleteFile → 在
+ * `.meta/tombstones` 写下删除墓碑；而 zen-fs 的 rename 在目标已存在时同样会先
+ * `remove(to)`，等于删掉目标顶文件。两种写法都会让下一轮 tombstone pass 把刚写回
+ * 的文件删掉，gitee 上就会反复出现 Delete / Create 提交（用户看到的「一直在被删」）。
+ *
+ * 正确做法是刷新目录缓存后重试直接覆盖：后端 write 遇到已有 sha 会走 updateFile。
  */
 async function writeTextFile(fp, path, text) {
-  try {
-    await fp.writeFile(path, text);
-    return false;
-  } catch (err) {
-    if (!isExistsError(err)) throw err;
-  }
-  await fp.unlink(path).catch(() => {});
-  try {
-    await fp.writeFile(path, text);
-    return true;
-  } catch (err) {
-    if (!isExistsError(err) || typeof fp.rename !== 'function') throw err;
-  }
   const slash = path.lastIndexOf('/');
-  const dir = slash > 0 ? path.slice(0, slash) : '';
-  const tmp = `${dir}/.host-disks.${Date.now()}.tmp`;
-  await fp.writeFile(tmp, text);
-  try {
-    await fp.rename(tmp, path);
-  } catch (err) {
-    await fp.unlink(tmp).catch(() => {});
-    throw err;
+  const dir = slash > 0 ? path.slice(0, slash) : '/';
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await fp.writeFile(path, text);
+      return false;
+    } catch (err) {
+      if (!isExistsError(err)) throw err;
+      // 刷新目录项，让 VFS 不再按「不存在」走 createFile 分支；随后重试覆盖。
+      await fp.readdir(dir).catch(() => {});
+      if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 200));
+    }
   }
-  return true;
+  throw new Error(`目标路径已有同名文件，刷新缓存后仍无法覆盖：${path}`);
+}
+
+/**
+ * 把一份归并结果写进数据组，并立即读回校验。
+ *
+ * 写回前先撤掉该路径的三端墓碑，写完再撤一次（兜底路径会顺带生成墓碑）；
+ * 成功后把文档存进本机缓存，供文件被其他端删掉时一键恢复。
+ */
+async function writeDocToGroup(doc) {
+  const connected = getManifestFs();
+  if (!connected) throw new Error('同步组未连接，无法写回');
+  // 人工标注（卷别名）不在归并结果里，写回前必须从本机/旧文档带过来，否则重新归并一次就被冲掉。
+  const payload = attachVolumeAliases(doc);
+  const { fp, pathFor } = connected;
+  await clearStaleTombstone(HOST_DISK_PATH);
+  await ensureDir(fp, pathFor('host-disks'));
+  const text = JSON.stringify(payload, null, 2);
+  await writeTextFile(fp, pathFor(HOST_DISK_PATH), text);
+  // 立即读回校验：写入返回成功但读不到，说明写进的是另一个数据组/本地库还没就绪。
+  // 这一步把「写回成功但页面打不开」的静默失败变成可读的错误。
+  try {
+    await readHostDisksFrom(fp, pathFor, HOST_DISK_PATH);
+  } catch (err) {
+    throw new Error(`已写入 /${HOST_DISK_PATH}，但立即读回失败：${err?.message || err}`);
+  }
+  // 镜像副本（best-effort）：主路径被别处的墓碑反复删除时，读取侧仍能从镜像恢复。
+  try {
+    await clearStaleTombstone(HOST_DISK_MIRROR_PATH);
+    await writeTextFile(fp, pathFor(HOST_DISK_MIRROR_PATH), text);
+  } catch { /* 只是兜底副本，失败不阻断写回 */ }
+  invalidateHostDisksDoc();
+  saveDocCache(payload);
+  window.dispatchEvent(new CustomEvent('zb:host-disks-change'));
+  return { overwritten: false };
+}
+
+/**
+ * 供「主机磁盘」视图直接写回一份已读到的文档（目前用于卷别名这类人工标注）。
+ * 与面板「写回」走同一套路径：撤墓碑 → 建目录 → 覆盖写 v2 → 读回校验 → 写镜像 → 存本机快照。
+ */
+export async function writeHostDisksDoc(doc) {
+  if (!doc) throw new Error('没有可写回的文档');
+  await writeDocToGroup(doc);
+}
+
+/**
+ * 记住/清除「卷 → 磁盘 SN」的手工映射（写进设备身份注册表，与面板「手工 SN 映射」同一份数据）。
+ * 传空 SN 视为清除。注册表在 panels 未打开时也能写：init 后 data 已就绪，flush 失败不阻断。
+ */
+export async function rememberManualSerial(volumeId, serial) {
+  const id = String(volumeId || '').trim();
+  if (!id) throw new Error('缺少 volumeId');
+  const sn = String(serial || '').trim();
+  if (sn) {
+    registry.upsert({ volumeId: id, serial: sn, hostname: volumesCache.find((v) => v.volumeId === id)?.sourceHost });
+  } else {
+    registry.remove(id);
+  }
+  await registry.flush();
+  return { volumeId: id, serial: sn };
+}
+
+/**
+ * 用本机缓存的文档恢复写回（数据组里的文件被别的端按墓碑删掉时使用）。
+ * 返回缓存时间与文档统计，供调用方提示。
+ */
+export async function restoreHostDisksFromCache() {
+  const cache = readDocCache();
+  if (!cache) throw new Error('本机没有可恢复的主机磁盘缓存，请先读取遥测并写回');
+  const { overwritten } = await writeDocToGroup(cache.doc);
+  return {
+    at: Number(cache.at) || 0,
+    volumes: Number(cache.doc?.stats?.volumes) || 0,
+    hosts: Array.isArray(cache.doc?.hosts) ? cache.doc.hosts.length : 0,
+    overwritten,
+  };
 }
 
 async function writeBack() {
@@ -593,21 +782,7 @@ async function writeBack() {
   if (btn) btn.disabled = true;
   setStatus('正在写回数据组…');
   try {
-    const connected = getManifestFs();
-    if (!connected) throw new Error('同步组未连接，无法写回');
-    const { fp, pathFor } = connected;
-    await clearStaleTombstone(HOST_DISK_PATH);
-    await ensureDir(fp, pathFor('host-disks'));
-    const overwritten = await writeTextFile(fp, pathFor(HOST_DISK_PATH), JSON.stringify(currentDoc, null, 2));
-    // 立即读回校验：写入返回成功但读不到，说明写进的是另一个数据组/本地库还没就绪。
-    // 这一步把「写回成功但页面打不开」的静默失败变成可读的错误。
-    try {
-      await readHostDisksFrom(fp, pathFor);
-    } catch (err) {
-      throw new Error(`已写入 /${HOST_DISK_PATH}，但立即读回失败：${err?.message || err}`);
-    }
-    invalidateHostDisksDoc();
-    window.dispatchEvent(new CustomEvent('zb:host-disks-change'));
+    const { overwritten } = await writeDocToGroup(currentDoc);
     setStatus(`已写回 /${HOST_DISK_PATH} · ${currentDoc.stats.volumes} 卷 / ${currentDoc.hosts.length} 主机 · 读回校验通过${overwritten ? '（已覆盖同名文件）' : ''}`, true);
   } catch (err) {
     const msg = err?.message || String(err);
@@ -637,6 +812,8 @@ function open() {
   currentMerge = null;
   currentDoc = null;
   currentTree = null;
+  // 虚拟挂载点页面里也可能切换过这个开关，打开面板时按同一份设置刷新。
+  hideNoDiskHosts = readHideNoDisk();
   setView('volumes');
   render();
   syncHideNoDiskUi();

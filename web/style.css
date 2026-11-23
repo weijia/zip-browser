@@ -846,6 +846,15 @@ button.sel-pill:hover { filter: brightness(.92); }
 .hd-host-alias-del:hover { color: #a32d2d; }
 .hd-alias { font-size: 10px; color: var(--text-2); background: #fff; border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
 .hd-alias b { color: var(--accent); font-weight: 500; }
+.hd-src { font-size: 11px; color: var(--text-3); }
+.hd-part-detail { font: inherit; font-size: 11px; padding: 1px 7px; margin-left: 4px; border: 1px solid var(--border); border-radius: 4px; background: #fff; color: var(--text-2); cursor: pointer; white-space: nowrap; }
+.hd-part-detail:hover { color: var(--accent); border-color: var(--accent); }
+.hd-alias-input { font: inherit; font-size: 12px; width: 14em; padding: 1px 6px; border: 1px solid var(--border); border-radius: 4px; background: #fff; }
+.hd-alias-input:focus { outline: none; border-color: var(--accent); }
+.hd-alias-edit { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.hd-alias-value { margin-right: 2px; }
+.hd-notes { margin: 4px 0 8px; padding-left: 16px; }
+.hd-notes li { margin: 2px 0; }
 @media (max-width: 640px) {
   .dc-grid { grid-template-columns: 1fr; }
 }

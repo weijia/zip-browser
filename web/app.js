@@ -8,11 +8,11 @@ import {
 } from './location.js';
 import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.js';
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
-import { initManifestSync, scheduleSync } from './manifest-sync.js';
+import { initManifestSync, scheduleSync, fetchLocalHostInfo } from './manifest-sync.js';
 import { initDriveCache } from './drive-cache.js';
 import { initManifestVolumeImport } from './manifest-volume-import.js';
-import { initHostDisksPanel } from './host-disks-panel.js';
-import { loadHostDisksDoc, describeVirtual } from './host-disks-browser.js';
+import { initHostDisksPanel, hostDisksCacheInfo, hostDisksCachedDoc, cacheHostDisksDoc, restoreHostDisksFromCache, writeHostDisksDoc, rememberManualSerial } from './host-disks-panel.js';
+import { loadHostDisksDoc, describeVirtual, describeTreePath, probeVolumeSources, readHideNoDisk, writeHideNoDisk, invalidateHostDisksDoc, volumeAliasesFor, setLocalVolumeAlias, applyManualDiskSerial, readPendingSerials, addPendingSerial, clearPendingSerial, applyDerivedSerials, attachVolumeAliases, partitionAliasesFor, setLocalPartitionAlias } from './host-disks-browser.js';
 import { createSelectionStore, isDirSelected, isFileSelected, addDirSelection, removeDirSelection, removeFileDirSelection, removePickedFile, selectionPathKey } from './manifest-selection.js';
 import {
   initManifestBuilder, addPickedFromItem, addFileListDir, openCopyRefForItem,
@@ -876,11 +876,32 @@ function renderCrumbs(target) {
   document.title = label === rootLabel ? siteTitle : `${label} · ${siteTitle}`;
 }
 
+/** 本机卷身份（/api/hostinfo）：读一次缓存 30s，避免每次进「此电脑」都重新跑 vol / fsutil 探测。 */
+let localHostCache = { at: 0, value: null };
+async function localHostInfoFor(ttl = 30000) {
+  if (localHostCache.value && Date.now() - localHostCache.at < ttl) return localHostCache.value;
+  try {
+    const info = await fetchLocalHostInfo();
+    localHostCache = { at: Date.now(), value: info };
+    return info;
+  } catch {
+    // 读不到（兼容层没有 /api/hostinfo）时沿用上次结果；一次都没有就返回 null，磁盘列表照常显示。
+    return localHostCache.value;
+  }
+}
+
 async function renderDrives() {
   const [{ drives, networkDrives }, hdState] = await Promise.all([
     api('/api/drives'),
     loadHostDisksDoc(),
   ]);
+  // 本机卷身份不参与这个 await：/api/hostinfo 要跑 PowerShell + vol，慢的时候能把「此电脑」拖住几秒。
+  // 先用缓存里的值渲染，取到之后再补到卡片/侧栏上（冷启动时预热点已经在后台拉过一次）。
+  const hostInfo = localHostCache.value;
+  const hostInfoPending = localHostInfoFor();
+  const volumeTagOf = (id) => (id
+    ? `<br><span class="drive-volume" title="卷根的 .dir-struct-id；没有标记文件时回退 Windows 卷序列号">卷 ID <code>${esc(id)}</code></span>`
+    : '');
   const registered = Array.isArray(networkDrives) ? networkDrives : [];
   const hdDoc = hdState.doc;
   const hdMeta = hdDoc
@@ -889,11 +910,13 @@ async function renderDrives() {
   const mounts = HOST.drivesMode === 'mounts';
   const cards = drives.map((drive) => {
     const used = drive.total ? Math.round(((drive.total - drive.free) / drive.total) * 100) : 0;
+    // 本机卷身份：与「主机磁盘」归并里用的同一个 volumeId（.dir-struct-id / Windows 卷序列号）。
+    const letter = String(drive.letter || '').toUpperCase();
+    const localVolumeId = hostInfo?.volumes?.[letter] || null;
+    const volumeTag = volumeTagOf(localVolumeId);
     if (mounts) {
       const label = drive.label || drive.path || '存储';
-      const volumeID = drive.volumeId
-        ? `<br><span class="drive-volume">volumeId: <code>${esc(drive.volumeId)}</code></span>`
-        : '';
+      const volumeID = volumeTagOf(drive.volumeId || localVolumeId);
       return `<div class="drive-card" data-action="drive" data-path="${esc(drive.path)}" data-name="${esc(label)}">
         <div class="drive-head"><span class="drive-letter"><span class="icon icon-dir"></span></span><span class="drive-name">${esc(label)}</span></div>
         <div class="drive-bar"><div style="width:${used}%"></div></div>
@@ -902,10 +925,10 @@ async function renderDrives() {
     }
     const kindClass = drive.kind === '可移动' ? ' removable' : (drive.kind === '网络映射' ? ' network' : '');
     const label = drive.label || drive.kind;
-    return `<div class="drive-card" data-action="drive" data-path="${esc(drive.path)}" data-name="${esc(label)}">
+    return `<div class="drive-card" data-action="drive" data-path="${esc(drive.path)}" data-name="${esc(label)}" data-drive-letter="${esc(letter)}"${localVolumeId ? ` title="${esc(`${drive.letter}: · 卷 ID ${localVolumeId}`)}"` : ''}>
       <div class="drive-head"><span class="drive-letter${kindClass}">${drive.letter}:</span><span class="drive-name">${esc(label)}</span></div>
       <div class="drive-bar"><div style="width:${used}%"></div></div>
-      <div class="drive-meta">${drive.total ? `${formatSize(drive.free)} 可用 / ${formatSize(drive.total)}` : '容量未知'} · ${esc(drive.kind)}</div>
+      <div class="drive-meta">${drive.total ? `${formatSize(drive.free)} 可用 / ${formatSize(drive.total)}` : '容量未知'} · ${esc(drive.kind)}${volumeTag}</div>
     </div>`;
   }).join('');
 
@@ -941,13 +964,19 @@ async function renderDrives() {
   const empty = LABELS.drivesEmpty || '没有检测到可用磁盘';
   const hint = LABELS.drivesHint || '';
   stage.classList.remove('list-mode');
+  const localHint = hostInfo?.host
+    ? `本机 ${esc(hostInfo.host)} · 卷 ID 取卷根的 <code>.dir-struct-id</code>，没有标记文件时为 Windows 卷序列号`
+    : '';
   stage.innerHTML = `<h2 class="stage-title">${esc(title)}（${drives.length + registered.length + 1}）</h2>
     <div class="drive-grid">${hdCard}${cards}${networkCards || (drives.length ? '' : `<div class="empty">${esc(empty)}</div>`)}</div>
-    ${hint ? `<p class="stage-hint">${esc(hint)}</p>` : ''}`;
+    ${hint ? `<p class="stage-hint">${esc(hint)}</p>` : ''}<p class="stage-hint" id="driveLocalHint"${localHint ? '' : ' hidden'}>${localHint}</p>`;
   const sidebarRoot = LABELS.sidebarRoot || LABELS.root || '此电脑';
   const localSidebar = drives.map((drive) => {
     const label = mounts ? (drive.label || drive.path || '存储') : `${drive.letter}: ${drive.label || drive.kind}`;
-    return `<div class="side-item" data-action="drive" data-path="${esc(drive.path)}"><span class="icon icon-dir"></span>${esc(label)}</div>`;
+    const letter = String(drive.letter || '').toUpperCase();
+    const vid = hostInfo?.volumes?.[letter] || null;
+    const title = vid ? ` title="${esc(`${drive.letter}: · 卷 ID ${vid}`)}"` : '';
+    return `<div class="side-item" data-action="drive" data-path="${esc(drive.path)}"${letter ? ` data-drive-letter="${esc(letter)}"` : ''}${title}><span class="icon icon-dir"></span>${esc(label)}</div>`;
   }).join('');
   const networkSidebar = registered.length
     ? `<div class="side-title side-sub">网络存储</div>${registered.map((item) => {
@@ -960,42 +989,445 @@ async function renderDrives() {
     : '';
   const hdSidebar = `<div class="side-title side-sub">数据组视图</div><div class="side-item" data-action="hd" data-path=""><span class="icon icon-dir"></span>主机磁盘（数据组）</div>`;
   sidebar.innerHTML = `<div class="side-title">${esc(sidebarRoot)}</div>${localSidebar}${networkSidebar}${hdSidebar}`;
+  // 卷身份晚到也不阻塞首屏：拿到之后直接补进对应卡片/侧栏，不重绘整页。
+  void hostInfoPending.then((info) => {
+    if (!info || current().kind !== 'drives') return;
+    fillDriveVolumeIds(info);
+  });
+}
+
+/** 把本机卷身份补进已渲染的磁盘卡片与侧栏（慢接口后到，避免整页重排）。 */
+function fillDriveVolumeIds(hostInfo) {
+  const hint = stage.querySelector('#driveLocalHint');
+  if (hint && hostInfo?.host && hint.hidden) {
+    hint.hidden = false;
+    hint.innerHTML = `本机 ${esc(hostInfo.host)} · 卷 ID 取卷根的 <code>.dir-struct-id</code>，没有标记文件时为 Windows 卷序列号`;
+  }
+  for (const card of stage.querySelectorAll('.drive-card[data-drive-letter]')) {
+    const letter = card.dataset.driveLetter;
+    const id = hostInfo?.volumes?.[letter];
+    if (!id) continue;
+    const meta = card.querySelector('.drive-meta');
+    if (!meta || meta.querySelector('.drive-volume')) continue;
+    meta.insertAdjacentHTML('beforeend', `<br><span class="drive-volume" title="卷根的 .dir-struct-id；没有标记文件时回退 Windows 卷序列号">卷 ID <code>${esc(id)}</code></span>`);
+    card.title = `${letter}: · 卷 ID ${id}`;
+  }
+  for (const item of sidebar.querySelectorAll('.side-item[data-drive-letter]')) {
+    const letter = item.dataset.driveLetter;
+    const id = hostInfo?.volumes?.[letter];
+    if (id) item.title = `${letter}: · 卷 ID ${id}`;
+  }
 }
 
 async function renderHostDisks(target) {
-  const { doc, error } = await loadHostDisksDoc();
-  const view = describeVirtual(doc, target.path || '');
+  // 连接建立、本机身份晚到、面板写回都会触发重渲染；先发起的渲染可能后返回，
+  // 直接写会把较新的结果盖掉（表现为一直停在「同步组未连接」）。用序号丢弃过期结果。
+  const seq = (hdRenderSeq += 1);
+  const live = await loadHostDisksDoc();
+  let doc = live.doc;
+  let error = live.error;
+  let from = live.from;
+  // 数据组读不到（多半是刷新后连接还在建立）时，先用本机快照把内容画出来：
+  // 用户看到的是已知的归并结果，而不是「未连接」这张空页面；连接就绪后自动换成实时数据。
+  let snapshotAt = 0;
+  if (!doc) {
+    const snap = hostDisksCachedDoc();
+    if (snap?.doc) {
+      doc = snap.doc;
+      from = 'cache';
+      snapshotAt = snap.at;
+    }
+  }
+  // openlist 扫出来的卷（openlist-xxxx-0/1/2/3）没有磁盘信息时，用 ID 中间那段当物理盘 SN，
+  // 能对上磁盘的直接挂到该盘下。只在渲染时算，不写文档：任何端都算出同样结果。
+  if (doc) doc = applyDerivedSerials(doc);
+  if (live.doc) {
+    hdConnectRetry = { path: '', count: 0 };
+    cacheHostDisksDoc(live.doc);
+    // 连接就绪后把「连接未就绪时填的手工 SN」补写进数据组（有冷却，避免反复重写）。
+    if (readPendingSerials().length && Date.now() - hdPendingFlushAt > 8000) {
+      hdPendingFlushAt = Date.now();
+      void flushPendingSerials(live.doc).then((ok) => {
+        if (!ok) return;
+        const now = current();
+        if (now?.kind === 'hd') render(now);
+      }).catch(() => {});
+    }
+  }
+  const hideNoDisk = readHideNoDisk();
+  // 本机卷身份同样不阻塞：先用缓存值判定「能不能直接落本地」，取到后再补一次渲染。
+  const localHost = localHostCache.value;
+  if (!localHost) {
+    void localHostInfoFor().then((info) => {
+      const now = current();
+      if (info && now?.kind === 'hd' && (now.path || '') === (target.path || '')) renderHostDisks(target);
+    });
+  }
+  let view = doc ? await describeTreePath(doc, target.path || '') : null;
+  if (!view) view = describeVirtual(doc, target.path || '', { hideNoDiskHosts: hideNoDisk, local: localHost, volumeAliases: volumeAliasesFor(doc) });
+  hdLastDoc = doc;
+  if (seq !== hdRenderSeq) return;
   hdCrumbParts = view.crumbs;
+  const openAttrs = (path, extra = '') => (path !== undefined && path !== null
+    ? ` data-action="hd" data-path="${esc(path)}"${extra} style="cursor:pointer"` : '');
+  const rowsHtml = (section) => {
+    if (!section.rows.length) return `<tr><td colspan="2" class="dc-empty">${esc(section.placeholder || '无')}</td></tr>`;
+    return section.rows.map((item) => {
+      const label = esc(item.label);
+      const meta = esc(item.meta || '');
+      if (item.aliasEdit) {
+        // volumeId / 逻辑分区：别名就在这一行直接加/改，不另开页面。
+        const vid = item.aliasEdit;
+        const kind = item.aliasKind || 'volume';
+        const hint = kind === 'partition'
+          ? '给这个逻辑分区加一个便于识别的名字（存数据组文档，跨端可见）'
+          : '给这个卷加一个便于识别的名字（存数据组文档，跨端可见）';
+        return `<tr class="hd-alias-row" data-alias-id="${esc(vid)}" data-alias-kind="${esc(kind)}"><td>${label}</td>
+          <td><span class="hd-alias-value">${meta}</span>
+          <button type="button" class="hd-part-detail" data-action="hd-alias-edit" data-path="${esc(vid)}" data-kind="${esc(kind)}"
+            title="${hint}">${item.aliasSet ? '修改别名' : '＋增加别名'}</button></td>
+        </tr>`;
+      }
+      if (item.serialEdit) {
+        // 所属磁盘为空时的兜底：手工填物理盘 SN，保存后卷挂到该盘下。
+        const vid = item.serialEdit;
+        return `<tr class="hd-serial-row" data-serial-id="${esc(vid)}"><td>${label}</td>
+          <td><span class="hd-alias-value">${meta}</span>
+          <button type="button" class="hd-part-detail" data-action="hd-serial-edit" data-path="${esc(vid)}"
+            title="手工指定物理磁盘 SN；保存后会写回数据组文档，并记住这条映射">${item.serialSet ? '修改 SN' : '＋填写 SN'}</button></td>
+        </tr>`;
+      }
+      if (item.kind === 'partition') {
+        const localPath = item.localPath || '';
+        const singlePath = item.singlePath || '';
+        const detailPath = item.detailPath || item.path || '';
+        const letter = String(item.label || '').slice(0, 1).toUpperCase();
+        const volumeIds = Array.isArray(item.volumeIds) ? item.volumeIds : [];
+        // 主点击：本机 → 本地目录；非本机单卷 → 直接进卷树；其余 → 分区详情。
+        return `<tr class="hd-partition" data-action="hd-part" data-path="${esc(detailPath)}"
+          data-local-path="${esc(localPath)}" data-single-path="${esc(singlePath)}"
+          data-host-local="${item.hostLocal ? '1' : ''}" data-letter="${esc(letter)}" style="cursor:pointer"
+          data-hd-volumes="${esc(volumeIds.join('|'))}" data-hd-drive="${esc(letter ? `${letter}:` : '')}"
+          title="${esc(item.hostLocal ? '本机分区：点击直接打开本地盘符' : '非本机分区：点击进入关联卷的只读目录树')}">
+          <td>${label}</td>
+          <td>${meta}${detailPath ? ` <button type="button" class="hd-part-detail" data-action="hd-part-detail" data-path="${esc(detailPath)}" title="分区详情：信息与全部关联卷">详情</button>` : ''}</td>
+        </tr>`;
+      }
+      if (item.kind === 'tree-file') return `<tr class="hd-file"><td>${label}</td><td>${meta}</td></tr>`;
+      if (item.kind === 'volume' && item.volumeId) {
+        // 分区详情里的关联卷：本机卷主点击进本地，同时保留「只读结构」入口，数据组里的结构/文件列表不会被藏起来。
+        const localPath = item.localPath || '';
+        const tree = item.path || '';
+        return `<tr class="hd-volume-row" data-action="hd-open" data-path="${esc(tree)}" data-local-path="${esc(localPath)}"
+          data-hd-volume="${esc(item.volumeId)}" data-hd-drive="${esc(item.volumeDrive || '')}" style="cursor:pointer"
+          title="${esc(localPath ? `本机卷：点击打开 ${localPath}；数据组里的结构/文件列表点右侧「只读结构」` : '清单卷：点击只读浏览目录结构')}">
+          <td>${label}</td>
+          <td>${meta}${tree ? ` <button type="button" class="hd-part-detail" data-action="hd-tree" data-path="${esc(tree)}" title="只读浏览数据组里的目录结构与文件列表">只读结构</button>` : ''}</td>
+        </tr>`;
+      }
+      if (item.localPath !== undefined && item.localPath !== null && item.localPath !== '') {
+        // 卷行带本机路径时同样直达本地目录（本机卷 ID 命中才给这个字段）。
+        return `<tr data-action="hd-open" data-path="${esc(item.path || '')}" data-local-path="${esc(item.localPath)}" style="cursor:pointer"><td>${label}</td><td>${meta}</td></tr>`;
+      }
+      return `<tr${openAttrs(item.path)}><td>${label}</td><td>${meta}</td></tr>`;
+    }).join('');
+  };
   const sections = view.sections.map((section) => {
-    const rows = section.rows.length
-      ? section.rows.map((item) => {
-        const canOpen = item.path !== undefined && item.path !== null;
-        const attrs = canOpen ? ` data-action="hd" data-path="${esc(item.path)}" style="cursor:pointer"` : '';
-        return `<tr${attrs}><td>${esc(item.label)}</td><td>${esc(item.meta)}</td></tr>`;
-      }).join('')
-      : '<tr><td colspan="2" class="dc-empty">无</td></tr>';
+    const rows = rowsHtml(section);
     return `<details class="hd-host hd-fold" open><summary class="hd-host-title">${esc(section.title)}</summary><table class="file-table"><tbody>${rows}</tbody></table></details>`;
   }).join('');
   stage.classList.add('list-mode');
+  // 「隐藏无磁盘的主机」只作用于根视图的主机列表，下钻后的磁盘/卷层级不受影响。
+  const hiddenCount = view.hostStats?.hidden || 0;
+  const filter = doc && view.view === 'root'
+    ? `<label class="hd-filter" title="只影响这里列出的主机，不改变数据组里已写回的归并结果">
+        <input id="hdVirtualHideNoDisk" type="checkbox"${hideNoDisk ? ' checked' : ''}>
+        <span>隐藏无磁盘的主机</span>
+        <span id="hdVirtualHideNoDiskHint" class="hd-filter-hint">${hideNoDisk ? `（已隐藏 ${hiddenCount} 台）` : ''}</span>
+      </label>`
+    : '';
+  const notes = Array.isArray(view.notes) && view.notes.length
+    ? `<ul class="stage-hint hd-notes">${view.notes.map((note) => `<li>${esc(note)}</li>`).join('')}</ul>`
+    : '';
+  // 读到的是旧路径/镜像时明确标出来，不假装一切正常。
+  const mirrorNote = doc && from === 'mirror'
+    ? `<p class="stage-hint">主文件缺失，当前内容来自镜像 /host-disks/host-disks.mirror.json；点顶部「主机磁盘 → 写回」可把主文件重建。</p>`
+    : doc && from === 'canonical'
+      ? `<p class="stage-hint">当前读的是旧文件 /host-disks/host-disks.json；点顶部「主机磁盘 → 写回」会升级写到 /host-disks/host-disks.v2.json。</p>`
+      : '';
+  // 快照模式：内容是本机上次读到的归并结果，连接就绪后会自动换成实时数据。
+  const cacheNote = doc && from === 'cache'
+    ? `<p class="stage-hint">当前显示本机快照${snapshotAt ? `（${esc(new Date(snapshotAt).toLocaleString())}）` : ''}：同步组连接/读取就绪后会自动换成数据组里的最新内容，卷的「结构 / 文件列表」提示也会在那时补齐。
+      <button type="button" class="hd-part-detail" data-action="hd-reload">立即重新读取</button></p>`
+    : '';
+  const footer = view.view === 'tree'
+    ? '只读浏览：目录结构来自数据组 struct/，文件大小/时间来自 file-list/；不会访问本机磁盘。'
+    : '此视图只读，数据来自数据组里的 host-disks 文档（host-disks.v2.json → 旧路径 → 镜像）；刷新本地缓存不会重新拉取 RS 遥测。';
   let html;
+  // 实时文档没读到时定时重试。连接是异步建立的，重试让连接就绪后自动换成真实内容；
+  // 有本机快照占位时页面不空，可以等得更久（60 次 ≈ 2 分钟），没快照就只重试 8 次。
+  if (!live.doc) {
+    const key = target.path || '';
+    if (hdConnectRetry.path === key) hdConnectRetry.count += 1;
+    else hdConnectRetry = { path: key, count: 1 };
+    const maxTry = snapshotAt ? 60 : 8;
+    if (hdConnectRetry.count <= maxTry) {
+      setTimeout(() => {
+        const now = current();
+        if (now?.kind === 'hd' && (now.path || '') === key) renderHostDisks(target);
+      }, 2000);
+    }
+  }
   if (!doc) {
+    // 文件被别的端按残留墓碑删掉时给出无损恢复入口：本机缓存的文档就是刚归并出的完整结果。
+    const cached = hostDisksCacheInfo();
+    let autoHtml = '';
+    // 缓存可用时自动恢复一次（30 秒冷却，避免和别的端互相删写形成死循环）；失败再让用户手动点。
+    if (cached && !/未连接/.test(error || '') && Date.now() - hdAutoRestoreAt > 30000) {
+      hdAutoRestoreAt = Date.now();
+      autoHtml = `<div class="stage-hint">数据组里的文件不见了，正在用本机缓存自动恢复…</div>`;
+      void restoreHostDisksFromCache().then(() => {
+        const now = current();
+        if (now?.kind === 'hd' && (now.path || '') === (target.path || '')) return render(current());
+      }).catch(() => {});
+    }
+    const cacheHtml = cached
+      ? `<div class="stage-hint">本机缓存：${cached.volumes} 卷 / ${cached.hosts} 主机 · ${cached.at ? esc(new Date(cached.at).toLocaleString()) : '时间未知'}，可直接写回数据组。</div>
+        <button type="button" class="primary" data-action="hd-restore">用本机缓存恢复写回</button>`
+      : '';
     html = `<h2 class="stage-title">${esc(view.title)}</h2>
       <div class="empty">${esc(error || '数据组中没有主机磁盘文件')}
         <div class="stage-hint">请先点顶部「主机磁盘」读取遥测，再点「写回同步组数据组」，然后回到本页。</div>
+        ${autoHtml}
         <button type="button" class="primary" data-action="hd-reload">重新读取</button>
+        ${cacheHtml}
       </div>`;
   } else {
     html = `<h2 class="stage-title">${esc(view.title)}</h2>
+      ${cacheNote}
+      ${filter}
+      ${mirrorNote}
       ${view.empty ? `<div class="empty">${esc(view.empty)}</div>` : ''}
+      ${notes}
       ${sections}
-      <p class="stage-hint">此视图只读，数据来自数据组 /host-disks/host-disks.json；刷新本地缓存不会重新拉取 RS 遥测。</p>`;
+      <p class="stage-hint">${esc(footer)}</p>`;
   }
   stage.innerHTML = `<div class="hd-virtual-scroll">${html}</div>`;
+  // 快照模式下数据组还没读到，探测结构/文件列表只会白跑一轮，等实时数据回来再补。
+  if (from !== 'cache') void fillVolumeSourceHints();
   const side = view.crumbs.map((part, index) => {
     const active = index === view.crumbs.length - 1;
     return `<div class="side-item${active ? ' active' : ''}" data-action="hd" data-path="${esc(part.path)}">${active ? '· ' : '<span class="icon icon-dir"></span>'}${esc(part.label)}</div>`;
   }).join('');
   sidebar.innerHTML = `<div class="side-title">主机磁盘（数据组）</div>${side}`;
+}
+
+/** 把卷 / 逻辑分区详情的那一行切成行内别名编辑器（Enter 保存 / Esc 取消）。 */
+function openVolumeAliasEditor(button) {
+  const rowEl = button.closest('tr.hd-alias-row');
+  if (!rowEl) return;
+  const key = rowEl.dataset.aliasId || '';
+  const kind = button.dataset.kind || rowEl.dataset.aliasKind || 'volume';
+  const cell = rowEl.querySelector('td:nth-child(2)');
+  if (!cell || !key) return;
+  if (cell.querySelector('#hdAliasInput')) { cell.querySelector('#hdAliasInput').focus(); return; }
+  const aliases = kind === 'partition' ? partitionAliasesFor(hdLastDoc) : volumeAliasesFor(hdLastDoc);
+  const alias = aliases[key] || '';
+  cell.innerHTML = `<span class="hd-alias-edit">
+      <input id="hdAliasInput" class="hd-alias-input" value="${esc(alias)}" placeholder="例如 系统盘、备份盘" maxlength="40">
+      <button type="button" class="hd-part-detail" data-action="hd-alias-save" data-path="${esc(key)}" data-kind="${esc(kind)}">保存</button>
+      <button type="button" class="hd-part-detail" data-action="hd-alias-cancel">取消</button>
+      <span class="stage-hint">留空＝清除别名</span>
+    </span>`;
+  const input = cell.querySelector('#hdAliasInput');
+  if (!input) return;
+  input.focus();
+  input.select();
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      cell.querySelector('[data-action="hd-alias-save"]')?.click();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      render(current());
+    }
+  });
+}
+
+/**
+ * 保存别名（卷 / 逻辑分区）：先落本机（立刻可见、连接未就绪也不丢），再写进数据组文档（跨端共享）。
+ * 写回失败不算白改：别名仍在本机，页面照旧显示，状态栏说明没写进数据组。
+ */
+async function saveVolumeAlias(key, value, kind = 'volume') {
+  const alias = String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, 40);
+  const isPart = kind === 'partition';
+  const label = isPart ? (() => {
+    try { return decodeURIComponent(String(key).split('/').filter(Boolean).pop() || key); } catch { return key; }
+  })() : key;
+  if (isPart) setLocalPartitionAlias(key, alias);
+  else setLocalVolumeAlias(key, alias);
+  status(alias ? `${label} 的别名：${alias}` : `已清除 ${label} 的别名`);
+  await render(current());
+  const live = await loadHostDisksDoc({ force: true });
+  const doc = live.doc;
+  if (!doc) {
+    status(`别名已存在本机；同步组未连接或文档缺失，暂未写入数据组`, true);
+    return;
+  }
+  // 卷与分区的别名各管一张表：先按本次操作落定（清除时要从文档里真的删掉，
+  // 否则「本机 ∪ 文档」的合并会把清掉的别名又带回来），再把本机别名并进去。
+  const patched = { ...doc };
+  if (isPart) {
+    const parts = { ...(doc.partitionAliases || {}) };
+    if (alias) parts[key] = alias; else delete parts[key];
+    patched.partitionAliases = parts;
+  } else {
+    const vols = { ...(doc.volumeAliases || {}) };
+    if (alias) vols[key] = alias; else delete vols[key];
+    patched.volumeAliases = vols;
+  }
+  const finalDoc = attachVolumeAliases(patched);
+  try {
+    await writeHostDisksDoc(finalDoc);
+    status(`已写回数据组 · ${label} ${alias ? `别名「${alias}」` : '别名已清除'}`);
+  } catch (err) {
+    status(`别名已存在本机，写回数据组失败：${err?.message || err}`, true);
+  }
+  invalidateHostDisksDoc();
+  await render(current());
+}
+
+/** 所属磁盘为空时，行内填写/修改该卷的物理磁盘 SN。 */
+function openManualSerialEditor(button) {
+  const rowEl = button.closest('tr.hd-serial-row');
+  if (!rowEl) return;
+  const volumeId = rowEl.dataset.serialId || '';
+  const cell = rowEl.querySelector('td:nth-child(2)');
+  if (!cell || !volumeId) return;
+  if (cell.querySelector('#hdSerialInput')) { cell.querySelector('#hdSerialInput').focus(); return; }
+  const currentValue = hdVolumeManualSerial(volumeId);
+  const hasValue = Boolean(currentValue);
+  cell.innerHTML = `<span class="hd-alias-edit">
+      <input id="hdSerialInput" class="hd-alias-input" value="${esc(currentValue)}" placeholder="物理磁盘 SN，如 001B_448B_48B6_F5C2." maxlength="80">
+      <button type="button" class="hd-part-detail" data-action="hd-serial-save" data-path="${esc(volumeId)}">保存</button>
+      ${hasValue ? `<button type="button" class="hd-part-detail" data-action="hd-serial-clear" data-path="${esc(volumeId)}">清除</button>` : ''}
+      <button type="button" class="hd-part-detail" data-action="hd-serial-cancel">取消</button>
+      <span class="stage-hint">保存后把这个卷挂到该 SN 的磁盘下，并记住这条映射</span>
+    </span>`;
+  const input = cell.querySelector('#hdSerialInput');
+  if (!input) return;
+  input.focus();
+  input.select();
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      cell.querySelector('[data-action="hd-serial-save"]')?.click();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      render(current());
+    }
+  });
+}
+
+/** 取当前文档里该卷已记录的手工磁盘 SN（没有则退回按 ID 推断的 SN，没有则空串）。 */
+function hdVolumeManualSerial(volumeId) {
+  const key = String(volumeId || '').toLowerCase();
+  const volume = (hdLastDoc?.volumes || []).find((v) => String(v?.volumeId || '').toLowerCase() === key);
+  return String(volume?.manualSerial || volume?.derivedSerial || '');
+}
+
+/**
+ * 保存手工磁盘 SN：注册表里先记一条「卷 → SN」映射（下次归并也认），
+ * 再把这条关联直接打进当前文档并写回，页面立刻能看到所属磁盘。
+ * 若此刻同步组还没连上（刷新后很常见），把补丁挂起，连接就绪后自动补写——不让用户重填。
+ */
+async function saveManualDiskSerial(volumeId, value) {
+  const serial = String(value ?? '').trim();
+  try {
+    await rememberManualSerial(volumeId, serial);
+  } catch (err) {
+    status(`SN 未保存：${err?.message || err}`, true);
+    return;
+  }
+  const live = await loadHostDisksDoc({ force: true });
+  if (!live.doc) {
+    addPendingSerial(volumeId, serial);
+    // 本机快照也打上补丁，页面立刻反映；连接就绪后由 renderHostDisks 统一补写数据组。
+    const snap = hostDisksCachedDoc();
+    if (snap?.doc) cacheHostDisksDoc(applyManualDiskSerial(snap.doc, volumeId, serial).doc);
+    status(`已记住 ${volumeId} 的磁盘 SN${serial ? `：${serial}` : '（已清除）'}；同步组还没连上，连接就绪后会自动写进数据组`);
+    await render(current());
+    return;
+  }
+  const { doc, matched } = applyManualDiskSerial(live.doc, volumeId, serial);
+  try {
+    await writeHostDisksDoc(doc);
+    clearPendingSerial(volumeId, serial);
+    status(matched
+      ? `已把 ${volumeId} 挂到磁盘 ${matched.serial}`
+      : (serial ? `已记住 ${volumeId} 的磁盘 SN：${serial}（数据组里还没有这块盘，等遥测补到后会自动对上）` : `已取消 ${volumeId} 的手工磁盘关联`));
+  } catch (err) {
+    status(`已记住该 SN，但写回数据组失败：${err?.message || err}`, true);
+  }
+  invalidateHostDisksDoc();
+  await render(current());
+}
+
+/**
+ * 把挂起的手工 SN 补丁统一写进数据组：连接就绪、读到实时文档后调用。
+ * 成功后清补丁并重渲染一次；失败保留补丁，等下一轮渲染再试（有冷却，不会打转）。
+ */
+async function flushPendingSerials(doc) {
+  const pending = readPendingSerials();
+  if (!pending.length || !doc) return false;
+  let working = doc;
+  for (const item of pending) working = applyManualDiskSerial(working, item.volumeId, item.serial).doc;
+  await writeHostDisksDoc(working);
+  for (const item of pending) clearPendingSerial(item.volumeId, item.serial);
+  invalidateHostDisksDoc();
+  return true;
+}
+
+let hdRenderSeq = 0;
+// 当前渲染用的文档（快照模式时也是快照），给别名/SN 编辑取「已有什么」用。
+let hdLastDoc = null;
+// 自动恢复冷却：文件被别的端删除时用缓存重建，但避免两端互删互写打成死循环。
+let hdAutoRestoreAt = 0;
+// 挂起的手工 SN 补写冷却（连接建立后统一补写，避免每轮渲染都重写文档）。
+let hdPendingFlushAt = 0;
+let hdConnectRetry = { path: '', count: 0 };
+/** 探测数据组里每块卷的目录结构 / 文件列表是否可浏览，补到当前行（只补不重绘）。 */
+async function fillVolumeSourceHints() {
+  const seq = hdRenderSeq;
+  const rows = [...stage.querySelectorAll('tr[data-hd-volume], tr[data-hd-volumes]')];
+  if (!rows.length) return;
+  await Promise.all(rows.map(async (rowEl) => {
+    const ids = rowEl.dataset.hdVolume
+      ? [rowEl.dataset.hdVolume]
+      : String(rowEl.dataset.hdVolumes || '').split('|').filter(Boolean);
+    if (!ids.length) return;
+    const drive = rowEl.dataset.hdDrive || (rowEl.dataset.letter ? `${rowEl.dataset.letter}:` : '');
+    const probes = await Promise.all(ids.map((id) => probeVolumeSources(id, drive).catch(() => null)));
+    if (seq !== hdRenderSeq || !rowEl.isConnected) return;
+    const cell = rowEl.querySelector('td:nth-child(2)');
+    if (!cell) return;
+    let hint;
+    let tips;
+    if (ids.length === 1) {
+      const p = probes[0];
+      if (!p) return;
+      hint = `${p.tree.ok ? `结构 ${p.tree.count} 项` : '无目录结构'} · ${p.files.ok ? `文件列表 ${p.files.count} 个` : (p.files.error ? '文件列表不可读' : '无文件列表')}`;
+      tips = [p.tree.error, p.files.error, p.files.note].filter(Boolean).join('；');
+    } else {
+      const trees = probes.filter((p) => p?.tree.ok).length;
+      const fileLists = probes.filter((p) => p?.files.ok).length;
+      hint = `数据组：结构 ${trees}/${ids.length} · 文件列表 ${fileLists}/${ids.length}`;
+      tips = probes.filter(Boolean).flatMap((p) => [p.tree.error, p.files.error, p.files.note].filter(Boolean)).slice(0, 3).join('；');
+    }
+    const existing = cell.querySelector('.hd-src');
+    if (existing) { existing.textContent = ` · ${hint}`; existing.title = tips; return; }
+    cell.insertAdjacentHTML('beforeend', `<span class="hd-src" title="${esc(tips)}"> · ${esc(hint)}</span>`);
+  }));
 }
 
 function parentOf(abs) {
@@ -1458,6 +1890,36 @@ document.addEventListener('click', async (event) => {
     driveCache?.edit(element.dataset.dir);
     return;
   }
+  if (action === 'hd-alias-edit') {
+    openVolumeAliasEditor(element);
+    return;
+  }
+  if (action === 'hd-alias-save') {
+    const rowEl = element.closest('tr.hd-alias-row');
+    await saveVolumeAlias(element.dataset.path || '', rowEl?.querySelector('#hdAliasInput')?.value ?? '', element.dataset.kind || rowEl?.dataset.aliasKind || 'volume');
+    return;
+  }
+  if (action === 'hd-alias-cancel') {
+    await render(current());
+    return;
+  }
+  if (action === 'hd-serial-edit') {
+    openManualSerialEditor(element);
+    return;
+  }
+  if (action === 'hd-serial-save') {
+    const rowEl = element.closest('tr.hd-serial-row');
+    await saveManualDiskSerial(element.dataset.path || '', rowEl?.querySelector('#hdSerialInput')?.value ?? '');
+    return;
+  }
+  if (action === 'hd-serial-clear') {
+    await saveManualDiskSerial(element.dataset.path || '', '');
+    return;
+  }
+  if (action === 'hd-serial-cancel') {
+    await render(current());
+    return;
+  }
   if (action.startsWith('trash-')) {
     await handleTrashAction(action, element, event);
     return;
@@ -1560,7 +2022,38 @@ document.addEventListener('click', async (event) => {
   try {
     if (action === 'hd') {
       navigate({ kind: 'hd', path: element.dataset.path || '' });
+    } else if (action === 'hd-open') {
+      // 卷行：本机卷直达本地目录，清单卷进只读树。
+      const localPath = element.dataset.localPath || '';
+      navigate(localPath ? { kind: 'dir', path: localPath } : { kind: 'hd', path: element.dataset.path || '' });
+    } else if (action === 'hd-part-detail') {
+      navigate({ kind: 'hd', path: element.dataset.path || '' });
+    } else if (action === 'hd-tree') {
+      // 本地卷也能从「只读结构」进数据组里的 struct / file-list 浏览，不被本地路径挡住。
+      navigate({ kind: 'hd', path: element.dataset.path || '' });
+    } else if (action === 'hd-part') {
+      // 逻辑分区主点击：本机 → 本地盘符；非本机单卷 → 该卷目录树；多卷/无卷 → 分区详情。
+      const localPath = element.dataset.localPath || '';
+      if (localPath) { navigate({ kind: 'dir', path: localPath }); return; }
+      const letter = String(element.dataset.letter || '').toUpperCase();
+      const hostLocal = element.dataset.hostLocal === '1';
+      let resumedLocal = '';
+      if (hostLocal && /^[A-Z]$/.test(letter)) {
+        const cached = localHostCache.value;
+        // 主机就是本机时盘符必定指本机盘；已缓存的卷清单里没有该盘符 → 现在拔掉了，退回只读视图。
+        if (!cached) resumedLocal = `${letter}:\\`;
+        else if (cached.volumes?.[letter]) resumedLocal = `${letter}:\\`;
+      }
+      if (resumedLocal) { navigate({ kind: 'dir', path: resumedLocal }); return; }
+      const single = element.dataset.singlePath || '';
+      navigate({ kind: 'hd', path: single || element.dataset.path || '' });
     } else if (action === 'hd-reload') {
+      await loadHostDisksDoc({ force: true });
+      await render(current());
+    } else if (action === 'hd-restore') {
+      // 数据组里的文档被别的端按墓碑删掉：用本机缓存重建，不必再等十几秒的 RS 遥测。
+      const info = await restoreHostDisksFromCache();
+      status(`已用 ${new Date(info.at).toLocaleString()} 的缓存写回 · ${info.volumes} 卷 / ${info.hosts} 主机`);
       await loadHostDisksDoc({ force: true });
       await render(current());
     } else if (action === 'drive' || action === 'dir') {
@@ -1596,6 +2089,11 @@ document.addEventListener('click', async (event) => {
 });
 
 document.addEventListener('change', (event) => {
+  if (event.target?.id === 'hdVirtualHideNoDisk') {
+    writeHideNoDisk(event.target.checked);
+    render(current()).catch(showError);
+    return;
+  }
   const box = event.target.closest?.('.trash-check');
   if (!box || !box.checked || box.dataset.dir !== 'true') return;
   requestDirSize(box.dataset.path, box.dataset.name, true);
@@ -1661,6 +2159,9 @@ initManifestSync({
 const driveCache = initDriveCache({ api, status });
 initManifestVolumeImport({ api, status });
 initHostDisksPanel({ status });
+
+// 预热本机卷身份：/api/hostinfo 要跑 PowerShell + 逐个盘 vol，先取一次，打开「此电脑」时卷 ID 直接就有。
+void localHostInfoFor();
 
 // 文本选择保护按需加载：未重启的旧服务没有该模块白名单时也不影响主程序。
 import('./text-selection-guard.js')

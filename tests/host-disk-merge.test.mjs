@@ -131,6 +131,78 @@ test('buildHostDiskDocument：产出 v2 写回文档，含 stats', () => {
   assert.deepEqual(doc.stats, m.stats);
 });
 
+test('本机卷 ID：按 volumeId 精确配对清单卷，主机名对不上也能关联', () => {
+  const raws = [detail('u1', 'PC-1'), { uuid: 'u1', name: 'PC-1', last_access: Date.now() }];
+  const { hosts } = ufs.normalizeUfsNodes(raws);
+  const volumes = [
+    { volumeId: 'VOL-C', backend: 'VOL_C', drive: 'C:', sources: ['PC-1'] },
+    { volumeId: 'VOL-E', backend: 'VOL_E', drive: 'E:', sources: ['PC-OTHER'] },
+  ];
+  // 本机读到 C / E / F 三个卷 ID；E 的清单来源主机名已经变了，靠 ID 才能对上
+  const localHost = { host: 'PC-1', volumes: { C: 'VOL-C', E: 'VOL-E', F: 'VOL-F' } };
+  const m = merge.mergeHostsWithVolumes(hosts, volumes, undefined, undefined, undefined, localHost);
+
+  const c = m.rows.find((r) => r.volumeId === 'VOL-C');
+  assert.equal(c.matchBy, 'local-volume-id');
+  assert.equal(c.localVolumeId, 'VOL-C');
+  assert.equal(c.localSource, true);
+  assert.equal(c.telemetry.serial, 'SNR1234567890', 'ID 命中仍要带出物理盘明细');
+
+  const e = m.rows.find((r) => r.volumeId === 'VOL-E');
+  assert.equal(e.matchBy, 'local-volume-id', '主机名对不上时靠卷 ID 关联');
+  assert.equal(e.telemetry.hostname, 'PC-1');
+  assert.equal(e.telemetry.serial, null, 'E: 没有遥测逻辑盘，只关联到主机');
+
+  // F 只在本机存在、清单没扫到：记一条 local-only，保证本机卷 ID 完整
+  const f = m.rows.find((r) => r.volumeId === 'VOL-F');
+  assert.equal(f.matchBy, 'local-only');
+  assert.equal(f.drive, 'F:');
+  assert.equal(f.localOnly, true);
+  assert.equal(f.localVolumeId, 'VOL-F');
+
+  assert.equal(m.stats.localVolumes, 3);
+  assert.equal(m.stats.localMatched, 2);
+  assert.equal(m.stats.localOnly, 1);
+  assert.equal(m.stats.unmatched, 0, 'local-only 不算清单里未关联的卷');
+
+  const doc = merge.buildHostDiskDocument(m);
+  assert.deepEqual(doc.localHost, { host: 'PC-1', volumes: { C: 'VOL-C', E: 'VOL-E', F: 'VOL-F' } });
+  const docC = doc.volumes.find((v) => v.volumeId === 'VOL-C');
+  assert.equal(docC.localVolumeId, 'VOL-C');
+  assert.equal(docC.localSource, true);
+  const docF = doc.volumes.find((v) => v.volumeId === 'VOL-F');
+  assert.equal(docF.localOnly, true);
+});
+
+test('本机卷 ID：遥测里没有本机时补一台本机主机，本机卷不掉进孤儿卷', () => {
+  const localHost = { host: 'NEW-PC', volumes: { C: 'VOL-C', D: 'VOL-D' } };
+  const volumes = [{ volumeId: 'VOL-C', backend: 'VOL_C', drive: 'C:', sources: ['NEW-PC'] }];
+  const m = merge.mergeHostsWithVolumes([], volumes, undefined, undefined, undefined, localHost);
+  assert.equal(m.rows[0].matchBy, 'local-volume-id');
+  assert.equal(m.stats.hosts, 1, '本机也要算一台主机');
+
+  const tree = merge.buildHostTree(m);
+  assert.equal(tree.orphans.length, 0);
+  assert.equal(tree.hosts.length, 1);
+  assert.equal(tree.hosts[0].hostId, 'new-pc');
+  assert.equal(tree.hosts[0].local, true);
+  // C 已入清单、D 只在本机：两条都挂在「未归属到磁盘的卷」下
+  assert.deepEqual(tree.hosts[0].unassigned.map((r) => r.volumeId).sort(), ['VOL-C', 'VOL-D']);
+
+  const doc = merge.buildHostDiskDocument(m);
+  assert.equal(doc.hosts[0].local, true);
+  assert.deepEqual(doc.localHost, { host: 'NEW-PC', volumes: { C: 'VOL-C', D: 'VOL-D' } });
+});
+
+test('normalizeLocalHost：盘符归一（C / C: / c:）与非法值过滤', () => {
+  const local = merge.normalizeLocalHost({ host: 'PC', volumes: { C: 'ID-C', 'd:': 'ID-D', '': 'x', E: null, 'too-long-key': 'y' } });
+  assert.deepEqual([...local.byDrive.keys()].sort(), ['c:', 'd:']);
+  assert.equal(local.byId.get('id-c').drive, 'C:');
+  assert.deepEqual(local.volumes, { C: 'ID-C', D: 'ID-D' });
+  assert.equal(merge.normalizeLocalHost(null), null);
+  assert.equal(merge.normalizeLocalHost({ volumes: {} }), null);
+});
+
 test('主机磁盘视图不依赖卷匹配：无清单卷时仍保留主机、磁盘与逻辑分区', () => {
   const raws = [detail('u1', 'PC-1')];
   const { hosts } = ufs.normalizeUfsNodes(raws);
