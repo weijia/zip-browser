@@ -1238,7 +1238,11 @@ async function toggleTagExpand(key) {
           size: child.size,
         }));
       } else {
-        const result = await api(`/api/list?path=${encodeURIComponent(key)}`);
+        // annotations 的 key 是 fs:<本地路径> 这类目标键，不是可直接给 /api/list 的路径；
+        // 本机目录要用条目上的 path 去列目录，否则服务端会报 invalid windows path。
+        const entry = tagEntries(tagViewSnapshot()).find((item) => item.key === key);
+        const localPath = entry?.path || key;
+        const result = await api(`/api/list?path=${encodeURIComponent(localPath)}`);
         expand.items = (Array.isArray(result.items) ? result.items : [])
           .map((item) => ({ ...item, key: item.path }));
       }
