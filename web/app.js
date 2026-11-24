@@ -409,57 +409,102 @@ function applyDirSizeCache() {
   }
 }
 
+let activeDirSizeJob = null;
+
 async function flushDirSizeQueue() {
   if (dirSizeRunning || !dirSizeQueue.size) return;
   const paths = Array.from(dirSizeQueue).slice(0, 40);
   for (const path of paths) dirSizeQueue.delete(path);
   dirSizeRunning = true;
+  let jobId = '';
+  let sawDone = false;
+  let jobError = '';
+  let lastPaint = 0;
+  const controller = new AbortController();
+  activeDirSizeJob = { controller, jobId: '' };
   try {
-    const data = await api('/api/mft/scan', {
+    // 一次任务可以带多个根目录；服务端全量递归，前端只拿进度和根汇总。
+    const started = await api('/api/scan/jobs', {
       method: 'POST',
       body: JSON.stringify({
-        paths: paths.map((path) => ({ path, recursive: true, sizeFull: true })),
-        recursive: true,
-        sizeFull: true,
-        timeoutMs: 60_000,
+        paths: paths.map((path) => ({ path })),
+        timeoutMs: 0,
       }),
     });
-    for (const [summaryPath, summary] of Object.entries(data.summaries || {})) {
-      if (!summaryPath || !summary || typeof summary !== 'object') continue;
-      dirSizeCache.set(summaryPath, {
-        fileCount: Number(summary.fileCount) || 0,
-        totalSize: Number(summary.totalSize) || 0,
-        totalSizeOnDisk: Number(summary.totalSizeOnDisk) || 0,
-        partial: Boolean(summary.partial || summary.incomplete || summary.sizePartial),
-      });
-    }
-    for (const path of paths) {
-      const summary = pickDirSummary(data, path);
-      if (summary) {
-        dirSizeCache.set(path, {
-          fileCount: Number(summary.fileCount) || 0,
-          totalSize: Number(summary.totalSize) || 0,
-          totalSizeOnDisk: Number(summary.totalSizeOnDisk) || 0,
-          partial: Boolean(summary.partial || summary.incomplete || summary.sizePartial),
-        });
-      } else if (!(cachedDirSize(path) && typeof cachedDirSize(path) === 'object')) {
-        dirSizeCache.set(path, 'error');
-      }
-      updateDirSizeDisplays(path, dirSizeNotify.get(path));
-      dirSizeNotify.delete(path);
-    }
-    applyDirSizeCache();
+    jobId = started?.jobId || '';
+    if (!jobId) throw new Error('扫描任务没有返回 jobId');
+    activeDirSizeJob.jobId = jobId;
+    await apiNdjson(`/api/scan/jobs/${encodeURIComponent(jobId)}/stream`, {
+      signal: controller.signal,
+      onEvent: (event) => {
+        if (event?.type === 'progress') {
+          const now = Date.now();
+          if (now - lastPaint < 400) return;
+          lastPaint = now;
+          const dirs = Number(event.dirs) || 0;
+          const files = Number(event.files) || 0;
+          const bytes = Number(event.bytes) || 0;
+          status(`正在扫描：${dirs.toLocaleString('zh-CN')} 个目录 / ${files.toLocaleString('zh-CN')} 个文件 / ${formatSize(bytes)}`);
+          return;
+        }
+        if (event?.type === 'done') {
+          sawDone = true;
+          const results = Array.isArray(event.results) ? event.results : [];
+          for (const path of paths) {
+            const result = pickDirSummary({ roots: results, summaries: Object.fromEntries(results.map((item) => [item.path, item])) }, path);
+            if (result) {
+              dirSizeCache.set(path, {
+                fileCount: Number(result.fileCount) || 0,
+                totalSize: Number(result.totalSize) || 0,
+                totalSizeOnDisk: Number(result.totalSizeOnDisk) || 0,
+                partial: Boolean(result.partial || result.incomplete || result.sizePartial),
+              });
+            } else if (!(cachedDirSize(path) && typeof cachedDirSize(path) === 'object')) {
+              dirSizeCache.set(path, 'error');
+            }
+            updateDirSizeDisplays(path, dirSizeNotify.get(path));
+            dirSizeNotify.delete(path);
+          }
+          applyDirSizeCache();
+          const root = results.find((item) => pathKey(item.path) === pathKey(paths[0]));
+          if (root) status(`目录体积：${dirSizeDetail(root)}`);
+          return;
+        }
+        if (event?.type === 'error') {
+          jobError = event.error || '扫描任务失败';
+        }
+      },
+    });
+    if (!sawDone) throw new Error(jobError || '扫描连接提前结束');
   } catch (err) {
-    for (const path of paths) {
-      dirSizeCache.set(path, 'error');
-      updateDirSizeDisplays(path, dirSizeNotify.get(path));
-      dirSizeNotify.delete(path);
+    if (err?.name === 'AbortError') {
+      for (const path of paths) {
+        if (dirSizeCache.get(path) === 'pending') dirSizeCache.delete(path);
+        updateDirSizeDisplays(path, dirSizeNotify.get(path));
+        dirSizeNotify.delete(path);
+      }
+    } else {
+      for (const path of paths) {
+        dirSizeCache.set(path, 'error');
+        updateDirSizeDisplays(path, dirSizeNotify.get(path));
+        dirSizeNotify.delete(path);
+      }
+      status(`目录体积读取失败：${err.message || err}`, true);
     }
-    status(`目录体积读取失败：${err.message || err}`, true);
   } finally {
+    if (jobId && !sawDone) {
+      // 页面切走后流已 abort，这里顺手通知服务端停止任务；失败不影响界面。
+      api(`/api/scan/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST', body: '{}' }).catch(() => {});
+    }
+    activeDirSizeJob = null;
     dirSizeRunning = false;
     if (dirSizeQueue.size) scheduleDirSizeFlush();
   }
+}
+
+function cancelActiveDirSizeScan() {
+  if (!activeDirSizeJob) return;
+  activeDirSizeJob.controller.abort();
 }
 
 const dirSizeNotify = new Map(); // path -> name，勾选目录触发时回写状态栏
@@ -798,6 +843,42 @@ async function api(url, options = {}) {
   return data;
 }
 
+// 扫描任务用一条 NDJSON 长连接：进度与最终结果逐行到，避免等一个整包 JSON。
+async function apiNdjson(url, { signal, onEvent } = {}) {
+  const response = await fetch(apiUrl(url), {
+    headers: authHeaders(),
+    signal,
+    credentials: AUTH_MODE ? 'same-origin' : undefined,
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const error = new Error(data.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  if (!response.body) throw new Error('浏览器不支持流式响应');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const emit = (line) => {
+    const text = line.trim();
+    if (!text) return;
+    let event;
+    try { event = JSON.parse(text); } catch { return; }
+    if (typeof onEvent === 'function') onEvent(event);
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) emit(line);
+  }
+  buffer += decoder.decode();
+  if (buffer) emit(buffer);
+}
+
 function current() {
   return state.target;
 }
@@ -825,6 +906,7 @@ function updateNavButtons() {
 }
 
 function navigate(target, push = true) {
+  cancelActiveDirSizeScan();
   state.target = target;
   if (push) {
     state.index += 1;

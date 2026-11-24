@@ -188,16 +188,15 @@ export async function listDirectory(abs) {
   } catch (err) {
     throw new HttpError(err.code === 'ENOENT' ? 404 : 403, `cannot open directory: ${err.message}`);
   }
-  const items = [];
-  const probes = [];
-  for (const entry of entries) {
-    if (entry.isSymbolicLink()) continue;
+  // 大目录逐项 stat 很慢；并行有上限，既不串行等 N 次，也不一次打开太多句柄。
+  const items = (await mapLimit(entries, 32, async (entry) => {
+    if (entry.isSymbolicLink()) return null;
     const full = path.win32.join(abs, entry.name);
     try {
       const stat = await fs.stat(full);
       const dir = stat.isDirectory();
       const archive = !dir && isArchiveName(entry.name);
-      const item = {
+      return {
         name: entry.name,
         path: full,
         dir,
@@ -207,12 +206,12 @@ export async function listDirectory(abs) {
         // zip 字段保留为 archive 的别名，避免旧前端/测试失效。
         zip: archive,
       };
-      items.push(item);
-      if (archive) probes.push({ item, size: stat.size, mtimeMs: stat.mtimeMs });
     } catch {
       // skip unreadable entries instead of failing the whole listing
+      return null;
     }
-  }
+  })).filter(Boolean);
+  const probes = items.filter((item) => item.archive).map((item) => ({ item, size: item.size, mtimeMs: item.mtime }));
   items.sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name, 'zh-CN'));
   allowDirectory(abs);
   // 压缩包加密标记：只对归档做「读头尾若干 KB」的轻量探测，判不准返回 unknown。
@@ -233,6 +232,31 @@ export async function listDirectory(abs) {
   }
   for (const item of items) if (!item.dir) item.tags = [];
   return { path: abs, items, tags: detectTags(entries.map((entry) => entry.name)) };
+}
+
+function mapLimit(items, limit, fn) {
+  return new Promise((resolve, reject) => {
+    const out = new Array(items.length);
+    let cursor = 0;
+    let active = 0;
+    let finished = 0;
+    const pump = () => {
+      while (active < limit && cursor < items.length) {
+        const index = cursor;
+        cursor += 1;
+        active += 1;
+        Promise.resolve(fn(items[index], index)).then((value) => {
+          out[index] = value;
+          finished += 1;
+          active -= 1;
+          if (finished === items.length) resolve(out);
+          else pump();
+        }, reject);
+      }
+    };
+    if (!items.length) resolve(out);
+    else pump();
+  });
 }
 
 export async function findIndexFile(abs) {

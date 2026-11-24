@@ -30,6 +30,7 @@ import {
 } from './drive-cache.js';
 import { openInExplorer } from './explorer-service.js';
 import { scanPaths, listTreeLevel, readMtimes } from './manifest-scan.js';
+import { startScanJob, scanJobStatus, cancelScanJob, streamScanJob } from './scan-jobs.js';
 import {
   createVault,
   unlockVault,
@@ -216,6 +217,28 @@ async function handleApi(req, res, url) {
   if (req.method === 'POST' && pathname === '/api/mft/mtimes') {
     const body = await readJson(req);
     return json(res, 200, { mtimes: await readMtimes(body.paths) });
+  }
+
+  // 目录体积长任务：启动立即返回 jobId，进度走 NDJSON 长连接。
+  if (req.method === 'POST' && pathname === '/api/scan/jobs') {
+    const body = await readJson(req);
+    const result = await startScanJob(body.paths, {
+      refresh: body.refresh === true,
+      timeoutMs: Number(body.timeoutMs) || 0,
+      maxDepth: Number(body.maxDepth) || undefined,
+    });
+    return json(res, 202, result);
+  }
+  if (req.method === 'GET' && pathname.startsWith('/api/scan/jobs/')) {
+    const match = /^\/api\/scan\/jobs\/([^/]+)(?:\/(stream))?$/.exec(pathname);
+    if (!match) throw new HttpError(404, 'unknown scan job api');
+    const jobId = decodeURIComponent(match[1]);
+    if (match[2] === 'stream') return await streamScanJob(req, res, jobId, url);
+    return json(res, 200, scanJobStatus(jobId));
+  }
+  if (req.method === 'POST' && /^\/api\/scan\/jobs\/[^/]+\/cancel$/.test(pathname)) {
+    const jobId = decodeURIComponent(pathname.split('/')[4] || '');
+    return json(res, 200, cancelScanJob(jobId));
   }
 
   // 唯一的写操作：把当前目录的直接子项送进 Windows 回收站（可还原），不做永久删除。
