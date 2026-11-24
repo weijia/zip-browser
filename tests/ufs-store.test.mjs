@@ -120,6 +120,24 @@ test('readYear：坏分片跳过并计数，不影响其它分片', async () => 
   assert.equal(year.entries.length, 1);
 });
 
+test('addEntries：一次加入按年份分组，每个年份只生成一份分片', async () => {
+  const fs = memoryFs();
+  const now = new Date(2026, 10, 24, 10, 0, 0).getTime();
+  const result = await mod.addEntries(fs, [
+    { name: 'dirA', type: 'dir', source: { kind: 'local', path: 'C:\\a' }, addedAt: now },
+    { name: 'old.pdf', type: 'file', mtime: new Date(2019, 0, 1).getTime(), source: { kind: 'local', path: 'C:\\a\\old.pdf' }, addedAt: now },
+    { name: 'new.pdf', type: 'file', mtime: now, source: { kind: 'local', path: 'C:\\a\\new.pdf' }, addedAt: now },
+  ], { now, random: 0.2 });
+  assert.equal(result.shards.length, 2);
+  assert.equal(result.entries[0].size, null);
+  const y2019 = await mod.readYear(fs, 2019);
+  const y2026 = await mod.readYear(fs, 2026);
+  assert.equal(y2019.shards, 1);
+  assert.equal(y2019.entries.length, 1);
+  assert.equal(y2026.shards, 1);
+  assert.equal(y2026.entries.length, 2);
+});
+
 test('addEntry：直接方法形态的 fs（无 .promises）也能建目录并写分片', async () => {
   const base = memoryFs();
   const direct = {

@@ -61,13 +61,14 @@ export function makeEntry(raw, now = Date.now()) {
   const type = raw.type === 'file' ? 'file' : 'dir';
   const name = String(raw.name || raw.label || '').trim();
   if (!name) throw new Error('缺少名称');
+  const sizeValue = raw.size == null || raw.size === '' ? null : Number(raw.size);
   return {
     v: 1,
     id: raw.id || entryId(source, name),
     name,
     type,
     source,
-    size: Number.isFinite(Number(raw.size)) ? Number(raw.size) : null,
+    size: Number.isFinite(sizeValue) ? sizeValue : null,
     mtime: Number.isFinite(Number(raw.mtime)) && Number(raw.mtime) > 0 ? Number(raw.mtime) : null,
     addedAt: Number.isFinite(Number(raw.addedAt)) && Number(raw.addedAt) > 0 ? Number(raw.addedAt) : now,
     updatedAt: now,
@@ -151,22 +152,40 @@ export async function readYear(fs, year) {
   return { entries: mergeShards(docs), shards: files.length, broken, files };
 }
 
-/** 写一份新分片；不读旧分片、不改写已有文件。 */
-export async function addEntry(fs, raw, { now = Date.now(), random = Math.random() } = {}) {
-  const entry = makeEntry(raw, now);
-  const year = bucketYear(entry);
+/** 批量加入：同一批里按归档年份分组，每个年份目录只写一份新分片。 */
+export async function addEntries(fs, raws, { now = Date.now(), random = Math.random() } = {}) {
+  const entries = (Array.isArray(raws) ? raws : []).map((raw) => makeEntry(raw, now));
+  const byYear = new Map();
+  for (const entry of entries) {
+    const year = bucketYear(entry);
+    if (!byYear.has(year)) byYear.set(year, []);
+    byYear.get(year).push(entry);
+  }
   const fp = io(fs);
-  // 数据组根下可能还没有 /ufs，部分 StoreFS 的递归 mkdir 不会补建缺失父目录。
   await ensureDir(fp, UFS_ROOT);
-  await ensureDir(fp, `${UFS_ROOT}/${year}`);
-  const path = shardPath(year, shardFileName(now, random));
-  await fp.writeFile(path, `${JSON.stringify({
-    v: 1,
-    year,
-    entries: [entry],
-    createdAt: now,
-  }, null, 2)}\n`);
-  return { entry, year, path };
+  const shards = [];
+  let index = 0;
+  for (const [year, group] of byYear) {
+    await ensureDir(fp, `${UFS_ROOT}/${year}`);
+    // 同一年只生成一份；年份目录不同，即使时间戳相同也不会互相覆盖。
+    const path = shardPath(year, shardFileName(now, (random + index * 0.137) % 1));
+    index += 1;
+    await fp.writeFile(path, `${JSON.stringify({
+      v: 1,
+      year,
+      entries: group,
+      createdAt: now,
+    }, null, 2)}\n`);
+    shards.push({ year, path, count: group.length });
+  }
+  return { entries, shards };
+}
+
+/** 单条加入：内部仍走批量写分片，保持「每次加入生成新分片」的语义。 */
+export async function addEntry(fs, raw, options = {}) {
+  const result = await addEntries(fs, [raw], options);
+  const entry = result.entries[0];
+  return { entry, year: bucketYear(entry), path: result.shards[0].path };
 }
 
 /** 删除包含该 id 的所有分片文件（分片只增不改，所以直接删文件）。 */

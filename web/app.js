@@ -17,7 +17,7 @@ import { initHostDisksPanel, hostDisksCacheInfo, hostDisksCachedDoc, cacheHostDi
 import { loadHostDisksDoc, describeVirtual, describeTreePath, treePath, probeVolumeSources, readHideNoDisk, writeHideNoDisk, invalidateHostDisksDoc, volumeAliasesFor, setLocalVolumeAlias, applyManualDiskSerial, readPendingSerials, addPendingSerial, clearPendingSerial, applyDerivedSerials, attachVolumeAliases, partitionAliasesFor, setLocalPartitionAlias } from './host-disks-browser.js';
 import { createSelectionStore, isDirSelected, isFileSelected, addDirSelection, removeDirSelection, removeFileDirSelection, removePickedFile, selectionPathKey } from './manifest-selection.js';
 import { loadVolumeTree, findTreeNode } from './volume-tree.js';
-import { addEntry as addUfsEntry, listYears as listUfsYears, readYear as readUfsYear, removeEntry as removeUfsEntry, makeEntry as makeUfsEntry, UFS_ROOT } from './ufs-store.js';
+import { addEntries as addUfsEntries, listYears as listUfsYears, readYear as readUfsYear, removeEntry as removeUfsEntry, UFS_ROOT } from './ufs-store.js';
 import {
   initManifestBuilder, addPickedFromItem, addFileListDir, openCopyRefForItem,
   openDirListForItem, getCachedDirSummary,
@@ -763,7 +763,7 @@ function ufsControl(item) {
   if (!name) return '';
   return `<button type="button" class="ufs-add" data-action="ufs-add" data-path="${esc(item.path || '')}"
     data-name="${esc(name)}" data-dir="${item.dir ? '1' : ''}" data-mtime="${esc(item.mtime || '')}"
-    data-size="${esc(item.size ?? '')}" title="把这个${item.dir ? '目录' : '文件'}加入 /ufs/">+ufs</button>`;
+    data-size="${esc(item.size ?? '')}" title="${item.dir ? '把这个目录及其所有子目录、文件加入 /ufs/' : '把这个文件加入 /ufs/'}">+ufs</button>`;
 }
 
 function rowMenuButton(item) {
@@ -1345,7 +1345,7 @@ function ufsRowHtml(entry) {
   const icon = entry.type === 'dir' ? 'icon-dir' : 'icon-file';
   const src = entry.source || {};
   const where = src.kind === 'volume'
-    ? `卷 ${src.volumeId || ''}${src.rel ? `/${src.rel}` : ''}`
+    ? (src.path || `卷 ${src.volumeId || ''}${src.rel ? `/${src.rel}` : ''}`)
     : (src.kind === 'zip' ? `${src.zipPath || ''}${src.entry ? ` / ${src.entry}` : ''}` : (src.path || ''));
   const meta = [
     where,
@@ -1397,6 +1397,74 @@ async function renderUfs(target) {
     ${info.entries.length ? info.entries.map((entry) => ufsRowHtml(entry)).join('') : '<p class="stage-hint">这一年还没有条目。</p>'}`;
 }
 
+/**
+ * 本机路径 → 全局卷路径（volumeId + 卷内相对路径）。
+ * /ufs/ 只存这种跨设备稳定的地址，不把 C:\ 这类本机盘符写进索引。
+ */
+function relInVolume(abs) {
+  const match = /^([A-Za-z]):[\\/](.*)$/.exec(String(abs || '').trim());
+  if (!match) return null;
+  return {
+    letter: `${match[1].toUpperCase()}:`,
+    rel: match[2].split(/[\\/]+/).filter(Boolean).join('/'),
+  };
+}
+
+async function localVolumeForPath(abs) {
+  const parsed = relInVolume(abs);
+  if (!parsed) return null;
+  const info = await localHostInfoFor().catch(() => null);
+  const volumeId = info?.volumes?.[parsed.letter[0]];
+  if (!volumeId) return null;
+  return { volumeId, rel: parsed.rel };
+}
+
+async function localPathForVolume(volumeId, rel) {
+  const info = await localHostInfoFor().catch(() => null);
+  for (const [letter, id] of Object.entries(info?.volumes || {})) {
+    if (id !== volumeId) continue;
+    const parts = String(rel || '').split('/').filter(Boolean);
+    return `${letter}:\\${parts.join('\\')}`;
+  }
+  return null;
+}
+
+function volumeSource(volumeId, rel) {
+  return { kind: 'volume', volumeId, rel, path: treePath(volumeId, rel) };
+}
+
+/**
+ * 递归收集本机目录下的所有子目录与文件（只登记指针，不读文件内容）。
+ * 子目录不可读时跳过，根目录不可读则直接失败；用大小写归一后的路径防 junction 绕回。
+ */
+async function collectLocalTree(root) {
+  const out = [];
+  const queue = [root];
+  const seen = new Set();
+  let scanned = 0;
+  while (queue.length) {
+    const dir = queue.shift();
+    const key = dir.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    let data;
+    try {
+      data = await api(`/api/list?path=${encodeURIComponent(dir)}`);
+    } catch (err) {
+      if (dir === root) throw err;
+      continue;
+    }
+    for (const item of Array.isArray(data.items) ? data.items : []) {
+      if (!item?.path) continue;
+      out.push(item);
+      if (item.dir) queue.push(item.path);
+    }
+    scanned += 1;
+    if (scanned % 20 === 0) status(`正在收集 ${root} 下的子项… 已发现 ${out.length} 项`);
+  }
+  return out;
+}
+
 async function addUfsFromElement(element) {
   // 数据组连接晚于首屏：点得早时等它一下，别直接丢一次加入。
   let fs = getDataGroupFs();
@@ -1413,17 +1481,46 @@ async function addUfsFromElement(element) {
   const dir = element.dataset.dir === '1';
   const mtime = Number(element.dataset.mtime) || null;
   const size = element.dataset.size === '' ? null : Number(element.dataset.size);
-  const entry = makeUfsEntry({
+  const global = await localVolumeForPath(path);
+  if (!global) {
+    status(`无法生成全局路径：${path} 所在磁盘没有卷 ID`, true);
+    return;
+  }
+  const now = Date.now();
+  const raws = [{
     name,
     type: dir ? 'dir' : 'file',
-    source: { kind: 'local', path },
+    source: volumeSource(global.volumeId, global.rel),
+    addedAt: now,
     mtime: dir ? null : mtime,
     size: dir ? null : (Number.isFinite(size) ? size : null),
-  });
-  await addUfsEntry(fs, entry);
+  }];
+  if (dir) {
+    // 目录加入 = 目录本身 + 其下所有子目录/文件；目录统一归入本次加入年，文件按各自 mtime。
+    // 子项同样落成“卷 ID + 卷内相对路径”，不写本机盘符。
+    const children = await collectLocalTree(path);
+    for (const item of children) {
+      const child = relInVolume(item.path);
+      if (!child) continue;
+      raws.push({
+        name: item.name,
+        type: item.dir ? 'dir' : 'file',
+        source: volumeSource(global.volumeId, child.rel),
+        addedAt: now,
+        mtime: item.dir ? null : (Number(item.mtime) || null),
+        size: item.dir ? null : (Number.isFinite(Number(item.size)) ? Number(item.size) : null),
+      });
+    }
+  }
+  const result = await addUfsEntries(fs, raws);
   await flushUfs();
-  const year = (dir ? new Date(entry.addedAt).getFullYear() : (entry.mtime ? new Date(entry.mtime).getFullYear() : new Date(entry.addedAt).getFullYear()));
-  status(`已加入 /ufs/${year}/${entry.name}`);
+  const rootEntry = result.entries[0];
+  const year = dir
+    ? new Date(rootEntry.addedAt).getFullYear()
+    : (rootEntry.mtime ? new Date(rootEntry.mtime).getFullYear() : new Date(rootEntry.addedAt).getFullYear());
+  status(dir && raws.length > 1
+    ? `已加入 /ufs/${year}/${name}：目录本身 + ${raws.length - 1} 个子项，生成 ${result.shards.length} 份分片`
+    : `已加入 /ufs/${year}/${rootEntry.name}`);
   if (current().kind === 'ufs') render(current()).catch(showError);
 }
 
@@ -1432,6 +1529,14 @@ async function openUfsEntry(entry) {
   const src = entry.source || {};
   if (entry.type === 'dir') {
     if (src.kind === 'volume' && src.volumeId) {
+      const local = await localPathForVolume(src.volumeId, src.rel || '');
+      if (local) {
+        try {
+          await api(`/api/list?path=${encodeURIComponent(local)}`);
+          navigate({ kind: 'dir', path: local });
+          return;
+        } catch { /* 本机没有这个卷或目录，退回只读卷树 */ }
+      }
       navigate({ kind: 'hd', path: treePath(src.volumeId, src.rel || '') });
       return;
     }
@@ -1454,6 +1559,17 @@ async function openUfsEntry(entry) {
   }
   if (src.kind === 'zip' && src.zipPath) {
     await openZipBookmark({ zipPath: src.zipPath, entry: src.entry || '', label: entry.name });
+    return;
+  }
+  if (src.kind === 'volume' && src.volumeId) {
+    const local = await localPathForVolume(src.volumeId, src.rel || '');
+    if (local) {
+      await previewFile(local, entry.name, winDirname(local));
+      return;
+    }
+    const parent = String(src.rel || '').split('/').filter(Boolean).slice(0, -1).join('/');
+    navigate({ kind: 'hd', path: treePath(src.volumeId, parent) });
+    status('这个文件所在的卷不在本机，已显示所在目录的只读结构');
     return;
   }
   if (src.kind === 'local' && src.path) {
