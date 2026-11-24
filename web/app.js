@@ -14,7 +14,7 @@ import { initManifestSync, scheduleSync, fetchLocalHostInfo, getDataGroupFs, get
 import { initDriveCache } from './drive-cache.js';
 import { initManifestVolumeImport } from './manifest-volume-import.js';
 import { initHostDisksPanel, hostDisksCacheInfo, hostDisksCachedDoc, cacheHostDisksDoc, restoreHostDisksFromCache, writeHostDisksDoc, rememberManualSerial } from './host-disks-panel.js';
-import { loadHostDisksDoc, describeVirtual, describeTreePath, probeVolumeSources, readHideNoDisk, writeHideNoDisk, invalidateHostDisksDoc, volumeAliasesFor, setLocalVolumeAlias, applyManualDiskSerial, readPendingSerials, addPendingSerial, clearPendingSerial, applyDerivedSerials, attachVolumeAliases, partitionAliasesFor, setLocalPartitionAlias } from './host-disks-browser.js';
+import { loadHostDisksDoc, describeVirtual, describeTreePath, treePath, probeVolumeSources, readHideNoDisk, writeHideNoDisk, invalidateHostDisksDoc, volumeAliasesFor, setLocalVolumeAlias, applyManualDiskSerial, readPendingSerials, addPendingSerial, clearPendingSerial, applyDerivedSerials, attachVolumeAliases, partitionAliasesFor, setLocalPartitionAlias } from './host-disks-browser.js';
 import { createSelectionStore, isDirSelected, isFileSelected, addDirSelection, removeDirSelection, removeFileDirSelection, removePickedFile, selectionPathKey } from './manifest-selection.js';
 import { loadVolumeTree, findTreeNode } from './volume-tree.js';
 import {
@@ -1209,6 +1209,33 @@ function toggleTagMode() {
   render(current()).catch(showError);
 }
 
+/**
+ * 本机目录不存在但数据组里可能有它的清单：按盘符 + 相对路径在 struct 卷树里找回
+ * 只读位置（/tree/<volumeId>/<相对路径>）。找不到返回 null，调用方仍显示原错误。
+ */
+async function treePathForLocalPath(localPath) {
+  const match = /^([A-Za-z]):\\(.*)$/.exec(String(localPath || '').trim());
+  if (!match) return null;
+  const letter = `${match[1].toUpperCase()}:`;
+  const segments = match[2].split('\\').filter(Boolean);
+  const live = await loadHostDisksDoc();
+  const volumes = Array.isArray(live.doc?.volumes) ? live.doc.volumes : [];
+  const sameLetter = volumes.filter((vol) => {
+    const drive = String(vol.drive || vol.letter || '').toUpperCase();
+    return drive === letter || drive === letter.slice(0, 1);
+  });
+  const candidates = sameLetter.length ? sameLetter : volumes.slice(0, 8);
+  for (const vol of candidates) {
+    const volumeId = vol.volumeId || vol.id;
+    if (!volumeId) continue;
+    const loaded = await loadVolumeTree(volumeId).catch(() => null);
+    if (loaded?.ok && findTreeNode(loaded.tree || [], segments)) {
+      return treePath(volumeId, segments.join('/'));
+    }
+  }
+  return null;
+}
+
 async function toggleTagExpand(key) {
   if (!key) return;
   const expand = tagExpandState.get(key) || { open: false, items: null, error: '', loading: false };
@@ -1251,7 +1278,23 @@ async function toggleTagExpand(key) {
       expand.error = '';
     } catch (err) {
       expand.items = [];
-      expand.error = `读取失败：${err?.message || err}`;
+      const msg = err?.message || String(err);
+      // 本机没有这个目录（常见于别的机器打了标签后同步过来）：如果数据组 struct
+      // 里有对应路径，直接切到只读卷树，而不是只给一行 ENOENT。
+      if (/ENOENT|no such file/i.test(msg) && !String(key).startsWith('vol:')) {
+        const entry = tagEntries(tagViewSnapshot()).find((item) => item.key === key);
+        const localPath = entry?.path || key;
+        const virtual = await treePathForLocalPath(localPath).catch(() => null);
+        if (virtual) {
+          expand.open = false;
+          expand.loading = false;
+          tagExpandState.set(key, expand);
+          status(`本机没有 ${localPath}，已切到数据组只读结构`);
+          navigate({ kind: 'hd', path: virtual });
+          return;
+        }
+      }
+      expand.error = `读取失败：${msg}`;
     }
     expand.loading = false;
     tagExpandState.set(key, expand);
