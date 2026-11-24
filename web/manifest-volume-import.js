@@ -169,6 +169,72 @@ export function formatBytes(n) {
   return `${x >= 10 || i === 0 || Number.isInteger(x) ? Math.round(x) : x.toFixed(1)} ${units[i]}`;
 }
 
+/**
+ * 把数据组 /drive-registry.json 里的登记条目转成导入列表项。
+ * 登记清单是跨机唯一来源，里面可能有 struct/ 清单没覆盖到的网盘（例如手工登记的
+ * 蓝奏云、夸克），因此导入面板必须把它们一起列出来，不能只读 struct/。
+ * 纯函数：不读文件、不依赖本机缓存。
+ */
+export function registryVolumes(entries) {
+  const out = [];
+  for (const raw of Array.isArray(entries) ? entries : []) {
+    if (!raw || typeof raw !== 'object') continue;
+    const dir = text(raw.dir, 120);
+    if (!dir) continue;
+    const backend = text(raw.backend, 120) || sanitizeKey(dir);
+    const volumeId = text(raw.volumeId, 200);
+    out.push({
+      origin: 'registry',
+      dir,
+      backend,
+      volumeId: volumeId || null,
+      label: text(raw.label, 200) || dir,
+      drive: text(raw.drive, 20),
+      sourceHost: text(raw.sourceHost, 100),
+      fileCount: toNumber(raw.fileCount),
+      totalSize: toNumber(raw.totalSize),
+      hasChildren: raw.hasChildren === 'true' || raw.hasChildren === true,
+      total: text(raw.total, 40),
+      free: text(raw.free, 40),
+      upQuota: text(raw.upQuota, 40),
+      downQuota: text(raw.downQuota, 40),
+      upRemaining: text(raw.upRemaining, 40),
+      downRemaining: text(raw.downRemaining, 40),
+      updatedAt: toNumber(raw.updatedAt),
+      shardBases: [],
+      sources: [],
+    });
+  }
+  return out;
+}
+
+/**
+ * 合并 struct/ 卷与登记清单：同一卷（volumeId 相同）只保留一行，
+ * 登记条目补充 label/容量/配额字段；登记里有、清单里没有的网盘单独成行。
+ */
+export function mergeVolumeSources(volumes, registry) {
+  const out = (Array.isArray(volumes) ? volumes : []).map((vol) => ({ ...vol, origin: vol.origin || 'struct' }));
+  for (const reg of Array.isArray(registry) ? registry : []) {
+    const hit = reg.volumeId
+      ? out.find((vol) => vol.volumeId && vol.volumeId === reg.volumeId)
+      : null;
+    if (hit) {
+      hit.dir = hit.dir || reg.dir;
+      hit.label = hit.label || reg.label;
+      hit.total = hit.total || reg.total;
+      hit.free = hit.free || reg.free;
+      hit.upQuota = hit.upQuota || reg.upQuota;
+      hit.downQuota = hit.downQuota || reg.downQuota;
+      hit.upRemaining = hit.upRemaining || reg.upRemaining;
+      hit.downRemaining = hit.downRemaining || reg.downRemaining;
+      continue;
+    }
+    out.push({ ...reg });
+  }
+  out.sort((a, b) => String(a.label || a.volumeId || '').localeCompare(String(b.label || b.volumeId || ''), 'en'));
+  return out;
+}
+
 let ready = false;
 let apiFetch = null;
 let statusFn = null;
@@ -195,24 +261,37 @@ function renderList() {
     return;
   }
   host.innerHTML = currentVolumes.map((vol, i) => {
-    const existing = existingEntries.find((e) => e.volumeId === vol.volumeId
-      || e.backend === vol.backend);
+    // 先按登记目录精确匹配；只有既没有 dir 也没有 volumeId 时才退回 backend，
+    // 否则同一后端（例如 Lanzou）有多条登记时会被一条已存在的缓存全部标记为“已创建”。
+    const existing = existingEntries.find((e) => (vol.dir && e.dir === vol.dir)
+      || (vol.volumeId && e.volumeId === vol.volumeId)
+      || (!vol.dir && !vol.volumeId && e.backend === vol.backend));
     const checked = existing ? '' : 'checked';
     const badge = existing
       ? `<span class="mv-existing">已创建 ${esc(existing.dir)}</span>`
       : '';
     const drive = vol.drive ? ` · <span class="mv-drive">${esc(vol.drive)}</span>` : '';
+    const registered = vol.origin === 'registry'
+      ? ` · 登记 <code>${esc(vol.backend)}</code>${vol.dir ? ` · <code>${esc(vol.dir)}</code>` : ''}` : '';
     const meta = [
+      vol.label && vol.origin === 'registry' ? `名称 ${esc(vol.label)}` : null,
       vol.sourceHost ? `来源 ${esc(vol.sourceHost)}` : null,
       vol.fileCount ? `${Number(vol.fileCount).toLocaleString('en-US')} 项` : null,
       vol.totalSize ? formatBytes(vol.totalSize) : null,
+      vol.total ? `容量 ${esc(vol.total)}` : null,
+      vol.free ? `可用 ${esc(vol.free)}` : null,
+      vol.upQuota ? `上传额度 ${esc(vol.upQuota)}` : null,
+      vol.downQuota ? `下载额度 ${esc(vol.downQuota)}` : null,
       vol.hasChildren ? '含目录' : null,
       vol.sizePartial ? '体积为下界' : null,
     ].filter(Boolean).join(' · ');
+    const title = vol.origin === 'registry'
+      ? `<code>${esc(vol.label || vol.dir)}</code>${drive}${registered}${badge}`
+      : `<code>${esc(vol.volumeId)}</code>${drive}${registered}${badge}`;
     return `<label class="mv-item${existing ? ' mv-item-done' : ''}">
       <input type="checkbox" class="mv-check" data-index="${i}" ${checked} ${existing ? 'disabled' : ''}>
       <span class="mv-item-body">
-        <span class="mv-item-title"><code>${esc(vol.volumeId)}</code>${drive}${badge}</span>
+        <span class="mv-item-title">${title}</span>
         <span class="mv-item-meta">${meta || '（清单未提供统计字段）'}</span>
       </span>
     </label>`;
@@ -252,10 +331,25 @@ async function loadVolumes() {
       }
     }
     currentVolumes = collectVolumes(docs);
+    // 登记清单与 struct/ 是两条来源：struct 只覆盖做过目录扫描的卷，
+    // 手工登记的网盘只在 /drive-registry.json 里，导入面板要一起列出来。
+    let registryEntries = [];
+    for (const name of ['drive-registry.json', 'drive-cache.json']) {
+      try {
+        const raw = JSON.parse(await fp.readFile(pathFor(name), 'utf8'));
+        if (Array.isArray(raw?.entries) && raw.entries.length) {
+          registryEntries = raw.entries;
+          break;
+        }
+      } catch {
+        // 新文件不存在时退回旧名；两者都没有就是没有登记。
+      }
+    }
+    currentVolumes = mergeVolumeSources(currentVolumes, registryVolumes(registryEntries));
     const cache = await apiFetch('/api/drive-cache/info');
     existingEntries = Array.isArray(cache?.entries) ? cache.entries : [];
     renderList();
-    setStatus(`读到 ${currentVolumes.length} 块卷 · 已创建 ${existingEntries.length} 条缓存`, true);
+    setStatus(`读到 ${currentVolumes.length} 个可导入条目（清单卷 + 登记网盘） · 已创建 ${existingEntries.length} 条缓存`, true);
   } catch (err) {
     currentVolumes = [];
     renderList();
@@ -285,14 +379,19 @@ async function createSelected() {
       if (!vol) continue;
       const payload = {
         backend: vol.backend,
-        volumeId: vol.volumeId,
+        volumeId: vol.volumeId || null,
         drive: vol.drive,
         sourceHost: vol.sourceHost,
         fileCount: vol.fileCount ? String(vol.fileCount) : null,
         totalSize: vol.totalSize ? String(vol.totalSize) : null,
         hasChildren: vol.hasChildren ? 'true' : null,
-        label: vol.drive ? `${vol.drive} ${vol.volumeId}` : vol.volumeId,
-        total: vol.totalSize ? formatBytes(vol.totalSize) : null,
+        label: vol.label || (vol.drive ? `${vol.drive} ${vol.volumeId}` : vol.volumeId),
+        total: vol.total || (vol.totalSize ? formatBytes(vol.totalSize) : null),
+        free: vol.free || null,
+        upQuota: vol.upQuota || null,
+        downQuota: vol.downQuota || null,
+        upRemaining: vol.upRemaining || null,
+        downRemaining: vol.downRemaining || null,
       };
       try {
         await apiFetch('/api/drive-cache/save', { method: 'POST', body: JSON.stringify(payload) });

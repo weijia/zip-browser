@@ -79,3 +79,39 @@ test('sanitizeKey：与 dir-struct-gen 同口径', () => {
   assert.equal(mod.sanitizeKey('A::B/C'), 'A__B_C');
   assert.equal(mod.sanitizeKey('A401-6B8F'), 'A401-6B8F');
 });
+
+test('registryVolumes：登记清单转导入项，保留 backend/容量/配额', () => {
+  const entries = [
+    { dir: 'Lanzou-1', backend: 'Lanzou', label: '159', total: '10 GB', free: '3 GB', upQuota: '1 GB', upRemaining: '200 MB', updatedAt: 1 },
+    { dir: '', backend: 'Baidu' },
+    { dir: 'kuake-1', backend: 'Kuake', volumeId: 'VOL-1', hasChildren: 'true' },
+  ];
+  const vols = mod.registryVolumes(entries);
+  assert.equal(vols.length, 2);
+  const lanzou = vols.find((v) => v.dir === 'Lanzou-1');
+  assert.equal(lanzou.backend, 'Lanzou');
+  assert.equal(lanzou.label, '159');
+  assert.equal(lanzou.total, '10 GB');
+  assert.equal(lanzou.upRemaining, '200 MB');
+  assert.equal(lanzou.volumeId, null);
+  const kuake = vols.find((v) => v.dir === 'kuake-1');
+  assert.equal(kuake.volumeId, 'VOL-1');
+  assert.equal(kuake.hasChildren, true);
+});
+
+test('mergeVolumeSources：同 volumeId 合并登记元信息，登记独有条目补进列表', () => {
+  const shardVol = { volumeId: 'VOL-1', backend: 'VOL-1', drive: 'C:', fileCount: 10, shardBases: ['.1'], sources: [] };
+  const registry = mod.registryVolumes([
+    { dir: 'Lanzou-1', backend: 'Lanzou', label: '159' },
+    { dir: 'VOL-1-dir', backend: 'X', volumeId: 'VOL-1', total: '10 GB' },
+  ]);
+  const merged = mod.mergeVolumeSources([shardVol], registry);
+  assert.equal(merged.length, 2);
+  const hit = merged.find((v) => v.volumeId === 'VOL-1');
+  assert.equal(hit.total, '10 GB');
+  assert.equal(hit.dir, 'VOL-1-dir');
+  assert.equal(hit.origin, 'struct');
+  const lanzou = merged.find((v) => v.dir === 'Lanzou-1');
+  assert.equal(lanzou.origin, 'registry');
+  assert.equal(lanzou.backend, 'Lanzou');
+});
