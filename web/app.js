@@ -332,6 +332,12 @@ function pathKey(value) {
   return String(value ?? '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 }
 
+function pathWithin(path, root) {
+  const p = pathKey(path);
+  const r = pathKey(root);
+  return Boolean(r) && (p === r || p.startsWith(`${r}/`));
+}
+
 function cachedDirSize(path) {
   const direct = dirSizeCache.get(path);
   if (direct && typeof direct === 'object') return direct;
@@ -370,27 +376,30 @@ function dirSizeCompact(info) {
   return `${files.toLocaleString('zh-CN')} 个文件 · ${sizeText(info.totalSize)}`;
 }
 
+function paintDirSizeElement(element, value) {
+  if (!element) return;
+  if (value === 'pending') {
+    element.textContent = '计算中…';
+    element.title = '正在递归统计目录体积';
+    element.classList.add('size-pending');
+  } else if (value === 'error') {
+    element.textContent = '大小读取失败';
+    element.title = '目录体积读取失败，可稍后重试';
+    element.classList.remove('size-pending');
+  } else if (value && typeof value === 'object') {
+    element.textContent = dirSizeCompact(value);
+    element.title = dirSizeDetail(value);
+    element.classList.remove('size-pending');
+    element.classList.add('size-known');
+  }
+}
+
 function updateDirSizeDisplays(path, notifyName) {
   const value = cachedDirSize(path);
   const wanted = pathKey(path);
   const elements = Array.from(document.querySelectorAll('[data-size-path]'))
     .filter((element) => pathKey(element.dataset.sizePath) === wanted);
-  for (const element of elements) {
-    if (value === 'pending') {
-      element.textContent = '计算中…';
-      element.title = '正在递归统计目录体积';
-      element.classList.add('size-pending');
-    } else if (value === 'error') {
-      element.textContent = '大小读取失败';
-      element.title = '目录体积读取失败，可稍后重试';
-      element.classList.remove('size-pending');
-    } else if (value && typeof value === 'object') {
-      element.textContent = dirSizeCompact(value);
-      element.title = dirSizeDetail(value);
-      element.classList.remove('size-pending');
-      element.classList.add('size-known');
-    }
-  }
+  for (const element of elements) paintDirSizeElement(element, value);
   if (value && typeof value === 'object' && notifyName) {
     status(`${notifyName}：${dirSizeDetail(value)}`);
   } else if (value === 'error' && notifyName) {
@@ -399,13 +408,19 @@ function updateDirSizeDisplays(path, notifyName) {
 }
 
 function applyDirSizeCache() {
-  const paths = new Set();
+  // 同一路径只查一次缓存，再直接画它对应的所有单元格，避免 N 行 × N 次全表查询。
+  const groups = new Map();
   for (const element of document.querySelectorAll('[data-size-path]')) {
-    if (element.dataset.sizePath) paths.add(element.dataset.sizePath);
+    const raw = element.dataset.sizePath;
+    if (!raw) continue;
+    const key = pathKey(raw);
+    if (!groups.has(key)) groups.set(key, { path: raw, elements: [] });
+    groups.get(key).elements.push(element);
   }
-  for (const path of paths) {
-    const value = cachedDirSize(path);
-    if (value && typeof value === 'object') updateDirSizeDisplays(path);
+  for (const group of groups.values()) {
+    const value = cachedDirSize(group.path);
+    if (!value || typeof value !== 'object') continue;
+    for (const element of group.elements) paintDirSizeElement(element, value);
   }
 }
 
@@ -420,10 +435,11 @@ async function flushDirSizeQueue() {
   let sawDone = false;
   let jobError = '';
   let lastPaint = 0;
+  let lastBatchPaint = 0;
   const controller = new AbortController();
-  activeDirSizeJob = { controller, jobId: '' };
+  activeDirSizeJob = { controller, jobId: '', roots: paths };
   try {
-    // 一次任务可以带多个根目录；服务端全量递归，前端只拿进度和根汇总。
+    // 一次任务可以带多个根目录；服务端全量递归，前端拿进度和每个目录的子树汇总。
     const started = await api('/api/scan/jobs', {
       method: 'POST',
       body: JSON.stringify({
@@ -437,6 +453,25 @@ async function flushDirSizeQueue() {
     await apiNdjson(`/api/scan/jobs/${encodeURIComponent(jobId)}/stream`, {
       signal: controller.signal,
       onEvent: (event) => {
+        if (event?.type === 'batch') {
+          let changed = false;
+          for (const item of Array.isArray(event.dirs) ? event.dirs : []) {
+            if (!item?.path) continue;
+            dirSizeCache.set(item.path, {
+              fileCount: Number(item.fileCount) || 0,
+              totalSize: Number(item.totalSize) || 0,
+              totalSizeOnDisk: Number(item.totalSizeOnDisk) || 0,
+              partial: Boolean(item.partial),
+            });
+            changed = true;
+          }
+          const now = Date.now();
+          if (changed && now - lastBatchPaint > 250) {
+            lastBatchPaint = now;
+            applyDirSizeCache();
+          }
+          return;
+        }
         if (event?.type === 'progress') {
           const now = Date.now();
           if (now - lastPaint < 400) return;
@@ -906,7 +941,11 @@ function updateNavButtons() {
 }
 
 function navigate(target, push = true) {
-  cancelActiveDirSizeScan();
+  // 选中目录后马上进入它（或它的子目录）时，扫描继续跑并持续回填；
+  // 只有离开这棵正在扫描的树才取消任务，避免白扫。
+  const keepScan = target?.kind === 'dir'
+    && activeDirSizeJob?.roots?.some((root) => pathWithin(target.path, root));
+  if (!keepScan) cancelActiveDirSizeScan();
   state.target = target;
   if (push) {
     state.index += 1;

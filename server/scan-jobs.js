@@ -5,6 +5,8 @@
 //
 // 缓存位置固定在用户本机的 LOCALAPPDATA（或 XDG cache），与 ZenFS 数据组无关。
 import fs from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import readline from 'node:readline';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -57,6 +59,11 @@ function jobPaths() {
     if (job.state !== 'running') continue;
     files.add(`${id}.jsonl`);
     files.add(`${id}.json`);
+    if (job.cacheFile) {
+      const base = path.basename(job.cacheFile);
+      files.add(base);
+      files.add(base.replace(/\.jsonl$/, '.json'));
+    }
   }
   return files;
 }
@@ -130,10 +137,10 @@ function pushEvent(job, payload) {
   return event;
 }
 
-function rememberSummary(key, result) {
+function rememberSummary(key, result, cacheFile) {
   if (!key) return;
   summaryCache.delete(key);
-  summaryCache.set(key, { at: Date.now(), result });
+  summaryCache.set(key, { at: Date.now(), result, cacheFile: cacheFile || '' });
   if (summaryCache.size > 200) {
     const oldest = summaryCache.keys().next().value;
     if (oldest !== undefined) summaryCache.delete(oldest);
@@ -200,125 +207,168 @@ async function statFile(filePath) {
   }
 }
 
+async function commitDirRecord(job, state, record) {
+  state.lines.push(JSON.stringify(record));
+  state.batch.push(record);
+  if (state.lines.length >= DIR_BATCH) await appendLines(state.handle, state.lines);
+  if (state.batch.length >= DIR_BATCH) {
+    pushEvent(job, { type: 'batch', dirs: state.batch });
+    state.batch = [];
+  }
+}
+
+async function flushDirState(job, state) {
+  if (state.lines.length) await appendLines(state.handle, state.lines);
+  if (state.batch.length) {
+    pushEvent(job, { type: 'batch', dirs: state.batch });
+    state.batch = [];
+  }
+}
+
 /**
- * 递归统计一个根目录。所有文件都会遍历；目录记录按批写本机 JSONL。
- * 不缓存文件路径清单，只保留聚合结果，避免大目录把服务端内存吃满。
+ * 递归统计一个目录，返回整棵子树的累计值。子目录先算完再记录父目录，
+ * 因此每个目录的 totalSize/fileCount 都包含其所有后代；这些记录按批
+ * 通过 NDJSON 的 batch 事件给前端，进入子目录时可以直接显示大小。
+ * 文件路径清单不保留，只保留聚合值，避免大目录把服务端内存吃满。
  */
-async function walkRoot(job, rootAbs, handle, lines) {
-  const deadline = job.timeoutMs > 0 ? Date.now() + job.timeoutMs : Infinity;
-  const summary = { path: rootAbs, fileCount: 0, totalSize: 0, totalSizeOnDisk: 0, partial: false, dirs: 0 };
-  const queue = [{ abs: rootAbs, depth: 0, parent: '' }];
-  let cursor = 0;
-  while (cursor < queue.length) {
-    if (job.cancelled) return { ...summary, cancelled: true };
+async function walkDir(job, abs, parent, depth, deadline, state) {
+  const agg = {
+    path: abs,
+    fileCount: 0,
+    totalSize: 0,
+    totalSizeOnDisk: 0,
+    partial: false,
+    dirs: 0,
+  };
+  if (job.cancelled) return { ...agg, cancelled: true };
+  if (Date.now() > deadline) {
+    agg.partial = true;
+    agg.timedOut = true;
+    return agg;
+  }
+  job.progress.current = abs;
+  let dirents;
+  try {
+    dirents = await fs.readdir(abs, { withFileTypes: true });
+  } catch {
+    agg.partial = true;
+    job.progress.dirs += 1;
+    agg.dirs = 1;
+    await commitDirRecord(job, state, {
+      path: abs,
+      parent,
+      depth,
+      fileCount: 0,
+      totalSize: 0,
+      totalSizeOnDisk: 0,
+      dirs: 1,
+      partial: true,
+    });
+    emitProgress(job);
+    return agg;
+  }
+  const files = [];
+  const subdirs = [];
+  for (const entry of dirents) {
+    if (SKIP_NAMES.has(entry.name) || entry.isSymbolicLink()) continue;
+    const full = path.win32.join(abs, entry.name);
+    if (entry.isDirectory()) {
+      if (depth + 1 > job.maxDepth) agg.partial = true;
+      else subdirs.push(full);
+    } else if (entry.isFile()) {
+      files.push(full);
+    }
+  }
+  let dirFiles = 0;
+  let dirSize = 0;
+  let dirOnDisk = 0;
+  let dirPartial = agg.partial;
+  for (let offset = 0; offset < files.length; offset += FILE_BATCH) {
+    if (job.cancelled) return { ...agg, cancelled: true };
     if (Date.now() > deadline) {
-      summary.partial = true;
-      summary.timedOut = true;
+      dirPartial = true;
+      agg.timedOut = true;
       break;
     }
-    const dir = queue[cursor];
-    cursor += 1;
-    if (cursor > 200) {
-      // 已出队的节点不再保留，BFS 队列随扫描推进释放内存。
-      queue.splice(0, cursor);
-      cursor = 0;
+    const chunk = files.slice(offset, offset + FILE_BATCH);
+    const stats = await mapLimit(chunk, FILE_CONCURRENCY, (full) => statFile(full));
+    for (const stat of stats) {
+      if (!stat) { dirPartial = true; continue; }
+      dirFiles += 1;
+      dirSize += stat.size;
+      dirOnDisk += stat.onDisk;
     }
-    job.progress.current = dir.abs;
-    let dirents;
-    try {
-      dirents = await fs.readdir(dir.abs, { withFileTypes: true });
-    } catch {
-      summary.partial = true;
-      lines.push(JSON.stringify({
-        path: dir.abs, parent: dir.parent, depth: dir.depth,
-        fileCount: 0, totalSize: 0, totalSizeOnDisk: 0, partial: true,
-      }));
-      job.progress.dirs += 1;
-      emitProgress(job);
-      continue;
-    }
-    const files = [];
-    const subdirs = [];
-    for (const entry of dirents) {
-      if (SKIP_NAMES.has(entry.name) || entry.isSymbolicLink()) continue;
-      const full = path.win32.join(dir.abs, entry.name);
-      if (entry.isDirectory()) {
-        if (dir.depth + 1 > job.maxDepth) {
-          summary.partial = true;
-        } else {
-          subdirs.push({ abs: full, depth: dir.depth + 1, parent: dir.abs });
-        }
-      } else if (entry.isFile()) {
-        files.push(full);
-      }
-    }
-    let dirFiles = 0;
-    let dirSize = 0;
-    let dirOnDisk = 0;
-    let dirPartial = false;
-    for (let offset = 0; offset < files.length; offset += FILE_BATCH) {
-      if (job.cancelled) return { ...summary, cancelled: true };
-      if (Date.now() > deadline) {
-        dirPartial = true;
-        summary.partial = true;
-        summary.timedOut = true;
-        break;
-      }
-      const chunk = files.slice(offset, offset + FILE_BATCH);
-      const stats = await mapLimit(chunk, FILE_CONCURRENCY, (full) => statFile(full));
-      for (const stat of stats) {
-        if (!stat) { dirPartial = true; summary.partial = true; continue; }
-        dirFiles += 1;
-        dirSize += stat.size;
-        dirOnDisk += stat.onDisk;
-        summary.fileCount += 1;
-        summary.totalSize += stat.size;
-        summary.totalSizeOnDisk += stat.onDisk;
-      }
-      job.progress.files += chunk.filter((_, index) => stats[index]).length;
-      job.progress.bytes += stats.reduce((sum, stat) => sum + (stat ? stat.size : 0), 0);
-      emitProgress(job);
-    }
-    summary.dirs += 1;
-    job.progress.dirs += 1;
-    lines.push(JSON.stringify({
-      path: dir.abs,
-      parent: dir.parent,
-      depth: dir.depth,
-      fileCount: dirFiles,
-      totalSize: dirSize,
-      totalSizeOnDisk: dirOnDisk,
-      partial: dirPartial,
-    }));
-    for (const sub of subdirs) queue.push(sub);
-    if (lines.length >= DIR_BATCH) await appendLines(handle, lines);
+    job.progress.files += chunk.filter((_, index) => stats[index]).length;
+    job.progress.bytes += stats.reduce((sum, stat) => sum + (stat ? stat.size : 0), 0);
     emitProgress(job);
   }
-  if (lines.length) await appendLines(handle, lines);
-  return summary;
+  agg.fileCount += dirFiles;
+  agg.totalSize += dirSize;
+  agg.totalSizeOnDisk += dirOnDisk;
+  agg.partial = dirPartial || agg.partial;
+
+  for (const childAbs of subdirs) {
+    if (job.cancelled) return { ...agg, cancelled: true };
+    if (Date.now() > deadline) {
+      agg.partial = true;
+      agg.timedOut = true;
+      break;
+    }
+    const child = await walkDir(job, childAbs, abs, depth + 1, deadline, state);
+    if (child.cancelled) return { ...agg, cancelled: true };
+    agg.fileCount += child.fileCount;
+    agg.totalSize += child.totalSize;
+    agg.totalSizeOnDisk += child.totalSizeOnDisk;
+    agg.dirs += child.dirs;
+    if (child.partial) agg.partial = true;
+    if (child.timedOut) agg.timedOut = true;
+  }
+
+  agg.dirs += 1;
+  job.progress.dirs += 1;
+  await commitDirRecord(job, state, {
+    path: abs,
+    parent,
+    depth,
+    fileCount: agg.fileCount,
+    totalSize: agg.totalSize,
+    totalSizeOnDisk: agg.totalSizeOnDisk,
+    dirs: agg.dirs,
+    partial: agg.partial,
+  });
+  emitProgress(job);
+  return agg;
+}
+
+async function walkRoot(job, rootAbs, state) {
+  const deadline = job.timeoutMs > 0 ? Date.now() + job.timeoutMs : Infinity;
+  return walkDir(job, rootAbs, '', 0, deadline, state);
 }
 
 async function runJob(job) {
   let handle = null;
-  const lines = [];
+  const state = { handle: null, lines: [], batch: [] };
   try {
     const root = await ensureCacheRoot();
     await pruneCache(root);
     handle = await fs.open(job.cacheFile, 'a');
+    state.handle = handle;
     for (const abs of job.paths) {
       if (job.cancelled) break;
       job.progress.current = abs;
-      const result = await walkRoot(job, abs, handle, lines);
+      const result = await walkRoot(job, abs, state);
+      await flushDirState(job, state);
       if (result.cancelled) break;
       delete result.cancelled;
       job.results.push(result);
       if (!result.partial && !result.timedOut) {
-        rememberSummary(job.cacheKeys[abs] || '', result);
+        rememberSummary(job.cacheKeys[abs] || '', result, job.cacheFile);
       }
     }
-    if (handle) await appendLines(handle, lines);
+    await flushDirState(job, state);
     await handle?.close();
     handle = null;
+    state.handle = null;
     if (job.cancelled) {
       job.state = 'cancelled';
       job.endedAt = Date.now();
@@ -354,7 +404,67 @@ async function runJob(job) {
   }
 }
 
-function newJob({ paths, cacheKeys, timeoutMs, maxDepth, cachedResults = null }) {
+async function replaySnapshot(job) {
+  const totals = job.results.reduce((sum, item) => ({
+    files: sum.files + (Number(item.fileCount) || 0),
+    bytes: sum.bytes + (Number(item.totalSize) || 0),
+  }), { files: 0, bytes: 0 });
+  const input = createReadStream(job.cacheFile);
+  const reader = readline.createInterface({ input, crlfDelay: Infinity });
+  const batch = [];
+  let dirs = 0;
+  try {
+    for await (const line of reader) {
+      if (job.cancelled) break;
+      if (!line.trim()) continue;
+      let record;
+      try { record = JSON.parse(line); } catch { continue; }
+      // 旧版快照只有本层统计，没有 dirs；那种记录不能当作子树汇总使用。
+      if (!record?.path || !(Number(record.dirs) > 0)) continue;
+      batch.push({
+        path: record.path,
+        parent: record.parent || '',
+        depth: Number(record.depth) || 0,
+        fileCount: Number(record.fileCount) || 0,
+        totalSize: Number(record.totalSize) || 0,
+        totalSizeOnDisk: Number(record.totalSizeOnDisk) || 0,
+        dirs: Number(record.dirs) || 1,
+        partial: Boolean(record.partial),
+      });
+      dirs += 1;
+      if (batch.length >= DIR_BATCH) {
+        pushEvent(job, { type: 'batch', dirs: batch.slice() });
+        batch.length = 0;
+        job.progress.dirs = dirs;
+        job.progress.files = totals.files;
+        job.progress.bytes = totals.bytes;
+        emitProgress(job, true);
+      }
+    }
+    if (job.cancelled) {
+      job.state = 'cancelled';
+      job.endedAt = Date.now();
+      pushEvent(job, { type: 'cancelled', progress: job.progress, elapsedMs: 0 });
+      return;
+    }
+    if (batch.length) pushEvent(job, { type: 'batch', dirs: batch.slice() });
+    job.progress.dirs = dirs;
+    job.progress.files = totals.files;
+    job.progress.bytes = totals.bytes;
+    job.state = 'done';
+    job.endedAt = Date.now();
+    pushEvent(job, { type: 'done', results: job.results, elapsedMs: job.endedAt - job.startedAt, cached: true });
+  } catch (err) {
+    job.state = 'error';
+    job.error = String(err?.message || err || 'replay failed');
+    pushEvent(job, { type: 'error', error: job.error, progress: job.progress });
+  } finally {
+    reader.close();
+    input.destroy();
+  }
+}
+
+function newJob({ paths, cacheKeys, timeoutMs, maxDepth, cachedResults = null, replayFile = '' }) {
   const id = crypto.randomUUID();
   const now = Date.now();
   const root = cacheRoot();
@@ -364,11 +474,11 @@ function newJob({ paths, cacheKeys, timeoutMs, maxDepth, cachedResults = null })
     cacheKeys,
     timeoutMs,
     maxDepth,
-    state: cachedResults ? 'done' : 'running',
+    state: cachedResults && !replayFile ? 'done' : 'running',
     createdAt: now,
     startedAt: now,
-    endedAt: cachedResults ? now : null,
-    cacheFile: path.join(root, `${id}.jsonl`),
+    endedAt: cachedResults && !replayFile ? now : null,
+    cacheFile: replayFile || path.join(root, `${id}.jsonl`),
     metaFile: path.join(root, `${id}.json`),
     cached: Boolean(cachedResults),
     results: cachedResults || [],
@@ -406,13 +516,31 @@ export async function startScanJob(rawPaths, opts = {}) {
 
   if (opts.refresh !== true) {
     let cached = null;
+    let replayFile = '';
     for (const abs of paths) {
       const hit = summaryCache.get(cacheKeys[abs]);
       if (!hit || Date.now() - hit.at > SUMMARY_TTL_MS) { cached = null; break; }
       cached = cached || [];
       cached.push({ ...hit.result });
+      if (hit.cacheFile) replayFile = hit.cacheFile;
     }
     if (cached && cached.length === paths.length) {
+      let replayable = Boolean(replayFile);
+      if (replayable) {
+        try {
+          const stat = await fs.stat(replayFile);
+          if (!stat.isFile() || stat.size <= 0) replayable = false;
+        } catch {
+          replayable = false;
+        }
+      }
+      if (replayable) {
+        // 命中缓存时不重新扫盘，但必须把子目录汇总重新流给前端，
+        // 否则刷新页面后只拿得到根汇总，进入子目录看不到大小。
+        const job = newJob({ paths, cacheKeys, timeoutMs, maxDepth, cachedResults: cached, replayFile });
+        setImmediate(() => { replaySnapshot(job).catch(() => {}); });
+        return { jobId: job.id, cached: true };
+      }
       const job = newJob({ paths, cacheKeys, timeoutMs, maxDepth, cachedResults: cached });
       pushEvent(job, {
         type: 'done', results: job.results, elapsedMs: 0, cached: true,

@@ -72,3 +72,48 @@ test('scan-jobs：NDJSON 流出进度并以 done 结束', async () => {
   assert.ok(events.some((event) => event.type === 'progress'));
   assert.equal(events[events.length - 1].type, 'done');
 });
+
+async function collectJobEvents(jobId) {
+  const lines = [];
+  let finish;
+  const ended = new Promise((resolve) => { finish = resolve; });
+  const req = { on() {}, off() {} };
+  const res = {
+    writeHead() {},
+    flushHeaders() {},
+    write(chunk) { lines.push(String(chunk)); },
+    end() { finish(); },
+  };
+  await mod.streamScanJob(req, res, jobId, new URL(`http://localhost/api/scan/jobs/${jobId}/stream?cursor=0`));
+  await Promise.race([ended, new Promise((_, reject) => setTimeout(() => reject(new Error('stream did not end')), 3000))]);
+  return lines.join('').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
+
+test('scan-jobs：batch 回传子目录子树汇总，缓存重放也不丢子目录', async () => {
+  const work = path.join(tempRoot, 'batch-work');
+  await fs.mkdir(path.join(work, 'sub', 'deep'), { recursive: true });
+  await fs.writeFile(path.join(work, 'a.txt'), '12345');
+  await fs.writeFile(path.join(work, 'sub', 'b.txt'), '1234567');
+  await fs.writeFile(path.join(work, 'sub', 'deep', 'c.txt'), '12345678901');
+  allowDirectory(work);
+  const first = await mod.startScanJob([work], { refresh: true, timeoutMs: 0 });
+  await waitForJob(first.jobId);
+  const events = await collectJobEvents(first.jobId);
+  const batchDirs = events.filter((event) => event.type === 'batch').flatMap((event) => event.dirs || []);
+  const byPath = new Map(batchDirs.map((row) => [row.path.toLowerCase(), row]));
+  const sub = byPath.get(path.join(work, 'sub').toLowerCase());
+  const deep = byPath.get(path.join(work, 'sub', 'deep').toLowerCase());
+  assert.ok(sub, '子目录必须出现在 batch 中');
+  assert.equal(sub.totalSize, 18, '子目录大小要包含 deep 里的文件');
+  assert.equal(sub.dirs, 2);
+  assert.ok(deep);
+  assert.equal(deep.totalSize, 11);
+  assert.equal(byPath.get(work.toLowerCase()).totalSize, 23);
+
+  // 命中 2 分钟汇总缓存时不能只回根目录；必须重放 JSONL 里的子目录记录。
+  const second = await mod.startScanJob([work], { timeoutMs: 0 });
+  assert.equal(second.cached, true);
+  const replayEvents = await collectJobEvents(second.jobId);
+  const replayDirs = replayEvents.filter((event) => event.type === 'batch').flatMap((event) => event.dirs || []);
+  assert.ok(replayDirs.some((row) => row.path.toLowerCase() === path.join(work, 'sub').toLowerCase()));
+});
