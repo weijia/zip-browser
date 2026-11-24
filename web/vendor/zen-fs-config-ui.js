@@ -33139,6 +33139,10 @@ var ZenFSConfigUI = (() => {
        */
       this.groupInstances = /* @__PURE__ */ new Map();
       this.groupUnavailable = /* @__PURE__ */ new Map();
+      /** 后台远端阶段（建实例/定身份/建对）尚未结束的数据组 id。 */
+      this.pendingDataGroups = /* @__PURE__ */ new Set();
+      /** 每个数据组的「远端阶段完成」promise，用于避免重复登记。 */
+      this.dataGroupReady = /* @__PURE__ */ new Map();
       this.statusRefs = [];
       this.statusTimer = null;
       /** connect() 已返回、副本仍在后台校验/建对。 */
@@ -33163,7 +33167,7 @@ var ZenFSConfigUI = (() => {
     }
     // ── Version logging ──────────────────────────────────────────────────
     logVersion() {
-      const uiVersion = true ? "0.4.1" : "dev";
+      const uiVersion = true ? "0.5.0" : "dev";
       console.log(
         `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
         "color:#2563eb;font-weight:bold",
@@ -33462,6 +33466,10 @@ var ZenFSConfigUI = (() => {
           backendInfo: backendInfo ?? this.props.backendInfo ?? void 0
         });
         if (this.replicasPending) void this.awaitReplicasReady();
+        for (const group of this.groupInstances.values()) {
+          this.trackDataGroupPending(group);
+        }
+        if (this.dataGroup) this.trackDataGroupPending(this.dataGroup);
       } catch (err2) {
         this.error = err2 instanceof Error ? err2.message : String(err2);
         if (backendInfo && !isBackground) this.clearBackendInfo();
@@ -33476,6 +33484,27 @@ var ZenFSConfigUI = (() => {
      * 信号②：等待后台「校验 → 建对」完成。connect() 早已返回，这里只是刷新
      * 状态行；失败也不会把整个面板切到错误页 —— 本地配置照常可用。
      */
+    /**
+     * 数据组的远端阶段（建实例 / 定身份 / 建对 / 首同步）在库侧已放到后台。
+     * 这里登记它的完成信号：完成前状态行显示「远端校验中」，完成后自动刷新成
+     * 真实同步对计数，不需要用户关掉再打开面板。
+     */
+    trackDataGroupPending(group) {
+      if (this.destroyed) return;
+      const fn = group.whenBackendsReady;
+      if (typeof fn !== "function") return;
+      const id = group.groupId;
+      const promise = fn.call(group);
+      if (this.dataGroupReady.get(id) === promise) return;
+      this.dataGroupReady.set(id, promise);
+      this.pendingDataGroups.add(id);
+      void promise.catch(() => {
+      }).finally(() => {
+        this.dataGroupReady.delete(id);
+        this.pendingDataGroups.delete(id);
+        if (!this.destroyed) this.updateStatusRows();
+      });
+    }
     async awaitReplicasReady() {
       const pending = this.replicaReadyPromise;
       if (!pending) {
@@ -33525,20 +33554,24 @@ var ZenFSConfigUI = (() => {
       }
       this.groupUnavailable = /* @__PURE__ */ new Map();
       for (const d of this.dataGroups) {
-        if (!this.groupInstances.has(d.id)) {
-          try {
-            const healed = await this.repo.getAppDataGroup(d.id);
-            if (healed) {
-              this.groupInstances.set(healed.groupId, healed);
-              continue;
-            }
-          } catch {
-          }
-          this.groupUnavailable.set(
-            d.id,
-            "\u8BE5\u7EC4\u672A\u5728\u5F53\u524D\u4F1A\u8BDD\u5B9E\u4F8B\u5316\uFF08\u8FDE\u63A5\u65F6\u52A0\u8F7D\u5931\u8D25\u6216\u4EC5\u5B58\u5728\u4E8E\u63CF\u8FF0\u7B26\u4E2D\uFF09\uFF0C\u6682\u65E0\u5B9E\u65F6\u72B6\u6001"
-          );
+        const existing = this.groupInstances.get(d.id);
+        if (existing) {
+          this.trackDataGroupPending(existing);
+          continue;
         }
+        try {
+          const healed = await this.repo.getAppDataGroup(d.id);
+          if (healed) {
+            this.groupInstances.set(healed.groupId, healed);
+            this.trackDataGroupPending(healed);
+            continue;
+          }
+        } catch {
+        }
+        this.groupUnavailable.set(
+          d.id,
+          "\u8BE5\u7EC4\u672A\u5728\u5F53\u524D\u4F1A\u8BDD\u5B9E\u4F8B\u5316\uFF08\u8FDE\u63A5\u65F6\u52A0\u8F7D\u5931\u8D25\u6216\u4EC5\u5B58\u5728\u4E8E\u63CF\u8FF0\u7B26\u4E2D\uFF09\uFF0C\u6682\u65E0\u5B9E\u65F6\u72B6\u6001"
+        );
       }
       this.legacyAppData = detectLegacyAppDataGroup(this.dataGroups);
     }
@@ -33928,15 +33961,16 @@ var ZenFSConfigUI = (() => {
       if (this.destroyed) return;
       this.statusRefs = [];
       clear(this.container);
-      if (this.connecting) {
+      const hasAnyState = !!this.repo || !!this.dataGroup || this.configBackends.length > 0 || this.dataBackends.length > 0 || this.dataGroups.length > 0;
+      if (this.connecting && !hasAnyState) {
         this.container.appendChild(el("div", { className: "zfui-loading" }, "\u6B63\u5728\u8FDE\u63A5\u540E\u7AEF..."));
         return;
       }
-      if (this.backgroundConnecting && this.mode === "initial") {
+      if (this.backgroundConnecting && this.mode === "initial" && !hasAnyState) {
         this.container.appendChild(el("div", { className: "zfui-loading" }, "\u6B63\u5728\u6062\u590D\u540E\u7AEF\u8FDE\u63A5..."));
         return;
       }
-      if (this.error && this.mode === "initial") {
+      if (this.error && this.mode === "initial" && !hasAnyState) {
         this.container.appendChild(this.buildErrorView());
         return;
       }
@@ -33948,7 +33982,7 @@ var ZenFSConfigUI = (() => {
         titleRow,
         el("div", { className: "zfui-subtitle" }, this.getSubtitle())
       ]));
-      if (this.backgroundConnecting) {
+      if (this.backgroundConnecting || this.connecting) {
         header.appendChild(el("span", {
           style: "font-size:11px;color:#6b7280;flex-shrink:0"
         }, "\u27F3 \u540C\u6B65\u4E2D..."));
@@ -34052,7 +34086,8 @@ var ZenFSConfigUI = (() => {
             if (!group) return null;
             return {
               statuses: group.getSyncStatuses(),
-              failed: collectFailedBackends(group.getBackendSyncStates())
+              failed: collectFailedBackends(group.getBackendSyncStates()),
+              pending: this.pendingDataGroups.has(dg.id)
             };
           },
           readStates: () => live()?.getBackendSyncStates(),
@@ -34099,7 +34134,8 @@ var ZenFSConfigUI = (() => {
         showLocalPrimary: true,
         read: () => group ? {
           statuses: group.getSyncStatuses(),
-          failed: collectFailedBackends(group.getBackendSyncStates())
+          failed: collectFailedBackends(group.getBackendSyncStates()),
+          pending: this.pendingDataGroups.has(group.groupId)
         } : null,
         readStates: () => group?.getBackendSyncStates(),
         readConflicts: () => getBackendConflicts(group ?? null),
