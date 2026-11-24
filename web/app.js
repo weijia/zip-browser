@@ -1126,7 +1126,9 @@ function renderTagView(target) {
   const entries = tagEntries(data);
   const counts = tagCounts(entries);
   const selection = tagViewSelection(target);
-  stage.classList.remove('list-mode');
+  // 标签视图也是「工具条 + 可滚动列表」：stage 进入 list-mode 后 stage-scroll 才有
+  // 受限高度并自己接管滚轮；否则 overscroll-behavior: contain 会吞掉滚动且父层不动。
+  stage.classList.add('list-mode');
   stage.innerHTML = `<div class="stage-tools tv-tools">
       <span class="tv-tools-label">标签</span>
       <input id="tvTagInput" class="tv-tag-input" type="text" placeholder="筛选标签，回车选中" autocomplete="off" value="${esc(tagViewQuery)}">
