@@ -10,13 +10,14 @@ import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.
 import { addTag, removeTag, rememberPath, listTags, keyForTarget } from './annotations-store.js';
 import { tagEntries, matchTagEntries, tagCounts, filterTagCounts, pickTagForQuery } from './tag-filter.js';
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
-import { initManifestSync, scheduleSync, fetchLocalHostInfo, getDataGroupFs, getActiveDataGroup } from './manifest-sync.js';
+import { initManifestSync, scheduleSync, fetchLocalHostInfo, getDataGroupFs, getActiveDataGroup, waitForDataGroupFs } from './manifest-sync.js';
 import { initDriveCache } from './drive-cache.js';
 import { initManifestVolumeImport } from './manifest-volume-import.js';
 import { initHostDisksPanel, hostDisksCacheInfo, hostDisksCachedDoc, cacheHostDisksDoc, restoreHostDisksFromCache, writeHostDisksDoc, rememberManualSerial } from './host-disks-panel.js';
 import { loadHostDisksDoc, describeVirtual, describeTreePath, treePath, probeVolumeSources, readHideNoDisk, writeHideNoDisk, invalidateHostDisksDoc, volumeAliasesFor, setLocalVolumeAlias, applyManualDiskSerial, readPendingSerials, addPendingSerial, clearPendingSerial, applyDerivedSerials, attachVolumeAliases, partitionAliasesFor, setLocalPartitionAlias } from './host-disks-browser.js';
 import { createSelectionStore, isDirSelected, isFileSelected, addDirSelection, removeDirSelection, removeFileDirSelection, removePickedFile, selectionPathKey } from './manifest-selection.js';
 import { loadVolumeTree, findTreeNode } from './volume-tree.js';
+import { addEntry as addUfsEntry, listYears as listUfsYears, readYear as readUfsYear, removeEntry as removeUfsEntry, makeEntry as makeUfsEntry, UFS_ROOT } from './ufs-store.js';
 import {
   initManifestBuilder, addPickedFromItem, addFileListDir, openCopyRefForItem,
   openDirListForItem, getCachedDirSummary,
@@ -757,6 +758,14 @@ function explorerControls(item) {
 
 // 手机端每个目录/文件项只显示这一个按钮；点开后把该行原有操作搬到底部面板。
 // 桌面端由 CSS 隐藏，行内按钮与事件绑定完全不变。
+function ufsControl(item) {
+  const name = item?.name || winBasename(item?.path || '');
+  if (!name) return '';
+  return `<button type="button" class="ufs-add" data-action="ufs-add" data-path="${esc(item.path || '')}"
+    data-name="${esc(name)}" data-dir="${item.dir ? '1' : ''}" data-mtime="${esc(item.mtime || '')}"
+    data-size="${esc(item.size ?? '')}" title="把这个${item.dir ? '目录' : '文件'}加入 /ufs/">+ufs</button>`;
+}
+
 function rowMenuButton(item) {
   return `<button type="button" class="row-menu-btn" data-action="row-menu"
     data-name="${esc(item.name)}" data-dir="${item.dir ? '1' : ''}"
@@ -957,6 +966,10 @@ function renderCrumbs(target) {
     for (const part of hdCrumbParts) parts.push({ label: part.label, target: { kind: 'hd', path: part.path } });
   } else if (target.kind === 'tags') {
     parts.push({ label: '标签视图' });
+  } else if (target.kind === 'ufs') {
+    parts.push({ label: 'UFS 虚拟网盘', target: { kind: 'ufs', path: UFS_ROOT } });
+    const year = /^\/ufs\/(\d{4})/.exec(target.path || '')?.[1];
+    if (year) parts.push({ label: year });
   } else if (target.kind === 'dir' || (target.kind === 'preview' && target.scope === 'local')) {
     appendPathCrumbs(parts, target.kind === 'dir' ? target.path : target.dir);
     if (target.kind === 'preview') parts.push({ label: target.label });
@@ -980,7 +993,8 @@ function renderCrumbs(target) {
   $('mode').textContent = target.kind === 'zip' ? '压缩包内'
     : (target.kind === 'preview' ? '文件预览'
       : (target.kind === 'hd' ? '数据组视图'
-        : (target.kind === 'tags' ? '标签视图' : (LABELS.mode || '本地磁盘'))));
+        : (target.kind === 'tags' ? '标签视图'
+          : (target.kind === 'ufs' ? 'UFS 虚拟网盘' : (LABELS.mode || '本地磁盘')))));
   const label = parts[parts.length - 1].label;
   const siteTitle = HOST.siteTitle || '文件浏览器';
   document.title = label === rootLabel ? siteTitle : `${label} · ${siteTitle}`;
@@ -1316,6 +1330,148 @@ function describeKeyForTags(key) {
   return { kind: 'zip', zipPath: entry.zipPath, entry: entry.entry, label: entry.label };
 }
 
+let ufsView = { path: UFS_ROOT, entries: [] };
+
+function ufsYearPath(year) {
+  return `${UFS_ROOT}/${year}`;
+}
+
+async function flushUfs() {
+  const group = await getActiveDataGroup().catch(() => null);
+  if (group && typeof group.flush === 'function') await group.flush().catch(() => {});
+}
+
+function ufsRowHtml(entry) {
+  const icon = entry.type === 'dir' ? 'icon-dir' : 'icon-file';
+  const src = entry.source || {};
+  const where = src.kind === 'volume'
+    ? `卷 ${src.volumeId || ''}${src.rel ? `/${src.rel}` : ''}`
+    : (src.kind === 'zip' ? `${src.zipPath || ''}${src.entry ? ` / ${src.entry}` : ''}` : (src.path || ''));
+  const meta = [
+    where,
+    entry.size != null ? formatSize(entry.size) : null,
+    entry.addedAt ? `加入 ${new Date(entry.addedAt).toLocaleDateString('zh-CN')}` : null,
+  ].filter(Boolean).join(' · ');
+  return `<div class="ufs-row" data-action="ufs-entry" data-id="${esc(entry.id)}" style="display:flex;align-items:center;gap:8px;padding:7px 4px;border-bottom:1px solid var(--border);cursor:pointer">
+    <span class="icon ${icon}"></span>
+    <span class="ufs-name" style="font-size:13px">${esc(entry.name)}</span>
+    <span class="ufs-meta" style="flex:1;min-width:0;font-size:10px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(meta)}">${esc(meta)}</span>
+    <button type="button" data-action="ufs-remove" data-id="${esc(entry.id)}" title="只删除 /ufs/ 里的这条登记，不碰原文件">移出</button>
+  </div>`;
+}
+
+async function renderUfs(target) {
+  const fs = getDataGroupFs();
+  const path = target.path || UFS_ROOT;
+  stage.classList.remove('list-mode');
+  if (!fs) {
+    ufsView = { path, entries: [] };
+    stage.innerHTML = `<h2 class="stage-title">UFS · 虚拟网盘</h2>
+      <p class="stage-hint">数据同步组还没就绪，/ufs/ 的索引暂时读不到。连接建立后刷新即可。</p>`;
+    return;
+  }
+  if (path === UFS_ROOT || path === '/ufs/') {
+    const years = await listUfsYears(fs);
+    ufsView = { path: UFS_ROOT, entries: [] };
+    const rows = [];
+    for (const year of years) {
+      const info = await readUfsYear(fs, year);
+      rows.push(`<div class="ufs-year" data-action="ufs-year" data-path="${esc(ufsYearPath(year))}" style="display:flex;align-items:center;gap:8px;padding:10px 4px;border-bottom:1px solid var(--border);cursor:pointer">
+        <span class="icon icon-dir"></span>
+        <span style="font-size:13px">${esc(year)}</span>
+        <span style="font-size:10px;color:var(--text-3)">${info.entries.length} 项 · ${info.shards} 份分片${info.broken ? ` · ${info.broken} 份读取失败` : ''}</span>
+      </div>`);
+    }
+    stage.innerHTML = `<h2 class="stage-title">UFS · 虚拟网盘</h2>
+      <p class="stage-hint">目录按加入年、文件按最后修改年分年份；每次加入生成一份新分片，读取时合并，不改写已有文件。</p>
+      ${rows.length ? rows.join('') : '<p class="stage-hint">还没有任何条目。在目录/文件行上点「+ufs」加入。</p>'}`;
+    return;
+  }
+  const match = /^\/ufs\/(\d{4})\/?$/.exec(path);
+  const year = match?.[1];
+  if (!year) throw new Error(`无效的 /ufs/ 路径：${path}`);
+  const info = await readUfsYear(fs, year);
+  ufsView = { path, entries: info.entries };
+  stage.innerHTML = `<h2 class="stage-title">UFS · ${esc(year)}</h2>
+    <p class="stage-hint">${info.entries.length} 项，来自 ${info.shards} 份分片${info.broken ? ` · ${info.broken} 份读取失败已跳过` : ''}。目录按加入年、文件按最后修改年归档。</p>
+    ${info.entries.length ? info.entries.map((entry) => ufsRowHtml(entry)).join('') : '<p class="stage-hint">这一年还没有条目。</p>'}`;
+}
+
+async function addUfsFromElement(element) {
+  // 数据组连接晚于首屏：点得早时等它一下，别直接丢一次加入。
+  let fs = getDataGroupFs();
+  if (!fs) {
+    status('等待数据同步组就绪…');
+    fs = await waitForDataGroupFs(30000);
+  }
+  if (!fs) {
+    status('数据同步组还没就绪，暂时不能加入 /ufs/', true);
+    return;
+  }
+  const path = element.dataset.path || '';
+  const name = element.dataset.name || winBasename(path);
+  const dir = element.dataset.dir === '1';
+  const mtime = Number(element.dataset.mtime) || null;
+  const size = element.dataset.size === '' ? null : Number(element.dataset.size);
+  const entry = makeUfsEntry({
+    name,
+    type: dir ? 'dir' : 'file',
+    source: { kind: 'local', path },
+    mtime: dir ? null : mtime,
+    size: dir ? null : (Number.isFinite(size) ? size : null),
+  });
+  await addUfsEntry(fs, entry);
+  await flushUfs();
+  const year = (dir ? new Date(entry.addedAt).getFullYear() : (entry.mtime ? new Date(entry.mtime).getFullYear() : new Date(entry.addedAt).getFullYear()));
+  status(`已加入 /ufs/${year}/${entry.name}`);
+  if (current().kind === 'ufs') render(current()).catch(showError);
+}
+
+async function openUfsEntry(entry) {
+  if (!entry) return;
+  const src = entry.source || {};
+  if (entry.type === 'dir') {
+    if (src.kind === 'volume' && src.volumeId) {
+      navigate({ kind: 'hd', path: treePath(src.volumeId, src.rel || '') });
+      return;
+    }
+    if (src.kind === 'local' && src.path) {
+      try {
+        await api(`/api/list?path=${encodeURIComponent(src.path)}`);
+        navigate({ kind: 'dir', path: src.path });
+      } catch {
+        const virtual = await treePathForLocalPath(src.path).catch(() => null);
+        if (virtual) {
+          status(`本机没有 ${src.path}，已切到数据组只读结构`);
+          navigate({ kind: 'hd', path: virtual });
+          return;
+        }
+        throw new Error(`来源目录不可用：${src.path}`);
+      }
+      return;
+    }
+    throw new Error('这个目录没有可用的来源');
+  }
+  if (src.kind === 'zip' && src.zipPath) {
+    await openZipBookmark({ zipPath: src.zipPath, entry: src.entry || '', label: entry.name });
+    return;
+  }
+  if (src.kind === 'local' && src.path) {
+    await previewFile(src.path, entry.name, winDirname(src.path));
+    return;
+  }
+  throw new Error('这个文件没有可用的来源');
+}
+
+async function removeUfsById(id) {
+  const fs = getDataGroupFs();
+  if (!fs || !id) return;
+  const removed = await removeUfsEntry(fs, id);
+  await flushUfs();
+  status(removed ? `已从 /ufs/ 移出（删除 ${removed} 份分片）` : '没有找到对应分片');
+  if (current().kind === 'ufs') render(current()).catch(showError);
+}
+
 async function renderDrives() {
   const [{ drives, networkDrives }, hdState] = await Promise.all([
     api('/api/drives'),
@@ -1384,6 +1540,11 @@ async function renderDrives() {
     <div class="drive-head"><span class="drive-letter net">主</span><span class="drive-name">主机磁盘（数据组）</span></div>
     <div class="drive-meta net-meta">${hdMeta}</div>
   </div>`;
+  // /ufs/ 虚拟网盘：只登记目录/文件指针，索引分片也在数据组里。
+  const ufsCard = `<div class="drive-card network-storage" data-action="ufs" data-path="/ufs" title="虚拟网盘：按年份归档已加入的目录与文件">
+    <div class="drive-head"><span class="drive-letter net">U</span><span class="drive-name">UFS · 虚拟网盘</span></div>
+    <div class="drive-meta net-meta">/ufs/ · 目录按加入年 / 文件按修改年</div>
+  </div>`;
 
   const title = LABELS.drivesTitle || '此电脑 · 磁盘';
   const unit = LABELS.drivesUnit || '磁盘';
@@ -1393,8 +1554,8 @@ async function renderDrives() {
   const localHint = hostInfo?.host
     ? `本机 ${esc(hostInfo.host)} · 卷 ID 取卷根的 <code>.dir-struct-id</code>，没有标记文件时为 Windows 卷序列号`
     : '';
-  stage.innerHTML = `<h2 class="stage-title">${esc(title)}（${drives.length + registered.length + 1}）</h2>
-    <div class="drive-grid">${hdCard}${cards}${networkCards || (drives.length ? '' : `<div class="empty">${esc(empty)}</div>`)}</div>
+  stage.innerHTML = `<h2 class="stage-title">${esc(title)}（${drives.length + registered.length + 2}）</h2>
+    <div class="drive-grid">${hdCard}${ufsCard}${cards}${networkCards || (drives.length ? '' : `<div class="empty">${esc(empty)}</div>`)}</div>
     ${hint ? `<p class="stage-hint">${esc(hint)}</p>` : ''}<p class="stage-hint" id="driveLocalHint"${localHint ? '' : ' hidden'}>${localHint}</p>`;
   const sidebarRoot = LABELS.sidebarRoot || LABELS.root || '此电脑';
   const localSidebar = drives.map((drive) => {
@@ -1413,7 +1574,8 @@ async function renderDrives() {
         : `<div class="side-item net-side-item" title="${esc(nameTip)}">网 ${esc(name)}</div>`;
     }).join('')}`
     : '';
-  const hdSidebar = `<div class="side-title side-sub">数据组视图</div><div class="side-item" data-action="hd" data-path=""><span class="icon icon-dir"></span>主机磁盘（数据组）</div>`;
+  const hdSidebar = `<div class="side-title side-sub">数据组视图</div><div class="side-item" data-action="hd" data-path=""><span class="icon icon-dir"></span>主机磁盘（数据组）</div>
+    <div class="side-item" data-action="ufs" data-path="/ufs"><span class="icon icon-dir"></span>UFS 虚拟网盘</div>`;
   const taggedCount = tagEntries(getAnnotationStore()?.snapshot() || { tags: {}, paths: {} }).length;
   const tagSidebar = `<div class="side-title side-sub">标签</div><div class="side-item" data-action="tags-view"><span class="icon icon-dir"></span>标签视图${taggedCount ? ` <span class="anno-count">${taggedCount}</span>` : ''}</div>`;
   sidebar.innerHTML = `<div class="side-title">${esc(sidebarRoot)}</div>${localSidebar}${networkSidebar}${hdSidebar}${tagSidebar}`;
@@ -1950,6 +2112,7 @@ async function renderDir(abs) {
     const imageCards = images.map((item) => `<div class="thumb-card" data-action="file" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
       ${trashCardControls(item)}
       ${rowMenuButton(item)}
+      ${ufsControl(item)}
       ${flControls(item)}
       ${copyControls(item)}
       ${explorerControls(item)}
@@ -1960,6 +2123,7 @@ async function renderDir(abs) {
     const zipCards = zips.map((item) => `<div class="thumb-card" data-action="zip" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
       ${trashCardControls(item)}
       ${rowMenuButton(item)}
+      ${ufsControl(item)}
       ${flControls(item)}
       ${copyControls(item)}
       ${explorerControls(item)}
@@ -1969,7 +2133,7 @@ async function renderDir(abs) {
     </div>`).join('');
     const allCards = imageCards + zipCards;
     body = `<div class="thumb-head">图片/压缩包 · ${thumbsCount} 项<span>仅当前目录 · 点击缩略图查看原图或打开压缩包</span></div>
-      ${folders.length ? `<div class="folder-chips">${folders.map((item) => `<span class="folder-chip" data-action="dir" data-path="${esc(item.path)}">${esc(item.name)}${dirTagsHtml({ ...item, dir: true })}${trashChipControls({ ...item, dir: true })}${flControls({ ...item, dir: true })}${dirListControls({ ...item, dir: true })}${explorerControls({ ...item, dir: true })}${rowMenuButton({ ...item, dir: true })}</span>`).join('')}</div>` : ''}
+      ${folders.length ? `<div class="folder-chips">${folders.map((item) => `<span class="folder-chip" data-action="dir" data-path="${esc(item.path)}">${esc(item.name)}${dirTagsHtml({ ...item, dir: true })}${trashChipControls({ ...item, dir: true })}${flControls({ ...item, dir: true })}${dirListControls({ ...item, dir: true })}${explorerControls({ ...item, dir: true })}${ufsControl({ ...item, dir: true })}${rowMenuButton({ ...item, dir: true })}</span>`).join('')}</div>` : ''}
       <div class="thumb-grid">${allCards || '<div class="thumb-empty">当前目录没有图片或压缩包，可切换到列表视图</div>'}</div>`;
   } else {
     const rows = items.map((item) => {
@@ -1983,7 +2147,7 @@ async function renderDir(abs) {
         : `<span class="icon ${icon}"></span>`;
       return `<tr class="${manifestRowClass(item)}" data-action="${action}" data-path="${esc(item.path)}" data-name="${esc(item.name)}">
         ${trashRowStart(item)}
-        <td><span class="file-name"><span class="sel-state">${manifestSelectionBadge(item)}</span>${thumb}${esc(item.name)}${hint}${encBadge(item)}${dirTagsHtml(item)}${flControls(item)}${dirListControls(item)}${copyControls(item)}${explorerControls(item)}${rowMenuButton(item)}</span></td>
+        <td><span class="file-name"><span class="sel-state">${manifestSelectionBadge(item)}</span>${thumb}${esc(item.name)}${hint}${encBadge(item)}${dirTagsHtml(item)}${flControls(item)}${dirListControls(item)}${copyControls(item)}${explorerControls(item)}${ufsControl(item)}${rowMenuButton(item)}</span></td>
         <td class="file-size${item.dir ? ' dir-size-cell' : ''}"${item.dir ? ` data-size-path="${esc(item.path)}"` : ''}>${item.dir ? '文件夹' : formatSize(item.size)}</td>
         <td class="file-time">${formatTime(item.mtime)}</td>
         ${trashRowEnd(item)}
@@ -2129,6 +2293,7 @@ async function render(target) {
   status('正在加载…');
   try {
     if (target.kind === 'drives') await renderDrives();
+    else if (target.kind === 'ufs') await renderUfs(target);
     else if (target.kind === 'tags') renderTagView(target);
     else if (target.kind === 'hd') await renderHostDisks(target);
     else if (target.kind === 'dir') await renderDir(target.path);
@@ -2141,6 +2306,12 @@ async function render(target) {
     showError(err);
   }
 }
+
+// 同步组是晚于首屏建立的：连接就绪会派发 zb:host-disks-change，UFS 视图借此自动重读，
+// 不必让用户手动刷新。
+window.addEventListener('zb:host-disks-change', () => {
+  if (current()?.kind === 'ufs') render(current()).catch(showError);
+});
 
 async function downloadFile(abs, name) {
   status(`正在下载 ${name}…`);
@@ -2330,6 +2501,32 @@ document.addEventListener('click', async (event) => {
   }
   if (action === 'row-tag-remove') {
     removeRowTag(element.dataset.path, element.dataset.tag);
+    return;
+  }
+  if (action === 'ufs-add') {
+    event.preventDefault();
+    event.stopPropagation();
+    await addUfsFromElement(element);
+    return;
+  }
+  if (action === 'ufs') {
+    navigate({ kind: 'ufs', path: UFS_ROOT });
+    return;
+  }
+  if (action === 'ufs-year') {
+    navigate({ kind: 'ufs', path: element.dataset.path || UFS_ROOT });
+    return;
+  }
+  if (action === 'ufs-entry') {
+    event.preventDefault();
+    const entry = ufsView.entries.find((item) => item.id === element.dataset.id);
+    await openUfsEntry(entry);
+    return;
+  }
+  if (action === 'ufs-remove') {
+    event.preventDefault();
+    event.stopPropagation();
+    await removeUfsById(element.dataset.id || '');
     return;
   }
   if (action === 'tags-view') {

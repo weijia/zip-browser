@@ -42,6 +42,7 @@ export function compactTarget(target) {
     };
   }
   if (target.kind === 'hd') return { k: 'hd', p: target.path || '' };
+  if (target.kind === 'ufs') return { k: 'ufs', p: target.path || '/ufs' };
   if (target.kind === 'dir') return { k: 'dir', p: target.path };
   if (target.kind === 'preview') {
     return { k: 'preview', p: target.path, d: target.dir, u: target.url };
@@ -94,6 +95,7 @@ export function localTargetFromCompact(snap) {
     };
   }
   if (snap.k === 'hd') return { kind: 'hd', path: snap.p || '' };
+  if (snap.k === 'ufs') return { kind: 'ufs', path: snap.p || '/ufs' };
   if (snap.k === 'dir' && typeof snap.p === 'string' && snap.p) {
     return { kind: 'dir', path: snap.p };
   }
