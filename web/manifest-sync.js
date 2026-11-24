@@ -146,13 +146,8 @@ async function applyConnection(detail, { keepIfMissing = false } = {}) {
   const { connected, declared } = remoteBackends(group);
   const backends = connected.length ? connected : declared;
   const remotes = backends.filter((b) => b && !LOCAL_BACKEND_TYPES.has(b.type));
-  if (!remotes.length) {
-    if (keepIfMissing && appFs) return;
-    appFs = null; prefix = null; activeGroupId = null;
-    blockReason = '数据组没有远端后端，只有本地后端时不会真正同步到其他设备';
-    report(`清单导出不可用：${blockReason}`, false);
-    return;
-  }
+  // 数据组本身就是本地 CFS 库：即使远端后端还没连上，组内内容（标签、选择集、
+  // 目录树）也已经可用。先发布 appFs 让首屏能读，不要等远端握手。
   // dataGroup.fs 是数据组的逻辑根：zen-fs-config 会把同一个相对路径分别映射到
   // 每个后端自己的根（Gitee 仓库根、RemoteStorage basePath 等）。因此这里只写
   // 组根下的 /struct、/file-list，不能再按后端 basePath 另算前缀。
@@ -162,13 +157,18 @@ async function applyConnection(detail, { keepIfMissing = false } = {}) {
   if (activeGroupId) writeRaw(DATA_GROUP_KEY, activeGroupId);
   blockReason = '';
   clearConnectRetry();
-  report(`已就绪：${[...new Set(remotes.map((b) => b.type))].join(' / ')} · 写入 /struct/…、/file-list/…`, true);
+  if (!remotes.length) {
+    // 纯本地组：读写与搜索照常，只是暂时不会同步到别的设备。
+    report('已就绪：仅本地数据组（未连接远端后端，暂不跨设备同步）', true);
+  } else {
+    report(`已就绪：${[...new Set(remotes.map((b) => b.type))].join(' / ')} · 写入 /struct/…、/file-list/…`, true);
+  }
   // 连接是异步晚于首屏渲染建立的：首屏 hd 视图可能在未连接时缓存了错误结果，
   // 就绪后通知虚拟挂载点重渲染一次，避免一直停留在「同步组未连接」提示。
   if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
     window.dispatchEvent(new CustomEvent('zb:host-disks-change'));
   }
-  scheduleSync(0);
+  if (remotes.length) scheduleSync(0);
 }
 
 function tagsByRelFrom(data) {
