@@ -236,7 +236,7 @@ test('drive-registry-store：本地镜像不覆盖数据组清单，只逐条 up
   const del = await store.remove('S3-2');
   assert.equal(del.ok, true);
   assert.deepEqual(JSON.parse(files.get(storeMod.REGISTRY_PATH)).entries.map((e) => e.dir), ['S3-3', 'S3-4', 'WebDav-1']);
-  assert.equal(JSON.parse(map.get(storeMod.STORAGE_KEY)).entries.length, 3, '本地镜像跟随更新');
+  assert.equal(map.has(storeMod.STORAGE_KEY), false, '生产路径不写 localStorage 镜像');
 });
 
 test('drive-registry-store：同步组未连接时明确失败，不谎报已同步', async () => {

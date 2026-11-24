@@ -1,13 +1,14 @@
 // 目录标签条 + 书签面板 + 左侧栏快捷区。
 // 只通过 hooks 与 app.js 交互，不碰导航状态与位置持久化。
 import {
-  createAnnotationStore, STORAGE_KEY,
+  createAnnotationStore,
   keyForTarget, zipEntryDir,
   rememberPath, describeKey,
   listTags, addTag, removeTag, allTags, keysByTag,
   isBookmarked, addBookmark, removeBookmark, renameBookmark,
   tagColor,
 } from './annotations-store.js';
+import { getDataGroupFs, getActiveDataGroup } from './manifest-sync.js';
 import { winBasename } from './location.js';
 
 const $ = (id) => document.getElementById(id);
@@ -314,9 +315,18 @@ export function onRender(target) {
 export function initAnnotations(options) {
   hooks = options;
   store = createAnnotationStore({
+    // 应用数据只走数据同步组：单一 default 组的 /annotations.json。
+    // 本地缓存由数据组自己的 IndexedDB 副本提供，不再写 localStorage 镜像。
+    readFs: () => getDataGroupFs(),
+    flush: async () => {
+      const group = await getActiveDataGroup();
+      if (group && typeof group.flush === 'function') await group.flush();
+    },
     onChange: () => {
       refresh();
-      // 本地 mutate 与跨标签页 reload 都会走这里，供 v2 清单导出防抖重算。
+      // 标签视图依赖同一份 annotations，数据组拉取/本地写入后都要整页重算。
+      window.dispatchEvent(new CustomEvent('zb:annotations-change'));
+      // 本地 mutate 与同步拉取都会走这里，供 v2 清单导出防抖重算。
       if (hooks && typeof hooks.onMutate === 'function') hooks.onMutate();
     },
   });
@@ -330,9 +340,8 @@ export function initAnnotations(options) {
   $('annoBackdrop').addEventListener('click', closePanel);
   document.addEventListener('click', onDocumentClick);
   document.addEventListener('keydown', onKeyDown);
-  window.addEventListener('storage', (event) => {
-    if (event.key === STORAGE_KEY) store.reload();
-  });
+  // 数据组连上或同步完成后重读文件，替代原来的 localStorage storage 事件。
+  window.addEventListener('zb:host-disks-change', () => { void store.reload(); });
   window.addEventListener('pagehide', () => store.flush());
 
   return store.init().then(({ backend }) => {

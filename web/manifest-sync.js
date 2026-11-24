@@ -96,11 +96,13 @@ function remoteBackends(group) {
   return { connected, declared };
 }
 
-async function applyConnection(detail) {
+async function applyConnection(detail, { keepIfMissing = false } = {}) {
   const conn = detail || (configurator && typeof configurator.getConnection === 'function'
     ? configurator.getConnection() : null);
   activeConnection = conn || null;
   if (!conn) {
+    // sync 事件只是刷新状态：没有新 detail 时不要凭一次空快照把已生效的数据组拆掉。
+    if (keepIfMissing && appFs) return;
     appFs = null; prefix = null; activeGroupId = null;
     // 无连接：撤回已发布的 repo，让 store 退回各自的 localStorage 镜像。
     publishConfigRepo(null);
@@ -134,6 +136,7 @@ async function applyConnection(detail) {
     if (scored.length) group = scored[0].group;
   }
   if (!group?.fs) {
+    if (keepIfMissing && appFs) return;
     appFs = null; prefix = null; activeGroupId = null;
     blockReason = '未找到 app-data 数据同步组，请在下方配置并连接一个含远端后端的组';
     report(blockReason, false);
@@ -144,6 +147,7 @@ async function applyConnection(detail) {
   const backends = connected.length ? connected : declared;
   const remotes = backends.filter((b) => b && !LOCAL_BACKEND_TYPES.has(b.type));
   if (!remotes.length) {
+    if (keepIfMissing && appFs) return;
     appFs = null; prefix = null; activeGroupId = null;
     blockReason = '数据组没有远端后端，只有本地后端时不会真正同步到其他设备';
     report(`清单导出不可用：${blockReason}`, false);
@@ -598,6 +602,28 @@ export function getDataGroupFs() {
   return appFs.promises || appFs;
 }
 
+/**
+ * 等数据组就绪后返回 fs；已就绪时同步返回。
+ * 只等一次 zb:host-disks-change（连接成功时会派发），超时返回当前状态，
+ * 避免各 store 为了一个尚不存在的连接各自轮询。
+ */
+export function waitForDataGroupFs(timeout = 8000) {
+  const ready = getDataGroupFs();
+  if (ready) return Promise.resolve(ready);
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      window.removeEventListener('zb:host-disks-change', done);
+      resolve(getDataGroupFs());
+    };
+    const timer = setTimeout(done, timeout);
+    window.addEventListener('zb:host-disks-change', done);
+  });
+}
+
 /** 供诊断面板列出本工具缓存的扫描分片与 file-list 片。 */
 export function syncDiagnostics() {
   return {
@@ -647,7 +673,7 @@ export function initManifestSync(options = {}) {
   // bootstrap（实例稍后才创建）。早期 applyConnection 拿不到组会清空连接句柄，
   // 而组就绪后组件只发 sync 事件、不再重发 connected，因此这里监听 sync 重新
   // 解析一次连接；成功分支会派发 zb:host-disks-change 让视图刷新。
-  configurator.addEventListener('sync', () => { void applyConnection(); });
+  configurator.addEventListener('sync', () => { void applyConnection(undefined, { keepIfMissing: true }); });
   void applyConnection();
   return { ok: true };
 }

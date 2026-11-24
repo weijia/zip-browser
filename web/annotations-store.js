@@ -9,6 +9,9 @@ import { getConfigRepo, onConfigRepo } from './config-repo.js';
 
 export const STORAGE_KEY = 'zip-browser:annotations:v1';
 export const CONFIG_KEY = '/annotations';
+// 应用数据只存数据同步组（单一 default 组）根下的这个文件；不再写配置同步组，
+// 也不再维护 localStorage 镜像（数据组自带的 IndexedDB 本地副本就是缓存）。
+export const DATA_PATH = '/annotations.json';
 export const APP_ID = 'dir-struct-gen';
 
 const MAX_TAGS_PER_KEY = 24;
@@ -250,17 +253,21 @@ function memoryStorage() {
 }
 
 /**
- * 创建一个带持久化的仓库。repoFactory 传 null 可完全禁用 zen-fs-config（单测用）。
- * onChange 在每次本地修改或多标签页同步后触发，供 UI 重绘。
+ * 创建一个带持久化的仓库。
+ *
+ * 生产路径（readFs）：应用数据只放数据同步组的 `/annotations.json`，
+ * 本地缓存由数据组的 IndexedDB 副本负责，不再另建 localStorage 镜像。
+ * 旧参数 storage / repoFactory 仅留给单测与旧调用点，不再读写配置同步组。
  */
-export function createAnnotationStore({ storage, repoFactory, onChange } = {}) {
+export function createAnnotationStore({ storage, repoFactory, readFs, flush, onChange } = {}) {
   const globals = typeof window !== 'undefined' ? window : globalThis;
   const local = storage || globals.localStorage || memoryStorage();
-  const useShared = repoFactory === undefined;
+  const fileMode = typeof readFs === 'function';
+  const useShared = !fileMode && repoFactory === undefined;
   const factory = useShared ? null : repoFactory;
 
   let repo = null;
-  let backend = 'local';
+  let backend = fileMode ? 'data-group' : 'local';
   let data = emptyData();
   const notify = () => { if (onChange) onChange(snapshot()); };
 
@@ -293,13 +300,46 @@ export function createAnnotationStore({ storage, repoFactory, onChange } = {}) {
     } catch { /* 降级由 localStorage 兜底 */ }
   }
 
+  /** 数据组文件读：只读，不抛，文件不存在视为空。 */
+  async function readFileData() {
+    const fp = readFs?.();
+    if (!fp || typeof fp.readFile !== 'function') return null;
+    try {
+      const raw = await fp.readFile(DATA_PATH, 'utf8');
+      return sanitizeData(JSON.parse(raw));
+    } catch {
+      return null;
+    }
+  }
+
+  /** 数据组文件写：写完 flush，失败只返回 false，内存态仍然可用。 */
+  async function writeFileData(next) {
+    const fp = readFs?.();
+    if (!fp || typeof fp.writeFile !== 'function') return false;
+    try {
+      await fp.writeFile(DATA_PATH, `${JSON.stringify(next, null, 2)}\n`);
+      if (typeof flush === 'function') await flush();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function adopt(next) {
     data = next || emptyData();
-    writeLocal(data);
+    if (!fileMode) writeLocal(data);
     return data;
   }
 
   async function init() {
+    if (fileMode) {
+      const loaded = await readFileData();
+      data = loaded || { ...emptyData(), updatedAt: Date.now() };
+      backend = readFs() ? 'data-group' : 'local';
+      // 首次没有文件时落一份初始结构，让后续写入/同步有基线。
+      if (!loaded && readFs()) await writeFileData(data);
+      return { backend, data: snapshot() };
+    }
     if (useShared) {
       repo = getConfigRepo();
       backend = repo ? 'zenfs' : 'local';
@@ -329,7 +369,16 @@ export function createAnnotationStore({ storage, repoFactory, onChange } = {}) {
   }
 
   /** 其他标签页 / 设备同步后重新读取，不重建 repo。 */
-  function reload() {
+  async function reload() {
+    if (fileMode) {
+      const loaded = await readFileData();
+      backend = readFs() ? 'data-group' : 'local';
+      if (loaded && loaded.updatedAt !== data.updatedAt) {
+        data = loaded;
+        notify();
+      }
+      return snapshot();
+    }
     const merged = newer(readRepo(), readLocal());
     if (merged && merged.updatedAt !== data.updatedAt) {
       data = merged;
@@ -347,20 +396,29 @@ export function createAnnotationStore({ storage, repoFactory, onChange } = {}) {
     const next = fn(data);
     if (next === data) return snapshot();
     data = { ...next, v: 1, updatedAt: Date.now() };
-    writeLocal(data);
-    writeRepo(data);
+    if (fileMode) {
+      void writeFileData(data);
+    } else {
+      writeLocal(data);
+      writeRepo(data);
+    }
     notify();
     return snapshot();
   }
 
-  async function flush() {
+  async function flushRepo() {
+    if (fileMode) {
+      await writeFileData(data);
+      return;
+    }
     if (repo && typeof repo.flush === 'function') {
       try { await repo.flush(); } catch { /* 离线时忽略 */ }
     }
   }
 
   return {
-    init, reload, snapshot, mutate, flush,
+    init, reload, snapshot, mutate,
+    flush: flushRepo,
     get backend() { return backend; },
     get data() { return data; },
   };

@@ -331,14 +331,18 @@ function newer(a, b) {
   return (b.updatedAt || 0) > (a.updatedAt || 0) ? b : a;
 }
 
+export const DATA_PATH = '/selection.json';
+
 /**
- * 三套选择集的仓库。repoFactory 传 null 可完全禁用 zen-fs-config（单测用）。
- * onChange 在本地修改后触发，供面板重绘与触发增量导出。
+ * 三套选择集的仓库。
+ * 生产路径（readFs）：三套选择集合并存数据同步组的 /selection.json。
+ * 旧参数 storage / repoFactory 仅留给单测，不再读写配置同步组。
  */
-export function createSelectionStore({ storage, repoFactory, onChange } = {}) {
+export function createSelectionStore({ storage, repoFactory, readFs, flush, onChange } = {}) {
   const globals = typeof window !== 'undefined' ? window : globalThis;
   const local = storage || globals.localStorage || memoryStorage();
-  const useShared = repoFactory === undefined;
+  const fileMode = typeof readFs === 'function';
+  const useShared = !fileMode && repoFactory === undefined;
   const factory = useShared ? null : repoFactory;
   const specs = {
     dirs: { config: DIR_SELECTION_KEY, local: LOCAL_DIR_KEY, empty: emptyDirSelection, clean: sanitizeDirSelection },
@@ -346,7 +350,7 @@ export function createSelectionStore({ storage, repoFactory, onChange } = {}) {
     copies: { config: COPY_REFS_KEY, local: LOCAL_COPY_KEY, empty: emptyCopyRefs, clean: sanitizeCopyRefs },
   };
   let repo = null;
-  let backend = 'local';
+  let backend = fileMode ? 'data-group' : 'local';
   const state = { dirs: emptyDirSelection(), files: emptyFileSelection(), copies: emptyCopyRefs() };
 
   function readLocal(key, clean) {
@@ -363,6 +367,23 @@ export function createSelectionStore({ storage, repoFactory, onChange } = {}) {
   }
   function stamp(value) {
     return { ...value, updatedAt: Date.now() };
+  }
+  function fileDoc() {
+    return { v: 1, updatedAt: Date.now(), ...snapshot() };
+  }
+  async function readFileDoc() {
+    const fp = readFs?.();
+    if (!fp || typeof fp.readFile !== 'function') return null;
+    try { return JSON.parse(await fp.readFile(DATA_PATH, 'utf8')); } catch { return null; }
+  }
+  async function writeFileDoc() {
+    const fp = readFs?.();
+    if (!fp || typeof fp.writeFile !== 'function') return false;
+    try {
+      await fp.writeFile(DATA_PATH, `${JSON.stringify(fileDoc(), null, 2)}\n`);
+      if (typeof flush === 'function') await flush();
+      return true;
+    } catch { return false; }
   }
 
   /** 重新按 repo 合并三套选择集（connect 到达后调用），变化则通知。 */
@@ -381,6 +402,22 @@ export function createSelectionStore({ storage, repoFactory, onChange } = {}) {
     if (changed && onChange) onChange('repo', snapshot());
   }
 
+  /** 数据组文件变更后重读 /selection.json。 */
+  async function reloadFromFile() {
+    const doc = await readFileDoc();
+    if (!doc) return snapshot();
+    let changed = false;
+    for (const [which, spec] of Object.entries(specs)) {
+      const next = spec.clean(doc[which]);
+      if (next && next.updatedAt !== state[which]?.updatedAt) {
+        state[which] = next;
+        changed = true;
+      }
+    }
+    if (changed && onChange) onChange('file', snapshot());
+    return snapshot();
+  }
+
   /** 收到 connect 的 repo（或断开时的 null）：重合并并通知 UI。 */
   function attachRepo(next) {
     repo = next || null;
@@ -389,6 +426,16 @@ export function createSelectionStore({ storage, repoFactory, onChange } = {}) {
   }
 
   async function init() {
+    if (fileMode) {
+      const doc = await readFileDoc();
+      for (const [which, spec] of Object.entries(specs)) {
+        const next = doc ? spec.clean(doc[which]) : null;
+        state[which] = next || spec.empty();
+      }
+      backend = readFs() ? 'data-group' : 'local';
+      if (!doc && readFs()) await writeFileDoc();
+      return snapshot();
+    }
     if (useShared) {
       repo = getConfigRepo();
       backend = repo ? 'zenfs' : 'local';
@@ -413,8 +460,12 @@ export function createSelectionStore({ storage, repoFactory, onChange } = {}) {
     const spec = specs[which];
     if (!spec) return get(which);
     state[which] = stamp(spec.clean(value));
-    writeLocal(spec.local, state[which]);
-    writeRepo(spec.config, state[which]);
+    if (fileMode) {
+      void writeFileDoc();
+    } else {
+      writeLocal(spec.local, state[which]);
+      writeRepo(spec.config, state[which]);
+    }
     if (onChange) onChange(which, snapshot());
     return get(which);
   }
@@ -424,7 +475,7 @@ export function createSelectionStore({ storage, repoFactory, onChange } = {}) {
   }
 
   return {
-    init, get, set, snapshot,
+    init, get, set, snapshot, reload: fileMode ? reloadFromFile : async () => snapshot(),
     get backend() { return backend; },
   };
 }

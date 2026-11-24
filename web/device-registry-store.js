@@ -4,15 +4,14 @@
 // 这是该格式的第一个生产者：zip-browser 用户手工确认的 SN → volumeId 映射，
 // 以 { kind:'serial', value:SN, source:'user' } 的 alias 挂到 type='volume' / id=volumeId 的实体上。
 //
-// 存储：复用 config-repo 公告板那一次 connect 得到的 repo（appId=dir-struct-gen），
-// 配置键 /device-registry/identities。物理路径为 /dir-struct-gen/device-registry/identities；
-// 文档里的 /device-registry/identities 是「appId+键」的逻辑写法，此处 appId 不新建以遵守单 connect 约定。
-// localStorage 仅在 vendor 组件未加载时兜底。
+// 存储：应用数据只放数据同步组（单一 default 组）根下的 /device-registry.json；
+// 配置同步组和 localStorage 都不再作为镜像。旧 repoFactory 参数仅保留给单测。
 
 import { getConfigRepo, onConfigRepo } from './config-repo.js';
 
 export const STORAGE_KEY = 'zip-browser:device-registry:v1';
 export const CONFIG_KEY = '/device-registry/identities';
+export const DATA_PATH = '/device-registry.json';
 
 const ALIAS_KINDS = new Set([
   'volumeId', 'volumeKey', 'serial', 'diskUuid', 'deviceUuid', 'hostname', 'volumeLabel',
@@ -382,16 +381,20 @@ export function listDiskAliases(registry) {
 }
 
 /**
- * 创建注册表仓库。repoFactory 传 null 可禁用同步（单测用）；默认订阅共享 connect repo。
+ * 创建注册表仓库。
+ *
+ * 生产路径（readFs）：只读写数据同步组的 /device-registry.json。
+ * 旧参数 storage / repoFactory 仅留给单测，不再写配置同步组。
  */
-export function createDeviceRegistryStore({ storage, repoFactory, onChange } = {}) {
+export function createDeviceRegistryStore({ storage, repoFactory, readFs, flush, onChange } = {}) {
   const globals = typeof window !== 'undefined' ? window : globalThis;
   const local = storage || globals.localStorage || memoryStorage();
-  const useShared = repoFactory === undefined;
+  const fileMode = typeof readFs === 'function';
+  const useShared = !fileMode && repoFactory === undefined;
   const factory = useShared ? null : repoFactory;
 
   let repo = null;
-  let backend = 'local';
+  let backend = fileMode ? 'data-group' : 'local';
   let data = emptyRegistry();
 
   function readLocal() {
@@ -410,20 +413,43 @@ export function createDeviceRegistryStore({ storage, repoFactory, onChange } = {
     try { repo.setConfig(CONFIG_KEY, next); } catch { /* 本地镜像兜底 */ }
   }
   function snapshot() { return JSON.parse(JSON.stringify(data)); }
-  function adopt(next) { data = sanitizeRegistry(next) || emptyRegistry(); writeLocal(data); return snapshot(); }
+  function adopt(next) { data = sanitizeRegistry(next) || emptyRegistry(); if (!fileMode) writeLocal(data); return snapshot(); }
 
-  function mergeFromRepo(notify = false) {
-    const fromRepo = readRepo();
-    const fromLocal = readLocal();
+  async function readFileData() {
+    const fp = readFs?.();
+    if (!fp || typeof fp.readFile !== 'function') return null;
+    try { return sanitizeRegistry(JSON.parse(await fp.readFile(DATA_PATH, 'utf8'))); }
+    catch { return null; }
+  }
+  async function writeFileData(next) {
+    const fp = readFs?.();
+    if (!fp || typeof fp.writeFile !== 'function') return false;
+    try {
+      await fp.writeFile(DATA_PATH, `${JSON.stringify(next, null, 2)}\n`);
+      if (typeof flush === 'function') await flush();
+      return true;
+    } catch { return false; }
+  }
+  function persist(next) {
+    if (fileMode) { void writeFileData(next); return; }
+    writeLocal(next);
+    writeRepo(next);
+  }
+
+  function mergeFromSources(fromRepo, fromLocal, notify = false) {
     let chosen = fromRepo && fromLocal
       ? (timeValue(fromRepo.updatedAt) >= timeValue(fromLocal.updatedAt) ? fromRepo : fromLocal)
       : (fromRepo || fromLocal);
     if (!chosen) chosen = { ...emptyRegistry(), updatedAt: new Date().toISOString() };
     const changed = chosen.updatedAt !== data.updatedAt;
     adopt(chosen);
-    if (readRepo()?.updatedAt !== data.updatedAt) writeRepo(data);
+    if (!fileMode && readRepo()?.updatedAt !== data.updatedAt) writeRepo(data);
     if (changed && notify && onChange) onChange(snapshot());
     return snapshot();
+  }
+
+  function mergeFromRepo(notify = false) {
+    return mergeFromSources(readRepo(), readLocal(), notify);
   }
 
   function attachRepo(next) {
@@ -433,6 +459,13 @@ export function createDeviceRegistryStore({ storage, repoFactory, onChange } = {
   }
 
   async function init() {
+    if (fileMode) {
+      const loaded = await readFileData();
+      data = loaded || { ...emptyRegistry(), updatedAt: new Date().toISOString() };
+      backend = readFs() ? 'data-group' : 'local';
+      if (!loaded && readFs()) await writeFileData(data);
+      return { backend, data: snapshot() };
+    }
     if (useShared) {
       repo = getConfigRepo();
       backend = repo ? 'zenfs' : 'local';
@@ -448,49 +481,44 @@ export function createDeviceRegistryStore({ storage, repoFactory, onChange } = {
   /** 写入一条映射（校验冲突），同步到本地镜像与 repo。 */
   function upsert(input) {
     data = upsertVolumeMapping(data, input);
-    writeLocal(data);
-    writeRepo(data);
+    persist(data);
     if (onChange) onChange(snapshot());
     return snapshot();
   }
   function remove(volumeId) {
     data = removeVolumeMapping(data, volumeId);
-    writeLocal(data);
-    writeRepo(data);
+    persist(data);
     if (onChange) onChange(snapshot());
     return snapshot();
   }
   /** 写入/删除一条 UUID 归并（host 实体的 deviceUuid alias）。 */
   function upsertHost(input) {
     data = upsertHostAlias(data, input);
-    writeLocal(data);
-    writeRepo(data);
+    persist(data);
     if (onChange) onChange(snapshot());
     return snapshot();
   }
   function removeHost(canonicalUuid, aliasUuid) {
     data = removeHostAlias(data, canonicalUuid, aliasUuid);
-    writeLocal(data);
-    writeRepo(data);
+    persist(data);
     if (onChange) onChange(snapshot());
     return snapshot();
   }
   /** 写入/删除一条磁盘标识归并（disk 实体）。 */
   function upsertDisk(input) {
     data = upsertDiskAlias(data, input);
-    writeLocal(data);
-    writeRepo(data);
+    persist(data);
     if (onChange) onChange(snapshot());
     return snapshot();
   }
   function removeDisk(canonicalId, aliasId) {
     data = removeDiskAlias(data, canonicalId, aliasId);
-    writeLocal(data);
-    writeRepo(data);
+    persist(data);
     if (onChange) onChange(snapshot());
     return snapshot();
   }
   function flush() {
+    if (fileMode) return writeFileData(data);
     if (repo && typeof repo.flush === 'function') {
       try { return repo.flush(); } catch { /* 离线忽略 */ }
     }

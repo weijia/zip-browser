@@ -10,12 +10,13 @@ import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.
 import { addTag, removeTag, rememberPath, listTags, keyForTarget } from './annotations-store.js';
 import { tagEntries, matchTagEntries, tagCounts, filterTagCounts, pickTagForQuery } from './tag-filter.js';
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
-import { initManifestSync, scheduleSync, fetchLocalHostInfo } from './manifest-sync.js';
+import { initManifestSync, scheduleSync, fetchLocalHostInfo, getDataGroupFs, getActiveDataGroup } from './manifest-sync.js';
 import { initDriveCache } from './drive-cache.js';
 import { initManifestVolumeImport } from './manifest-volume-import.js';
 import { initHostDisksPanel, hostDisksCacheInfo, hostDisksCachedDoc, cacheHostDisksDoc, restoreHostDisksFromCache, writeHostDisksDoc, rememberManualSerial } from './host-disks-panel.js';
 import { loadHostDisksDoc, describeVirtual, describeTreePath, probeVolumeSources, readHideNoDisk, writeHideNoDisk, invalidateHostDisksDoc, volumeAliasesFor, setLocalVolumeAlias, applyManualDiskSerial, readPendingSerials, addPendingSerial, clearPendingSerial, applyDerivedSerials, attachVolumeAliases, partitionAliasesFor, setLocalPartitionAlias } from './host-disks-browser.js';
 import { createSelectionStore, isDirSelected, isFileSelected, addDirSelection, removeDirSelection, removeFileDirSelection, removePickedFile, selectionPathKey } from './manifest-selection.js';
+import { loadVolumeTree, findTreeNode } from './volume-tree.js';
 import {
   initManifestBuilder, addPickedFromItem, addFileListDir, openCopyRefForItem,
   openDirListForItem, getCachedDirSummary,
@@ -1033,13 +1034,13 @@ function tvChipHtml(tag, key) {
   return `<span class="tv-chip">${esc(tag)}<button type="button" data-action="tags-remove" data-key="${esc(key)}" data-tag="${esc(tag)}" title="移除这个标签">×</button></span>`;
 }
 
-function tvArrow(path, open, canExpand) {
+function tvArrow(key, open, canExpand) {
   if (!canExpand) return '<span class="tv-arrow tv-arrow-gap"></span>';
-  return `<button type="button" class="tv-arrow${open ? ' open' : ''}" data-action="tags-expand" data-path="${esc(path)}" title="${open ? '收起' : '展开这个目录'}">${open ? '▾' : '▸'}</button>`;
+  return `<button type="button" class="tv-arrow${open ? ' open' : ''}" data-action="tags-expand" data-key="${esc(key)}" title="${open ? '收起' : '展开这个目录'}">${open ? '▾' : '▸'}</button>`;
 }
 
-function tvChildrenHtml(path, depth) {
-  const expand = tagExpandState.get(path);
+function tvChildrenHtml(key, depth) {
+  const expand = tagExpandState.get(key);
   if (!expand) return '';
   if (expand.loading && !expand.items) return `<div class="tv-children"><div class="tv-empty">正在读取…</div></div>`;
   if (expand.error) return `<div class="tv-children"><div class="tv-empty tv-error">${esc(expand.error)}</div></div>`;
@@ -1050,42 +1051,45 @@ function tvChildrenHtml(path, depth) {
 }
 
 function tvChildRowHtml(item, depth, data) {
-  const expand = tagExpandState.get(item.path);
+  const expand = tagExpandState.get(item.key);
   const open = Boolean(expand?.open);
-  const key = item.dir ? keyForTarget({ kind: 'dir', path: item.path }) : '';
-  const tags = item.dir ? (data?.tags?.[key] || []) : [];
+  const tags = item.dir && !String(item.key).startsWith('vol:')
+    ? (data?.tags?.[keyForTarget({ kind: 'dir', path: item.path })] || [])
+    : [];
   const action = item.dir
-    ? `data-action="tags-expand" data-path="${esc(item.path)}"`
-    : `data-action="tags-file" data-path="${esc(item.path)}" data-name="${esc(item.name)}"`;
+    ? `data-action="tags-expand" data-key="${esc(item.key)}"`
+    : '';
   return `<div class="tv-node">
     <div class="tv-row tv-child${open ? ' open' : ''}" ${action} style="--tv-depth:${depth}">
-      ${tvArrow(item.path, open, Boolean(item.dir))}
+      ${tvArrow(item.key, open, Boolean(item.dir))}
       <span class="icon ${item.dir ? 'icon-dir' : 'icon-file'}"></span>
       <span class="tv-name">${esc(item.name)}</span>
       ${item.dir ? '' : `<span class="tv-meta">${esc(formatSize(item.size))}</span>`}
-      <span class="tv-tags">${tags.map((tag) => tvChipHtml(tag, key)).join('')}</span>
+      <span class="tv-tags">${tags.map((tag) => tvChipHtml(tag, item.key)).join('')}</span>
     </div>
-    ${item.dir && open ? tvChildrenHtml(item.path, depth + 1) : ''}
+    ${item.dir && open ? tvChildrenHtml(item.key, depth + 1) : ''}
   </div>`;
 }
 
 function tvEntryHtml(entry) {
-  const expand = tagExpandState.get(entry.path);
+  const expand = tagExpandState.get(entry.key);
   const open = Boolean(expand?.open);
-  const canExpand = entry.kind === 'dir';
-  const pos = `${entry.path}${entry.entry ? ` / ${entry.entry}` : ''}`;
+  const canExpand = entry.kind === 'dir' || entry.kind === 'volume';
+  const pos = entry.kind === 'volume'
+    ? `卷 ${entry.volumeId} / ${entry.path}`
+    : `${entry.path}${entry.entry ? ` / ${entry.entry}` : ''}`;
   const action = canExpand
-    ? `data-action="tags-expand" data-path="${esc(entry.path)}"`
-    : `data-action="tags-open-zip" data-key="${esc(entry.key)}"`;
+    ? `data-action="tags-expand" data-key="${esc(entry.key)}"`
+    : `data-action="tags-open-zip" data-key="${esc(entry.sourceKey || entry.key)}"`;
   return `<div class="tv-node">
     <div class="tv-row${open ? ' open' : ''}" ${action}>
-      ${tvArrow(entry.path, open, canExpand)}
+      ${tvArrow(entry.key, open, canExpand)}
       <span class="icon ${canExpand ? 'icon-dir' : 'icon-file'}"></span>
       <span class="tv-name">${esc(entry.label)}</span>
       <span class="tv-path" title="${esc(pos)}">${esc(pos)}</span>
-      <span class="tv-tags">${entry.tags.map((tag) => tvChipHtml(tag, entry.key)).join('')}</span>
+      <span class="tv-tags">${entry.tags.map((tag) => tvChipHtml(tag, entry.sourceKey || entry.key)).join('')}</span>
     </div>
-    ${canExpand && open ? tvChildrenHtml(entry.path, 1) : ''}
+    ${canExpand && open ? tvChildrenHtml(entry.key, 1) : ''}
   </div>`;
 }
 
@@ -1203,30 +1207,48 @@ function toggleTagMode() {
   render(current()).catch(showError);
 }
 
-async function toggleTagExpand(path) {
-  if (!path) return;
-  const expand = tagExpandState.get(path) || { open: false, items: null, error: '', loading: false };
+async function toggleTagExpand(key) {
+  if (!key) return;
+  const expand = tagExpandState.get(key) || { open: false, items: null, error: '', loading: false };
   if (expand.open) {
     expand.open = false;
-    tagExpandState.set(path, expand);
+    tagExpandState.set(key, expand);
     paintTagList();
     return;
   }
   expand.open = true;
-  tagExpandState.set(path, expand);
+  tagExpandState.set(key, expand);
   if (!expand.items && !expand.loading) {
     expand.loading = true;
     paintTagList();
     try {
-      const result = await api(`/api/list?path=${encodeURIComponent(path)}`);
-      expand.items = Array.isArray(result.items) ? result.items : [];
+      if (String(key).startsWith('vol:')) {
+        const match = /^vol:([^/]+)(\/.*)?$/.exec(key);
+        const volumeId = match?.[1] || '';
+        const rel = match?.[2] || '';
+        const loaded = await loadVolumeTree(volumeId);
+        if (!loaded.ok) throw new Error(loaded.error || '读不到这个卷的目录树');
+        const node = findTreeNode(loaded.tree, rel.split('/').filter(Boolean));
+        if (!node) throw new Error(`卷里找不到目录 ${rel || '/'}`);
+        expand.items = (node.children || []).map((child) => ({
+          name: child.name,
+          key: `${key}/${child.name}`,
+          path: `${rel}/${child.name}`,
+          dir: child.type !== 'file',
+          size: child.size,
+        }));
+      } else {
+        const result = await api(`/api/list?path=${encodeURIComponent(key)}`);
+        expand.items = (Array.isArray(result.items) ? result.items : [])
+          .map((item) => ({ ...item, key: item.path }));
+      }
       expand.error = '';
     } catch (err) {
       expand.items = [];
       expand.error = `读取失败：${err?.message || err}`;
     }
     expand.loading = false;
-    tagExpandState.set(path, expand);
+    tagExpandState.set(key, expand);
   }
   paintTagList();
 }
@@ -2287,7 +2309,7 @@ document.addEventListener('click', async (event) => {
     return;
   }
   if (action === 'tags-expand') {
-    await toggleTagExpand(element.dataset.path || '');
+    await toggleTagExpand(element.dataset.key || element.dataset.path || '');
     return;
   }
   if (action === 'tags-file') {
@@ -2557,7 +2579,15 @@ window.addEventListener('hashchange', () => {
   restore().catch(showError);
 });
 
-const selectionStore = createSelectionStore({ onChange: () => refreshManifestBadges() });
+// 选择集也只走数据同步组的 /selection.json，不再读写配置同步组或 localStorage 镜像。
+const selectionStore = createSelectionStore({
+  readFs: () => getDataGroupFs(),
+  flush: async () => {
+    const group = await getActiveDataGroup();
+    if (group && typeof group.flush === 'function') await group.flush();
+  },
+  onChange: () => refreshManifestBadges(),
+});
 selectionStore.init()
   .then(() => refreshManifestBadges())
   .catch((err) => console.warn('selection store unavailable', err));
@@ -2599,8 +2629,15 @@ window.addEventListener('zb:drive-cache-change', () => {
 
 // 主机磁盘面板写回后，此电脑的虚拟挂载点 / 当前虚拟视图立即刷新。
 window.addEventListener('zb:host-disks-change', () => {
+  // 数据组连上/同步完成后，选择集与标签都从组内文件重读一次。
+  void selectionStore.reload();
   const kind = current().kind;
   if (kind === 'drives' || kind === 'hd') render(current());
+});
+
+// 标签数据从数据组重读后，标签视图用新快照重画，不能停留在首帧的空状态。
+window.addEventListener('zb:annotations-change', () => {
+  if (current().kind === 'tags') render(current()).catch(() => {});
 });
 
 initManifestBuilder({

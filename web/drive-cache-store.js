@@ -115,6 +115,8 @@ function isMissingError(err) {
 export function createDriveRegistryStore({ storage, readFs, flush, onChange } = {}) {
   const globals = typeof window !== 'undefined' ? window : globalThis;
   const local = storage || globals.localStorage || memoryStorage();
+  // 生产路径（readFs）：数据组文件就是唯一持久化位置，localStorage 仅测试/旧调用点使用。
+  const fileMode = typeof readFs === 'function';
 
   let data = emptyData();
   let lastRemote = null; // { doc, path } | null
@@ -130,6 +132,7 @@ export function createDriveRegistryStore({ storage, readFs, flush, onChange } = 
   }
 
   function writeLocal(next) {
+    if (fileMode) return;
     try {
       local.setItem(STORAGE_KEY, JSON.stringify(next));
     } catch { /* 隐私模式：仍有内存态可用 */ }
@@ -195,10 +198,12 @@ export function createDriveRegistryStore({ storage, readFs, flush, onChange } = 
     return { ok: true, path: REGISTRY_PATH, error: null };
   }
 
-  /** 启动：只读，不写远端；本地镜像用于首屏。 */
+  /** 启动：只读，不写远端；无同步组时不读旧 localStorage 镜像。 */
   async function init() {
-    const fromLocal = readLocal();
-    if (fromLocal) adopt(fromLocal);
+    if (!fileMode) {
+      const fromLocal = readLocal();
+      if (fromLocal) adopt(fromLocal);
+    }
     const remote = await readRemote();
     if (remote.doc) adopt(remote.doc);
     return { backend, data: snapshot(), remote };

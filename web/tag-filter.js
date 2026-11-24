@@ -1,21 +1,42 @@
 // 标签视图的纯数据层：只认手动标签（annotations 的 tags + paths 描述）。
 // 自动标签（server/tag-rules.js 按目录子项实时推断）不参与这里，避免每次筛选都去扫目录。
 
-/** 把 annotations 的 {key: [tags]} 展开成可渲染的条目，缺路径描述的 key 直接丢弃。 */
+/** 把 annotations 的 {key: [tags]} 展开成可渲染的条目。
+ *  - 有 paths 描述：按 fs / zip 处理；
+ *  - 没有 paths 但 key 形如 /卷ID/相对路径（dir-struct-gen 的卷标签）：按 volume 处理，
+ *    这样历史卷标签不必迁移也能进标签云；展开时再按卷 ID 读 struct 树。 */
 export function tagEntries(data) {
   const entries = [];
   for (const [key, list] of Object.entries(data?.tags || {})) {
-    const desc = data?.paths?.[key];
-    if (!desc || typeof desc.path !== 'string' || !desc.path) continue;
     const tags = [...new Set((Array.isArray(list) ? list : []).map((tag) => String(tag || '').trim()).filter(Boolean))];
     if (!tags.length) continue;
+    const desc = data?.paths?.[key];
+    if (desc && typeof desc.path === 'string' && desc.path) {
+      entries.push({
+        key,
+        sourceKey: key,
+        kind: desc.kind === 'zip' ? 'zip' : 'dir',
+        path: desc.path,
+        zipPath: desc.zipPath || '',
+        entry: desc.entry || '',
+        label: desc.label || desc.path,
+        tags,
+      });
+      continue;
+    }
+    const volume = /^\/([^/]+)(\/.*)?$/.exec(key);
+    if (!volume) continue;
+    const volumeId = volume[1];
+    const rel = (volume[2] || '/').replace(/\/+$/, '') || '/';
     entries.push({
-      key,
-      kind: desc.kind === 'zip' ? 'zip' : 'dir',
-      path: desc.path,
-      zipPath: desc.zipPath || '',
-      entry: desc.entry || '',
-      label: desc.label || desc.path,
+      key: `vol:${volumeId}${rel === '/' ? '' : rel}`,
+      sourceKey: key,
+      kind: 'volume',
+      volumeId,
+      path: rel,
+      zipPath: '',
+      entry: '',
+      label: `${volumeId}${rel === '/' ? '' : rel}`,
       tags,
     });
   }

@@ -80,3 +80,24 @@ test('pickTagForQuery：完全相等优先，其次首个子串命中，无命�
   assert.deepEqual(pickTagForQuery(counts, '不存在'), { pick: null, matches: 0, exact: false });
   assert.deepEqual(pickTagForQuery(counts, ''), { pick: null, matches: 0, exact: false });
 });
+
+test('tagEntries：没有 paths 的 /卷ID/相对路径按 volume 条目展开', () => {
+  const entries = tagEntries({
+    tags: {
+      '/baidu-130/我的资源': ['private'],
+      '/kuake': ['private'],
+      '/unknown/level2/level3': ['deep'],
+    },
+    paths: {},
+  });
+  assert.equal(entries.length, 3);
+  const first = entries.find((entry) => entry.sourceKey === '/baidu-130/我的资源');
+  assert.equal(first.kind, 'volume');
+  assert.equal(first.volumeId, 'baidu-130');
+  assert.equal(first.path, '/我的资源');
+  assert.equal(first.key, 'vol:baidu-130/我的资源');
+  assert.equal(first.label, 'baidu-130/我的资源');
+  const root = entries.find((entry) => entry.sourceKey === '/kuake');
+  assert.equal(root.path, '/');
+  assert.equal(root.key, 'vol:kuake');
+});

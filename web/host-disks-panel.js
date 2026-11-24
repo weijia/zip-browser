@@ -1,5 +1,5 @@
 // 「主机磁盘」面板 UI 层：读 RS 遥测 → 读清单卷 → 读手工 SN 映射 → 归并 → 三视图展示 → 写回。
-import { getConnectedFs, getRsCredentials, getActiveDataGroup, fetchLocalHostInfo } from './manifest-sync.js';
+import { getConnectedFs, getRsCredentials, getActiveDataGroup, fetchLocalHostInfo, getDataGroupFs } from './manifest-sync.js';
 const getManifestFs = getConnectedFs;
 import { collectVolumes } from './manifest-volume-import.js';
 import { fetchUfsNodesRaw, normalizeUfsNodes, getLastReadDiagnostic } from './ufs-nodes-reader.js';
@@ -33,7 +33,14 @@ let volumesCache = [];
 /** /api/hostinfo 的本机卷身份：{ host, volumes: { C: '<volumeId>' } }。读不到时为 null。 */
 let localHostInfo = null;
 let localHostError = '';
-const registry = createDeviceRegistryStore();
+// 设备注册表只读写数据同步组根下的 /device-registry.json，不再走配置同步组。
+const registry = createDeviceRegistryStore({
+  readFs: () => getDataGroupFs(),
+  flush: async () => {
+    const group = await getActiveDataGroup();
+    if (group && typeof group.flush === 'function') await group.flush();
+  },
+});
 
 /** 「隐藏无磁盘的主机」开关，与虚拟挂载点共用同一份设置（见 host-disks-browser.js）。 */
 let hideNoDiskHosts = readHideNoDisk();
