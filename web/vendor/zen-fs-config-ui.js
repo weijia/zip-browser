@@ -26838,6 +26838,26 @@ var ZenFSConfigUI = (() => {
     if (typeof raw === "string") return new TextEncoder().encode(raw);
     return new Uint8Array(raw);
   }
+  async function writeFileOverwrite(fs, path, data) {
+    const bytes = toBytes(data);
+    try {
+      await fs.writeFile(path, bytes);
+      return;
+    } catch (err2) {
+      if (!isAlreadyExistsError(err2)) throw err2;
+    }
+    try {
+      await fs.unlink(path);
+    } catch {
+    }
+    await fs.writeFile(path, bytes);
+  }
+  function isAlreadyExistsError(err2) {
+    const e = err2;
+    if (!e) return false;
+    if (e.code === "EEXIST") return true;
+    return /file already exists|already exists|文件已存在/i.test(String(e.message ?? ""));
+  }
   async function ensureParentDir2(fs, filePath) {
     const parts = filePath.split("/").filter(Boolean);
     parts.pop();
@@ -26868,7 +26888,7 @@ var ZenFSConfigUI = (() => {
   }
   async function writeJson(fs, path, value) {
     await ensureParentDir2(fs, path);
-    await fs.writeFile(path, new TextEncoder().encode(JSON.stringify(value, null, 2)));
+    await writeFileOverwrite(fs, path, new TextEncoder().encode(JSON.stringify(value, null, 2)));
   }
   async function existsSafe(fs, path) {
     try {
@@ -27146,14 +27166,14 @@ var ZenFSConfigUI = (() => {
       const bytes = new TextEncoder().encode(serializeTombstone(tombstone));
       const p = this.pathFor(tombstone.path);
       await ensureParentDir2(this.fs, p);
-      await this.fs.writeFile(p, bytes);
+      await writeFileOverwrite(this.fs, p, bytes);
     }
     /** Persist an updated tombstone (confirmations) when it still exists. */
     async save(tombstone) {
       const bytes = new TextEncoder().encode(serializeTombstone(tombstone));
       const p = this.pathFor(tombstone.path);
       if (!await existsSafe(this.fs, p)) return;
-      await this.fs.writeFile(p, bytes);
+      await writeFileOverwrite(this.fs, p, bytes);
     }
     /** Delete a tombstone. */
     async remove(tombstone) {
@@ -28063,6 +28083,11 @@ var ZenFSConfigUI = (() => {
        * 就是这么来的）。这里在同一轮变更后合并触发一次 flush，把描述符立刻推上去。
        */
       __publicField(this, "descriptorPushTimer");
+      /**
+       * 已做过「凭据回填」的端点去重键。同一进程内每个端点只回填一次，
+       * 避免每次建对都重写一遍别人的描述符。
+       */
+      __publicField(this, "credentialBackfillDone", /* @__PURE__ */ new Set());
       /** 后台建对（deferReplicaSetup）的状态，见 `whenReplicasReady()`。 */
       __publicField(this, "replicaSetupPromise", null);
       __publicField(this, "replicaSetupSummary", null);
@@ -28328,7 +28353,7 @@ var ZenFSConfigUI = (() => {
       const tombstoneBytes = new TextEncoder().encode(serializeTombstone(tombstone));
       const tombstonePath = tombstonePathFor(normalizedPath, TOMBSTONES_DIR);
       await this.ensureDir(tombstonePath);
-      await this.cachedFS.writeFile(tombstonePath, tombstoneBytes);
+      await writeFileOverwrite(this.cachedFS, tombstonePath, tombstoneBytes);
     }
     /**
      * Delete a file and write a tombstone so the deletion propagates
@@ -29312,6 +29337,9 @@ var ZenFSConfigUI = (() => {
           );
           this.replicaBackends.set(desc.id, { instance: fsInstance, syncable, pairId: pair.pairId });
           this.backendStates.set(desc.id, { backendId: desc.id, pairId: pair.pairId });
+          void this.backfillDuplicateBackendCredentials(desc).catch((err2) => {
+            log5.warn("[ConfigRepo] backfill duplicate backend credentials failed:", err2);
+          });
           const conflictHandler = (event) => {
             this.handleConflict(event);
           };
@@ -29655,6 +29683,50 @@ var ZenFSConfigUI = (() => {
       const result = Array.from(seen.values()).map((i) => i.desc);
       this.backendDescriptorCache = [...result];
       return result;
+    }
+    /**
+     * 把「连得上的凭据」回填到同一端点的重复描述符里。
+     *
+     * 背景：RemoteStorage 的 `token` 不进 `identityFields`（见 admin 的后端注册），
+     * 同一 `href`+`basePath` 只会被当成一个端点；但历史上按 token 判重时，每次
+     * 重新授权都会新增一个 `remotestorage-<时间戳>` 描述符，旧描述符仍留在
+     * `.meta/backends/` 里。读时去重按 mtime 保留最早的一份，如果那份的 token
+     * 已经失效，这个端点就会永远连不上。这里在某个描述符成功建对之后，把它的
+     * token 写回同键的其它描述符，保证「留下的那份」凭据是可用的。
+     *
+     * 只改 token 一个字段，不新增/删除描述符，也不影响 id 与 mtime 之外的内容。
+     */
+    async backfillDuplicateBackendCredentials(desc) {
+      const options = desc.options;
+      const mine = options?.token;
+      if (typeof mine !== "string" || mine.length === 0) return;
+      const key = backendDedupKey(desc);
+      if (this.credentialBackfillDone.has(key)) return;
+      this.credentialBackfillDone.add(key);
+      let items;
+      try {
+        items = (await this.readBackendDescriptorsFrom(BACKENDS_DIR)).items;
+      } catch (err2) {
+        log5.warn("[ConfigRepo] backfill credentials: read descriptors failed:", err2);
+        return;
+      }
+      for (const item of items) {
+        if (item.desc.id === desc.id) continue;
+        if (backendDedupKey(item.desc) !== key) continue;
+        const theirs = item.desc.options?.token;
+        if (typeof theirs !== "string" || theirs === mine) continue;
+        try {
+          await this.writeBackendDescriptor({
+            ...item.desc,
+            options: { ...item.desc.options, token: mine }
+          });
+          log5.log(
+            `[ConfigRepo] backfilled working credential into duplicate descriptor ${item.desc.id} (endpoint ${key})`
+          );
+        } catch (err2) {
+          log5.warn(`[ConfigRepo] backfill credentials: write ${item.desc.id} failed:`, err2);
+        }
+      }
     }
     /**
      * Write a single backend descriptor to `.meta/backends/{id}.json`.
@@ -34392,7 +34464,7 @@ var ZenFSConfigUI = (() => {
     }
     // ── Version logging ──────────────────────────────────────────────────
     logVersion() {
-      const uiVersion = true ? "0.6.0" : "dev";
+      const uiVersion = true ? "0.6.1" : "dev";
       console.log(
         `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
         "color:#2563eb;font-weight:bold",
