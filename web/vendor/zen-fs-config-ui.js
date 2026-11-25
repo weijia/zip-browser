@@ -26838,7 +26838,7 @@ var ZenFSConfigUI = (() => {
     if (typeof raw === "string") return new TextEncoder().encode(raw);
     return new Uint8Array(raw);
   }
-  async function writeFileOverwrite(fs, path, data) {
+  async function writeFileOverwrite(fs, path, data, options = {}) {
     const bytes = toBytes(data);
     try {
       await fs.writeFile(path, bytes);
@@ -26850,7 +26850,15 @@ var ZenFSConfigUI = (() => {
       await fs.unlink(path);
     } catch {
     }
-    await fs.writeFile(path, bytes);
+    try {
+      await fs.writeFile(path, bytes);
+    } catch (err2) {
+      if (isAlreadyExistsError(err2) && options.ignorePersistentEexist) {
+        log32.warn(`[zen-fs-config] writeFileOverwrite: \u540C\u540D\u6587\u4EF6\u65E0\u6CD5\u8986\u76D6\uFF0C\u6309\u5DF2\u5B58\u5728\u5904\u7406 ${path}`);
+        return;
+      }
+      throw err2;
+    }
   }
   function isAlreadyExistsError(err2) {
     const e = err2;
@@ -27166,14 +27174,14 @@ var ZenFSConfigUI = (() => {
       const bytes = new TextEncoder().encode(serializeTombstone(tombstone));
       const p = this.pathFor(tombstone.path);
       await ensureParentDir2(this.fs, p);
-      await writeFileOverwrite(this.fs, p, bytes);
+      await writeFileOverwrite(this.fs, p, bytes, { ignorePersistentEexist: true });
     }
     /** Persist an updated tombstone (confirmations) when it still exists. */
     async save(tombstone) {
       const bytes = new TextEncoder().encode(serializeTombstone(tombstone));
       const p = this.pathFor(tombstone.path);
       if (!await existsSafe(this.fs, p)) return;
-      await writeFileOverwrite(this.fs, p, bytes);
+      await writeFileOverwrite(this.fs, p, bytes, { ignorePersistentEexist: true });
     }
     /** Delete a tombstone. */
     async remove(tombstone) {
@@ -34464,7 +34472,7 @@ var ZenFSConfigUI = (() => {
     }
     // ── Version logging ──────────────────────────────────────────────────
     logVersion() {
-      const uiVersion = true ? "0.6.1" : "dev";
+      const uiVersion = true ? "0.6.3" : "dev";
       console.log(
         `%c[zen-fs-config-ui] v${uiVersion}%c (appId=${this.props.appId})`,
         "color:#2563eb;font-weight:bold",

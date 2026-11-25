@@ -16,8 +16,8 @@
     "hash-wasm": "^4.13.0",
     "kdbxweb": "^2.1.1",
     "sharp": "^0.35.5",
-    "zen-fs-config": "^0.9.7",
-    "zen-fs-config-ui": "^0.6.1"
+    "zen-fs-config": "^0.9.8",
+    "zen-fs-config-ui": "^0.6.3"
   },
   "engines": {
     "node": ">=18"
