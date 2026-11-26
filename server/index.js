@@ -11,6 +11,7 @@ import {
   listDirectory,
   normalizeLocalPath,
   detectTagsForDirs,
+  statLocalPaths,
 } from './fs-service.js';
 import {
   openArchive,
@@ -31,6 +32,7 @@ import {
 import { openInExplorer } from './explorer-service.js';
 import { scanPaths, listTreeLevel, readMtimes } from './manifest-scan.js';
 import { startScanJob, scanJobStatus, cancelScanJob, streamScanJob } from './scan-jobs.js';
+import { streamUfsScan, hashLocalFile } from './ufs-scan.js';
 import {
   createVault,
   unlockVault,
@@ -217,6 +219,23 @@ async function handleApi(req, res, url) {
   if (req.method === 'POST' && pathname === '/api/mft/mtimes') {
     const body = await readJson(req);
     return json(res, 200, { mtimes: await readMtimes(body.paths) });
+  }
+
+  // UFS 目录采集：一条 NDJSON 流递归返回目录/文件节点与文件 SHA-256。
+  // 只接受本会话已打开过的目录，避免把任意路径的哈希变成远程探测接口。
+  if (req.method === 'POST' && pathname === '/api/ufs/scan') {
+    const body = await readJson(req);
+    return await streamUfsScan(req, res, body.path, { maxDepth: Number(body.maxDepth) || undefined });
+  }
+  if (req.method === 'POST' && pathname === '/api/ufs/hash') {
+    const body = await readJson(req);
+    return json(res, 200, await hashLocalFile(body.path));
+  }
+
+  // UFS 本地状态批量探测：只 stat 路径，不列目录；UFS 年份页一次请求拿全部标记。
+  if (req.method === 'POST' && pathname === '/api/local/state') {
+    const body = await readJson(req);
+    return json(res, 200, await statLocalPaths(body.paths));
   }
 
   // 目录体积长任务：启动立即返回 jobId，进度走 NDJSON 长连接。

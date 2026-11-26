@@ -180,3 +180,66 @@ test('removeEntry：删除包含该 id 的分片文件', async () => {
   assert.ok(fs.files.has('/ufs/2026/ufs-b.json'));
   assert.ok(!fs.files.has('/ufs/2025/ufs-c.json'));
 });
+
+test('writeBundle：目录根、节点、文件 hash 都放进同一个 .jsonl', async () => {
+  const fs = memoryFs();
+  const now = new Date(2026, 10, 25, 10, 0, 0).getTime();
+  const entry = mod.makeEntry({
+    name: 'codes',
+    type: 'dir',
+    source: { kind: 'volume', volumeId: 'vol-1', rel: 'codes', path: '/tree/vol-1/codes' },
+    addedAt: now,
+  }, now);
+  const nodes = [
+    { type: 'dir', rel: '', name: 'codes', mtime: now },
+    { type: 'dir', rel: 'src', name: 'src', mtime: now },
+    { type: 'file', rel: 'src/app.js', name: 'app.js', size: 12, mtime: now, hash: 'sha256:abc' },
+  ];
+  const result = await mod.writeBundle(fs, entry, nodes, {
+    now,
+    random: 0.1,
+    summary: { dirs: 2, files: 1, size: 12, partial: false, hashFailed: 0 },
+  });
+  assert.equal(result.path, '/ufs/2026/ufs-20261125-100000-199999.jsonl');
+  const text = fs.files.get(result.path);
+  const lines = text.trim().split('\n');
+  assert.equal(lines.length, 4);
+  const meta = JSON.parse(lines[0]);
+  assert.equal(meta.kind, 'ufs-bundle');
+  assert.equal(meta.summary.files, 1);
+  assert.ok(!('nodes' in meta));
+  const file = JSON.parse(lines[3]);
+  assert.equal(file.hash, 'sha256:abc');
+  assert.equal(file.parentId, 'd:src');
+  assert.ok(!('children' in file));
+
+  const metaOnly = await mod.readBundleMeta(fs, result.path);
+  assert.equal(metaOnly.name, 'codes');
+  const full = await mod.readBundle(fs, result.path);
+  assert.equal(full.nodes.length, 3);
+  assert.equal(full.broken, 0);
+});
+
+test('listBundles/listBundleYears：年份目录只放 bundle，不再按 mtime 拆年', async () => {
+  const fs = memoryFs();
+  const now = new Date(2026, 10, 25, 10, 0, 0).getTime();
+  const oldMtime = new Date(2019, 0, 1).getTime();
+  const entry = mod.makeEntry({
+    name: 'mixed',
+    type: 'dir',
+    source: { kind: 'volume', volumeId: 'vol-1', rel: 'mixed' },
+    addedAt: now,
+  }, now);
+  const result = await mod.writeBundle(fs, entry, [
+    { type: 'dir', rel: '', name: 'mixed' },
+    { type: 'file', rel: 'old.pdf', name: 'old.pdf', size: 1, mtime: oldMtime, hash: 'sha256:x' },
+  ], { now, random: 0.3, summary: { dirs: 1, files: 1, size: 1, partial: false, hashFailed: 0 } });
+  assert.equal(result.year, 2026);
+  assert.ok(fs.files.has(result.path));
+  assert.ok(!fs.files.has('/ufs/2019/ufs-20190101-000000-000000.jsonl'));
+  const bundleInfo = await mod.listBundles(fs, 2026);
+  assert.equal(bundleInfo.bundles.length, 1);
+  assert.equal(bundleInfo.bundles[0].name, 'mixed');
+  const years = await mod.listBundleYears(fs);
+  assert.deepEqual(years, [{ year: '2026', bundles: 1, legacy: 0 }]);
+});

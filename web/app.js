@@ -17,7 +17,19 @@ import { initHostDisksPanel, hostDisksCacheInfo, hostDisksCachedDoc, cacheHostDi
 import { loadHostDisksDoc, describeVirtual, describeTreePath, treePath, probeVolumeSources, readHideNoDisk, writeHideNoDisk, invalidateHostDisksDoc, volumeAliasesFor, setLocalVolumeAlias, applyManualDiskSerial, readPendingSerials, addPendingSerial, clearPendingSerial, applyDerivedSerials, attachVolumeAliases, partitionAliasesFor, setLocalPartitionAlias } from './host-disks-browser.js';
 import { createSelectionStore, isDirSelected, isFileSelected, addDirSelection, removeDirSelection, removeFileDirSelection, removePickedFile, selectionPathKey } from './manifest-selection.js';
 import { loadVolumeTree, findTreeNode } from './volume-tree.js';
-import { addEntries as addUfsEntries, listYears as listUfsYears, readYear as readUfsYear, removeEntry as removeUfsEntry, UFS_ROOT } from './ufs-store.js';
+import {
+  makeEntry as makeUfsEntry,
+  readYear as readUfsYear,
+  removeEntry as removeUfsEntry,
+  UFS_ROOT,
+  listBundleYears as listUfsBundleYears,
+  listBundles as listUfsBundles,
+  readBundle as readUfsBundle,
+  readBundleMeta as readUfsBundleMeta,
+  writeBundle as writeUfsBundle,
+  removeBundle as removeUfsBundle,
+  nodeId as ufsNodeId,
+} from './ufs-store.js';
 import {
   initManifestBuilder, addPickedFromItem, addFileListDir, openCopyRefForItem,
   openDirListForItem, getCachedDirSummary,
@@ -914,6 +926,44 @@ async function apiNdjson(url, { signal, onEvent } = {}) {
   if (buffer) emit(buffer);
 }
 
+/** POST 版 NDJSON：UFS 目录采集要一次请求扫完整棵子树。 */
+async function apiPostNdjson(url, body, { signal, onEvent } = {}) {
+  const response = await fetch(apiUrl(url), {
+    method: 'POST',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+    signal,
+    credentials: AUTH_MODE ? 'same-origin' : undefined,
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const error = new Error(data.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  if (!response.body) throw new Error('浏览器不支持流式响应');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const emit = (line) => {
+    const text = line.trim();
+    if (!text) return;
+    let event;
+    try { event = JSON.parse(text); } catch { return; }
+    if (typeof onEvent === 'function') onEvent(event);
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) emit(line);
+  }
+  buffer += decoder.decode();
+  if (buffer) emit(buffer);
+}
+
 function current() {
   return state.target;
 }
@@ -1091,6 +1141,11 @@ function renderCrumbs(target) {
     parts.push({ label: 'UFS 虚拟网盘', target: { kind: 'ufs', path: UFS_ROOT } });
     const year = /^\/ufs\/(\d{4})/.exec(target.path || '')?.[1];
     if (year) parts.push({ label: year });
+  } else if (target.kind === 'ufs-tree') {
+    parts.push({ label: 'UFS 虚拟网盘', target: { kind: 'ufs', path: UFS_ROOT } });
+    const year = /^\/ufs\/(\d{4})/.exec(target.path || '')?.[1];
+    if (year) parts.push({ label: year, target: { kind: 'ufs', path: ufsYearPath(year) } });
+    if (ufsTreeView?.meta?.name) parts.push({ label: ufsTreeView.meta.name });
   } else if (target.kind === 'dir' || (target.kind === 'preview' && target.scope === 'local')) {
     appendPathCrumbs(parts, target.kind === 'dir' ? target.path : target.dir);
     if (target.kind === 'preview') parts.push({ label: target.label });
@@ -1115,7 +1170,7 @@ function renderCrumbs(target) {
     : (target.kind === 'preview' ? '文件预览'
       : (target.kind === 'hd' ? '数据组视图'
         : (target.kind === 'tags' ? '标签视图'
-          : (target.kind === 'ufs' ? 'UFS 虚拟网盘' : (LABELS.mode || '本地磁盘')))));
+          : ((target.kind === 'ufs' || target.kind === 'ufs-tree') ? 'UFS 虚拟网盘' : (LABELS.mode || '本地磁盘')))));
   const label = parts[parts.length - 1].label;
   const siteTitle = HOST.siteTitle || '文件浏览器';
   document.title = label === rootLabel ? siteTitle : `${label} · ${siteTitle}`;
@@ -1451,7 +1506,8 @@ function describeKeyForTags(key) {
   return { kind: 'zip', zipPath: entry.zipPath, entry: entry.entry, label: entry.label };
 }
 
-let ufsView = { path: UFS_ROOT, entries: [] };
+let ufsView = { path: UFS_ROOT, entries: [], bundles: [] };
+let ufsTreeView = null;
 
 function ufsYearPath(year) {
   return `${UFS_ROOT}/${year}`;
@@ -1462,14 +1518,75 @@ async function flushUfs() {
   if (group && typeof group.flush === 'function') await group.flush().catch(() => {});
 }
 
+function ufsLocalStateText(state, type = 'dir') {
+  const isFile = type === 'file';
+  if (!state || state.kind === 'checking') return isFile ? '正在检查本地文件…' : '正在检查本地目录…';
+  if (state.kind === 'ok') return isFile ? '本地文件可访问' : '本地目录可访问';
+  if (state.kind === 'missing') return isFile ? '本地文件已删除' : '本地目录已删除';
+  if (state.kind === 'volume-missing') return '本机无此卷';
+  return '本地状态未知';
+}
+
+function ufsLocalStateBadge(state, type = 'dir') {
+  const kind = state?.kind || 'unknown';
+  const color = kind === 'ok' ? '#1f8f4e' : (kind === 'missing' ? '#c0392b' : 'var(--text-3)');
+  const bg = kind === 'ok' ? 'rgba(31,143,78,.12)' : (kind === 'missing' ? 'rgba(192,57,43,.12)' : 'rgba(128,128,128,.12)');
+  return `<span class="ufs-local-badge" style="font-size:10px;color:${color};background:${bg};border-radius:9px;padding:2px 7px;white-space:nowrap">${esc(ufsLocalStateText(state, type))}</span>`;
+}
+
+/**
+ * 批量探测 UFS 目录来源在本机是否可用。
+ * 年份页只对当前显示的目录根发一条 /api/local/state，不逐行请求。
+ */
+async function ufsLocalStatesForSources(sources) {
+  const info = await localHostInfoFor().catch(() => null);
+  const volumes = info?.volumes || {};
+  const rows = (Array.isArray(sources) ? sources : []).map((source) => {
+    const src = source || {};
+    if (src.kind === 'local' && src.path) return { kind: 'checking', localPath: src.path };
+    if (src.kind !== 'volume' || !src.volumeId) return { kind: 'unknown', localPath: null };
+    const letter = Object.keys(volumes).find((key) => volumes[key] === src.volumeId);
+    if (!letter) return { kind: 'volume-missing', localPath: null };
+    const parts = String(src.rel || '').split('/').filter(Boolean);
+    return { kind: 'checking', localPath: `${letter}:\\${parts.join('\\')}` };
+  });
+  const paths = rows.map((row) => row.localPath).filter(Boolean);
+  if (!paths.length) return rows;
+  let states = [];
+  try {
+    const data = await api('/api/local/state', {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
+    });
+    states = Array.isArray(data.states) ? data.states : [];
+  } catch {
+    return rows.map((row) => (row.localPath ? { ...row, kind: 'unknown' } : row));
+  }
+  const byPath = new Map(states.map((item) => [String(item.path || '').toLowerCase(), item]));
+  return rows.map((row) => {
+    if (!row.localPath) return row;
+    const hit = byPath.get(String(row.localPath).toLowerCase());
+    if (!hit) return { ...row, kind: 'unknown' };
+    return {
+      ...row,
+      kind: hit.exists ? 'ok' : 'missing',
+      isDir: hit.isDir === true,
+      mtime: hit.mtime || null,
+    };
+  });
+}
+
+function ufsSourceWhere(src) {
+  if (!src || typeof src !== 'object') return '';
+  if (src.kind === 'volume') return src.path || `卷 ${src.volumeId || ''}${src.rel ? `/${src.rel}` : ''}`;
+  if (src.kind === 'zip') return `${src.zipPath || ''}${src.entry ? ` / ${src.entry}` : ''}`;
+  return src.path || '';
+}
+
 function ufsRowHtml(entry) {
   const icon = entry.type === 'dir' ? 'icon-dir' : 'icon-file';
-  const src = entry.source || {};
-  const where = src.kind === 'volume'
-    ? (src.path || `卷 ${src.volumeId || ''}${src.rel ? `/${src.rel}` : ''}`)
-    : (src.kind === 'zip' ? `${src.zipPath || ''}${src.entry ? ` / ${src.entry}` : ''}` : (src.path || ''));
   const meta = [
-    where,
+    ufsSourceWhere(entry.source),
     entry.size != null ? formatSize(entry.size) : null,
     entry.addedAt ? `加入 ${new Date(entry.addedAt).toLocaleDateString('zh-CN')}` : null,
   ].filter(Boolean).join(' · ');
@@ -1481,41 +1598,75 @@ function ufsRowHtml(entry) {
   </div>`;
 }
 
+function ufsBundleRowHtml(bundle, state) {
+  const summary = bundle.summary || {};
+  const meta = [
+    ufsSourceWhere(bundle.source),
+    `${Number(summary.files) || 0} 个文件`,
+    `${Number(summary.dirs) || 0} 个目录`,
+    formatSize(Number(summary.size) || 0),
+    bundle.addedAt ? `加入 ${new Date(bundle.addedAt).toLocaleDateString('zh-CN')}` : null,
+    summary.partial ? '部分不可读' : null,
+  ].filter(Boolean).join(' · ');
+  return `<div class="ufs-row ufs-bundle-row" data-action="ufs-bundle" data-path="${esc(bundle.bundlePath)}" style="display:flex;align-items:center;gap:8px;padding:8px 4px;border-bottom:1px solid var(--border);cursor:pointer">
+    <span class="icon ${bundle.type === 'file' ? 'icon-file' : 'icon-dir'}"></span>
+    <span class="ufs-name" style="font-size:13px">${esc(bundle.name)}</span>
+    ${ufsLocalStateBadge(state, bundle.type)}
+    <span class="ufs-meta" style="flex:1;min-width:0;font-size:10px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(meta)}">${esc(meta)}</span>
+    <button type="button" data-action="ufs-bundle-remove" data-path="${esc(bundle.bundlePath)}" title="只删除这个 UFS bundle，不碰原目录">移出</button>
+  </div>`;
+}
+
+/**
+ * UFS 页面可能直接从 URL 恢复（刷新/前进后退），这时数据同步组还在连接。
+ * 先等一下，避免把首屏渲染成「还没就绪」的假空态。
+ */
+async function waitUfsFs() {
+  let fs = getDataGroupFs();
+  if (fs) return fs;
+  status('等待数据同步组就绪…');
+  fs = await waitForDataGroupFs(30000).catch(() => null);
+  return fs;
+}
+
 async function renderUfs(target) {
-  const fs = getDataGroupFs();
   const path = target.path || UFS_ROOT;
   stage.classList.remove('list-mode');
+  stage.innerHTML = `<h2 class="stage-title">UFS · 虚拟网盘</h2><p class="stage-hint">正在连接数据同步组…</p>`;
+  const fs = await waitUfsFs();
   if (!fs) {
-    ufsView = { path, entries: [] };
+    ufsView = { path, entries: [], bundles: [] };
     stage.innerHTML = `<h2 class="stage-title">UFS · 虚拟网盘</h2>
       <p class="stage-hint">数据同步组还没就绪，/ufs/ 的索引暂时读不到。连接建立后刷新即可。</p>`;
     return;
   }
   if (path === UFS_ROOT || path === '/ufs/') {
-    const years = await listUfsYears(fs);
-    ufsView = { path: UFS_ROOT, entries: [] };
-    const rows = [];
-    for (const year of years) {
-      const info = await readUfsYear(fs, year);
-      rows.push(`<div class="ufs-year" data-action="ufs-year" data-path="${esc(ufsYearPath(year))}" style="display:flex;align-items:center;gap:8px;padding:10px 4px;border-bottom:1px solid var(--border);cursor:pointer">
-        <span class="icon icon-dir"></span>
-        <span style="font-size:13px">${esc(year)}</span>
-        <span style="font-size:10px;color:var(--text-3)">${info.entries.length} 项 · ${info.shards} 份分片${info.broken ? ` · ${info.broken} 份读取失败` : ''}</span>
-      </div>`);
-    }
+    const years = await listUfsBundleYears(fs);
+    ufsView = { path: UFS_ROOT, entries: [], bundles: [] };
+    const rows = years.map((row) => `<div class="ufs-year" data-action="ufs-year" data-path="${esc(ufsYearPath(row.year))}" style="display:flex;align-items:center;gap:8px;padding:10px 4px;border-bottom:1px solid var(--border);cursor:pointer">
+      <span class="icon icon-dir"></span>
+      <span style="font-size:13px">${esc(row.year)}</span>
+      <span style="font-size:10px;color:var(--text-3)">${row.bundles} 个 bundle${row.legacy ? ` · ${row.legacy} 份旧分片` : ''}</span>
+    </div>`);
     stage.innerHTML = `<h2 class="stage-title">UFS · 虚拟网盘</h2>
-      <p class="stage-hint">目录按加入年、文件按最后修改年分年份；每次加入生成一份新分片，读取时合并，不改写已有文件。</p>
+      <p class="stage-hint">每次加入生成一个自包含 bundle，放在加入年份目录下；不再按文件修改年拆分。进入目录后可直接查看完整目录树。</p>
       ${rows.length ? rows.join('') : '<p class="stage-hint">还没有任何条目。在目录/文件行上点「+ufs」加入。</p>'}`;
     return;
   }
   const match = /^\/ufs\/(\d{4})\/?$/.exec(path);
   const year = match?.[1];
   if (!year) throw new Error(`无效的 /ufs/ 路径：${path}`);
-  const info = await readUfsYear(fs, year);
-  ufsView = { path, entries: info.entries };
+  const [legacy, bundleInfo] = await Promise.all([
+    readUfsYear(fs, year),
+    listUfsBundles(fs, year),
+  ]);
+  const states = await ufsLocalStatesForSources(bundleInfo.bundles.map((bundle) => bundle.source));
+  const bundles = bundleInfo.bundles.map((bundle, index) => ({ ...bundle, localState: states[index] }));
+  ufsView = { path, entries: legacy.entries, bundles };
+  const total = bundles.length + legacy.entries.length;
   stage.innerHTML = `<h2 class="stage-title">UFS · ${esc(year)}</h2>
-    <p class="stage-hint">${info.entries.length} 项，来自 ${info.shards} 份分片${info.broken ? ` · ${info.broken} 份读取失败已跳过` : ''}。目录按加入年、文件按最后修改年归档。</p>
-    ${info.entries.length ? info.entries.map((entry) => ufsRowHtml(entry)).join('') : '<p class="stage-hint">这一年还没有条目。</p>'}`;
+    <p class="stage-hint">${bundles.length} 个 bundle${legacy.entries.length ? ` · ${legacy.entries.length} 条旧分片条目` : ''}${bundleInfo.broken ? ` · ${bundleInfo.broken} 份 bundle 读取失败` : ''}。bundle 点开是只读快照树；本机来源可用时可从树页打开实时位置。</p>
+    ${total ? `${bundles.map((bundle) => ufsBundleRowHtml(bundle, bundle.localState)).join('')}${legacy.entries.map((entry) => ufsRowHtml(entry)).join('')}` : '<p class="stage-hint">这一年还没有条目。</p>'}`;
 }
 
 /**
@@ -1555,35 +1706,50 @@ function volumeSource(volumeId, rel) {
 }
 
 /**
- * 递归收集本机目录下的所有子目录与文件（只登记指针，不读文件内容）。
- * 子目录不可读时跳过，根目录不可读则直接失败；用大小写归一后的路径防 junction 绕回。
+ * 一次请求递归采集目录：服务端流式返回目录/文件节点和文件 SHA-256。
+ * 不再对每个子目录调用 /api/list，避免大目录产生请求爆炸。
  */
-async function collectLocalTree(root) {
-  const out = [];
-  const queue = [root];
+async function collectUfsTreeFromServer(root, onProgress) {
+  const nodes = [];
   const seen = new Set();
-  let scanned = 0;
-  while (queue.length) {
-    const dir = queue.shift();
-    const key = dir.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    let data;
-    try {
-      data = await api(`/api/list?path=${encodeURIComponent(dir)}`);
-    } catch (err) {
-      if (dir === root) throw err;
-      continue;
-    }
-    for (const item of Array.isArray(data.items) ? data.items : []) {
-      if (!item?.path) continue;
-      out.push(item);
-      if (item.dir) queue.push(item.path);
-    }
-    scanned += 1;
-    if (scanned % 20 === 0) status(`正在收集 ${root} 下的子项… 已发现 ${out.length} 项`);
+  let summary = null;
+  let failure = null;
+  await apiPostNdjson('/api/ufs/scan', { path: root }, {
+    onEvent(event) {
+      if (!event || typeof event !== 'object') return;
+      if (event.type === 'dirs' || event.type === 'files') {
+        for (const row of Array.isArray(event.rows) ? event.rows : []) {
+          const key = `${row?.type === 'file' ? 'file' : 'dir'}:${String(row?.rel || '')}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          nodes.push(row);
+        }
+        return;
+      }
+      if (event.type === 'progress') {
+        onProgress?.(event);
+        return;
+      }
+      if (event.type === 'done') {
+        summary = event.summary || null;
+        return;
+      }
+      if (event.type === 'error') failure = new Error(event.error || 'UFS 采集失败');
+    },
+  });
+  if (failure) throw failure;
+  if (!summary) throw new Error('UFS 采集没有返回完成摘要');
+  if (!nodes.some((node) => node?.type !== 'file' && String(node?.rel || '') === '')) {
+    nodes.unshift({ type: 'dir', rel: '', name: root.split(/[\\/]/).filter(Boolean).pop() || root, mtime: null });
   }
-  return out;
+  return { nodes, summary };
+}
+
+async function hashUfsFile(path) {
+  return api('/api/ufs/hash', {
+    method: 'POST',
+    body: JSON.stringify({ path }),
+  });
 }
 
 async function addUfsFromElement(element) {
@@ -1608,45 +1774,67 @@ async function addUfsFromElement(element) {
     return;
   }
   const now = Date.now();
-  const raws = [{
+  const entry = makeUfsEntry({
     name,
     type: dir ? 'dir' : 'file',
     source: volumeSource(global.volumeId, global.rel),
     addedAt: now,
     mtime: dir ? null : mtime,
     size: dir ? null : (Number.isFinite(size) ? size : null),
-  }];
+  }, now);
+
+  let nodes = [];
+  let summary = null;
   if (dir) {
-    // 目录加入 = 目录本身 + 其下所有子目录/文件；目录统一归入本次加入年，文件按各自 mtime。
-    // 子项同样落成“卷 ID + 卷内相对路径”，不写本机盘符。
-    const children = await collectLocalTree(path);
-    for (const item of children) {
-      const child = relInVolume(item.path);
-      if (!child) continue;
-      raws.push({
-        name: item.name,
-        type: item.dir ? 'dir' : 'file',
-        source: volumeSource(global.volumeId, child.rel),
-        addedAt: now,
-        mtime: item.dir ? null : (Number(item.mtime) || null),
-        size: item.dir ? null : (Number.isFinite(Number(item.size)) ? Number(item.size) : null),
-      });
-    }
+    status(`正在采集 ${name} 的目录树并计算文件 hash…`);
+    const collected = await collectUfsTreeFromServer(path, (event) => {
+      const pieces = [
+        `${Number(event.dirs) || 0} 个目录`,
+        `${Number(event.files) || 0} 个文件`,
+        formatSize(Number(event.bytes) || 0),
+      ];
+      status(`正在采集 ${name}：${pieces.join(' · ')}`);
+    });
+    nodes = collected.nodes;
+    summary = collected.summary;
+  } else {
+    status(`正在计算 ${name} 的 SHA-256…`);
+    const hashed = await hashUfsFile(path);
+    nodes = [{
+      type: 'file',
+      rel: '',
+      name,
+      size: Number(hashed.size) || (Number.isFinite(size) ? size : 0),
+      mtime: Number(hashed.mtime) || mtime,
+      hash: hashed.hash,
+    }];
+    summary = {
+      dirs: 0,
+      files: 1,
+      size: Number(hashed.size) || (Number.isFinite(size) ? size : 0),
+      partial: false,
+      hashFailed: 0,
+    };
   }
-  const result = await addUfsEntries(fs, raws);
+
+  status(dir
+    ? `正在写入 /ufs/：${summary.dirs} 个目录 / ${summary.files} 个文件 / ${formatSize(summary.size)}…`
+    : `正在写入 /ufs/：${String(nodes[0]?.hash || name)}…`);
+  const result = await writeUfsBundle(fs, entry, nodes, { now, summary });
   await flushUfs();
-  const rootEntry = result.entries[0];
-  const year = dir
-    ? new Date(rootEntry.addedAt).getFullYear()
-    : (rootEntry.mtime ? new Date(rootEntry.mtime).getFullYear() : new Date(rootEntry.addedAt).getFullYear());
-  status(dir && raws.length > 1
-    ? `已加入 /ufs/${year}/${name}：目录本身 + ${raws.length - 1} 个子项，生成 ${result.shards.length} 份分片`
-    : `已加入 /ufs/${year}/${rootEntry.name}`);
-  if (current().kind === 'ufs') render(current()).catch(showError);
+  const text = dir
+    ? `已加入 /ufs/${result.year}/${name}：${summary.dirs} 个目录 / ${summary.files} 个文件 / ${formatSize(summary.size)}${summary.partial ? '（部分不可读）' : ''}`
+    : `已加入 /ufs/${result.year}/${name}：${String(nodes[0]?.hash || '')}`;
+  status(text, Boolean(summary.partial));
+  if (current().kind === 'ufs' || current().kind === 'ufs-tree') render(current()).catch(showError);
 }
 
 async function openUfsEntry(entry) {
   if (!entry) return;
+  if (entry.bundlePath) {
+    navigate({ kind: 'ufs-tree', path: entry.bundlePath, id: entry.id });
+    return;
+  }
   const src = entry.source || {};
   if (entry.type === 'dir') {
     if (src.kind === 'volume' && src.volumeId) {
@@ -1700,8 +1888,218 @@ async function openUfsEntry(entry) {
   throw new Error('这个文件没有可用的来源');
 }
 
-async function removeUfsById(id) {
+function ufsParentRel(rel) {
+  const parts = String(rel || '').split('/').filter(Boolean);
+  return parts.slice(0, -1).join('/');
+}
+
+function ufsFormatTime(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  return new Date(n).toLocaleString('zh-CN', { hour12: false });
+}
+
+function buildUfsTree(meta, nodes) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  const byId = new Map();
+  for (const node of list) {
+    if (node?.id) byId.set(node.id, { ...node, children: [] });
+  }
+  const rootId = meta.rootNodeId || byId.keys().next().value;
+  let root = byId.get(rootId);
+  if (!root) {
+    root = {
+      type: meta.type === 'file' ? 'file' : 'dir',
+      id: rootId,
+      rel: '',
+      name: meta.name,
+      parentId: null,
+      children: [],
+    };
+    byId.set(root.id, root);
+  }
+  for (const node of byId.values()) {
+    if (node.id === root.id) continue;
+    let parentId = node.parentId;
+    if (!parentId && node.rel) parentId = ufsNodeId('dir', ufsParentRel(node.rel));
+    if (!parentId || !byId.has(parentId)) parentId = root.id;
+    if (node.type === 'dir' && node.id === parentId) continue;
+    byId.get(parentId).children.push(node);
+  }
+  const sortRows = (rows) => rows.sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+    return String(a.name).localeCompare(String(b.name), 'zh-CN', { numeric: true });
+  });
+  for (const node of byId.values()) sortRows(node.children);
+  root.children = sortRows(root.children);
+  return { root, byId };
+}
+
+function ufsTreeHeaderHtml(view) {
+  const meta = view.meta || {};
+  const summary = meta.summary || {};
+  const isFile = meta.type === 'file';
+  const badge = ufsLocalStateBadge(view.localState, meta.type);
+  const localButton = view.localState?.kind === 'ok'
+    ? `<button type="button" data-action="ufs-open-local" style="margin-left:8px">${isFile ? '打开本地文件' : '打开本地目录'}</button>`
+    : '';
+  const partial = summary.partial ? `<span style="color:#c0392b;margin-left:8px">部分不可读</span>` : '';
+  const hashFailed = Number(summary.hashFailed) > 0
+    ? `<span style="color:#c0392b;margin-left:8px">${Number(summary.hashFailed)} 个文件 hash 失败</span>`
+    : '';
+  const hint = isFile
+    ? '这是 UFS 快照；本机来源文件可用时可打开实时文件。'
+    : '这是 UFS 快照；本机源目录可用时可额外打开实时目录。';
+  return `<h2 class="stage-title">UFS · ${esc(meta.name)}</h2>
+    <p class="stage-hint">${esc(ufsSourceWhere(meta.source))} · 加入 ${meta.addedAt ? new Date(meta.addedAt).toLocaleString('zh-CN', { hour12: false }) : '—'}</p>
+    <p class="stage-hint">${Number(summary.dirs) || 0} 个目录 · ${Number(summary.files) || 0} 个文件 · ${formatSize(Number(summary.size) || 0)}${partial}${hashFailed}</p>
+    <p class="stage-hint" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">${badge}${localButton}
+      <span style="color:var(--text-3)">${hint}</span>
+    </p>`;
+}
+
+function ufsTreeNodeRowHtml(view, node, depth) {
+  const indent = Math.max(0, Number(depth) || 0) * 18;
+  if (node.type === 'dir') {
+    const children = node.children || [];
+    const expanded = view.expanded.has(node.id);
+    const caret = children.length ? (expanded ? '▾' : '▸') : '·';
+    const childMeta = children.length ? `${children.length} 项` : '空目录';
+    return `<div class="ufs-tree-row" data-action="ufs-tree-toggle" data-id="${esc(node.id)}" style="display:flex;align-items:center;gap:7px;padding:5px 4px 5px ${indent + 4}px;border-bottom:1px solid var(--border);cursor:pointer">
+      <span style="width:14px;color:var(--text-3);text-align:center">${caret}</span>
+      <span class="icon icon-dir"></span>
+      <span style="font-size:13px">${esc(node.name)}</span>
+      <span style="flex:1;min-width:0;font-size:10px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(childMeta)}${node.partial ? ' · 不可读' : ''}</span>
+      <span style="font-size:10px;color:var(--text-3)">${esc(ufsFormatTime(node.mtime))}</span>
+    </div>${expanded ? ufsTreeChildrenHtml(view, node, depth + 1) : ''}`;
+  }
+  const hash = node.hash || '';
+  const hashText = hash ? `${hash.slice(0, 19)}…` : (node.hashError ? 'hash 失败' : '—');
+  return `<div class="ufs-tree-row" data-action="ufs-node-open" data-id="${esc(node.id)}" style="display:flex;align-items:center;gap:7px;padding:5px 4px 5px ${indent + 4}px;border-bottom:1px solid var(--border);cursor:pointer">
+    <span style="width:14px"></span>
+    <span class="icon icon-file"></span>
+    <span style="font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(node.rel)}">${esc(node.name)}</span>
+    <span style="flex:1;min-width:0;font-size:10px;color:var(--text-3);text-align:right">${formatSize(Number(node.size) || 0)} · ${esc(ufsFormatTime(node.mtime))}</span>
+    <button type="button" data-action="ufs-copy" data-text="${esc(hash || node.rel)}" title="${esc(hash || node.rel)}" style="font-size:10px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(hashText)}</button>
+  </div>`;
+}
+
+function ufsTreeChildrenHtml(view, node, depth) {
+  const children = node.children || [];
+  if (!children.length) return '';
+  const limit = Number(view.limits.get(node.id)) || 200;
+  const shown = children.slice(0, limit);
+  const more = children.length > shown.length
+    ? `<button type="button" data-action="ufs-tree-more" data-id="${esc(node.id)}" style="margin:5px 4px 8px ${depth * 18 + 24}px">显示更多（剩余 ${children.length - shown.length} 项）</button>`
+    : '';
+  return shown.map((child) => ufsTreeNodeRowHtml(view, child, depth)).join('') + more;
+}
+
+function renderUfsTreeBody() {
+  const body = $('ufsTreeBody');
+  if (!body || !ufsTreeView) return;
+  const view = ufsTreeView;
+  body.innerHTML = view.root
+    ? ufsTreeNodeRowHtml(view, view.root, 0)
+    : '<p class="stage-hint">bundle 里没有可显示的节点。</p>';
+}
+
+async function renderUfsTree(target) {
+  stage.classList.remove('list-mode');
+  stage.innerHTML = `<h2 class="stage-title">UFS · 目录树</h2><p class="stage-hint">正在连接数据同步组…</p>`;
+  const fs = await waitUfsFs();
+  if (!fs) {
+    stage.innerHTML = `<h2 class="stage-title">UFS · 目录树</h2><p class="stage-hint">数据同步组还没就绪，暂时读不到这个 bundle。连接建立后刷新即可。</p>`;
+    return;
+  }
+  const bundle = await readUfsBundle(fs, target.path);
+  if (!bundle?.meta) throw new Error('UFS bundle 读取失败或格式不正确');
+  const tree = buildUfsTree(bundle.meta, bundle.nodes);
+  ufsTreeView = {
+    target,
+    meta: bundle.meta,
+    nodes: bundle.nodes,
+    root: tree.root,
+    byId: tree.byId,
+    rootId: tree.root.id,
+    expanded: new Set([tree.root.id]),
+    limits: new Map([[tree.root.id, 200]]),
+    localState: { kind: 'checking', localPath: null },
+  };
+  stage.innerHTML = `<div id="ufsTreeHead">${ufsTreeHeaderHtml(ufsTreeView)}</div>
+    ${bundle.broken ? `<p class="stage-hint" style="color:#c0392b">${bundle.broken} 行节点读取失败，已跳过。</p>` : ''}
+    <div id="ufsTreeBody"></div>`;
+  renderUfsTreeBody();
+  ufsLocalStatesForSources([bundle.meta.source]).then((states) => {
+    if (!ufsTreeView || ufsTreeView.target?.path !== target.path) return;
+    ufsTreeView.localState = states[0] || { kind: 'unknown', localPath: null };
+    const head = $('ufsTreeHead');
+    if (head) head.innerHTML = ufsTreeHeaderHtml(ufsTreeView);
+  }).catch(() => {});
+}
+
+async function ufsOpenLocalDirectory() {
+  const view = ufsTreeView;
+  if (!view) return;
+  if (view.localState?.kind !== 'ok' || !view.localState.localPath) {
+    status('本地来源不可用，只能查看 UFS 快照树', true);
+    return;
+  }
+  if (view.meta?.type === 'file') {
+    await previewFile(view.localState.localPath, view.meta.name, winDirname(view.localState.localPath));
+    return;
+  }
+  navigate({ kind: 'dir', path: view.localState.localPath });
+}
+
+async function ufsOpenFileNode(nodeIdValue) {
+  const view = ufsTreeView;
+  const node = view?.byId.get(nodeIdValue);
+  if (!view || !node || node.type !== 'file') return;
+  const source = view.meta.source || {};
+  if (source.kind !== 'volume' || !source.volumeId) {
+    status('这个文件没有可用的卷来源', true);
+    return;
+  }
+  const rel = [source.rel || '', node.rel || ''].filter(Boolean).join('/');
+  const local = await localPathForVolume(source.volumeId, rel).catch(() => null);
+  if (!local) {
+    status('这个文件所在的卷不在本机，只能查看 UFS 快照信息', true);
+    return;
+  }
+  await previewFile(local, node.name, winDirname(local));
+}
+
+async function copyUfsText(text) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(String(text));
+  } catch {
+    const input = document.createElement('textarea');
+    input.value = String(text);
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand('copy');
+    input.remove();
+  }
+  status('已复制');
+}
+
+async function removeUfsBundleByPath(path) {
   const fs = getDataGroupFs();
+  if (!fs || !path) return;
+  const removed = await removeUfsBundle(fs, path);
+  await flushUfs();
+  status(removed ? '已从 /ufs/ 移出这个目录 bundle' : '没有找到对应的 bundle');
+  if (current().kind === 'ufs-tree') {
+    const year = /^\/ufs\/(\d{4})\//.exec(path)?.[1];
+    navigate({ kind: 'ufs', path: year ? ufsYearPath(year) : UFS_ROOT });
+    return;
+  }
+  if (current().kind === 'ufs') render(current()).catch(showError);
+}
+
+async function removeUfsById(id) {  const fs = getDataGroupFs();
   if (!fs || !id) return;
   const removed = await removeUfsEntry(fs, id);
   await flushUfs();
@@ -2531,6 +2929,7 @@ async function render(target) {
   try {
     if (target.kind === 'drives') await renderDrives();
     else if (target.kind === 'ufs') await renderUfs(target);
+    else if (target.kind === 'ufs-tree') await renderUfsTree(target);
     else if (target.kind === 'tags') renderTagView(target);
     else if (target.kind === 'hd') await renderHostDisks(target);
     else if (target.kind === 'dir') await renderDir(target.path);
@@ -2743,7 +3142,12 @@ document.addEventListener('click', async (event) => {
   if (action === 'ufs-add') {
     event.preventDefault();
     event.stopPropagation();
-    await addUfsFromElement(element);
+    try {
+      await addUfsFromElement(element);
+    } catch (err) {
+      showError(err);
+      status(`加入 /ufs/ 失败：${err?.message || err}`, true);
+    }
     return;
   }
   if (action === 'ufs') {
@@ -2758,6 +3162,55 @@ document.addEventListener('click', async (event) => {
     event.preventDefault();
     const entry = ufsView.entries.find((item) => item.id === element.dataset.id);
     await openUfsEntry(entry);
+    return;
+  }
+  if (action === 'ufs-bundle') {
+    event.preventDefault();
+    const path = element.dataset.path || '';
+    if (path) navigate({ kind: 'ufs-tree', path });
+    return;
+  }
+  if (action === 'ufs-bundle-remove') {
+    event.preventDefault();
+    event.stopPropagation();
+    await removeUfsBundleByPath(element.dataset.path || '');
+    return;
+  }
+  if (action === 'ufs-open-local') {
+    event.preventDefault();
+    await ufsOpenLocalDirectory();
+    return;
+  }
+  if (action === 'ufs-tree-toggle') {
+    event.preventDefault();
+    if (!ufsTreeView) return;
+    const id = element.dataset.id || '';
+    if (ufsTreeView.expanded.has(id)) ufsTreeView.expanded.delete(id);
+    else {
+      ufsTreeView.expanded.add(id);
+      if (!ufsTreeView.limits.has(id)) ufsTreeView.limits.set(id, 200);
+    }
+    renderUfsTreeBody();
+    return;
+  }
+  if (action === 'ufs-tree-more') {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!ufsTreeView) return;
+    const id = element.dataset.id || '';
+    ufsTreeView.limits.set(id, (Number(ufsTreeView.limits.get(id)) || 200) + 200);
+    renderUfsTreeBody();
+    return;
+  }
+  if (action === 'ufs-node-open') {
+    event.preventDefault();
+    await ufsOpenFileNode(element.dataset.id || '');
+    return;
+  }
+  if (action === 'ufs-copy') {
+    event.preventDefault();
+    event.stopPropagation();
+    await copyUfsText(element.dataset.text || '');
     return;
   }
   if (action === 'ufs-remove') {

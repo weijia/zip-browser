@@ -77,6 +77,46 @@ export function isFileReadable(abs) {
   return isPathAllowed(abs) && isStaticAllowed(path.win32.basename(abs));
 }
 
+/**
+ * 批量探测本机路径是否存在。只做 stat，不列目录、不读文件。
+ * UFS 年份页需要给目录根标注「可访问 / 已删除 / 无此卷」，但逐行请求会打爆服务，
+ * 所以这里一次最多处理 200 条，并发固定。
+ */
+export async function statLocalPaths(paths) {
+  const list = [];
+  for (const raw of Array.isArray(paths) ? paths.slice(0, 200) : []) {
+    try {
+      const abs = normalizeLocalPath(raw);
+      if (!list.includes(abs)) list.push(abs);
+    } catch {
+      // 非法路径直接跳过，不能让一条坏路径拖垮整批探测
+    }
+  }
+  const states = await mapLimit(list, 16, async (abs) => {
+    try {
+      const stat = await fs.stat(abs);
+      return {
+        path: abs,
+        exists: true,
+        isDir: stat.isDirectory(),
+        isFile: stat.isFile(),
+        mtime: Number(stat.mtimeMs) || null,
+        reason: null,
+      };
+    } catch (err) {
+      return {
+        path: abs,
+        exists: false,
+        isDir: false,
+        isFile: false,
+        mtime: null,
+        reason: err?.code === 'ENOENT' ? 'not-found' : (err?.code === 'EACCES' ? 'denied' : 'error'),
+      };
+    }
+  });
+  return { states };
+}
+
 function driveKind(type) {
   switch (Number(type)) {
     case 2: return '可移动';
