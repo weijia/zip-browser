@@ -429,3 +429,9 @@ ufs-public-state/<runId>/<年>/publish-<ts>-<rand>.json
 - 显式 `linkMode: 'copy' | 'symlink'` 选项（§7-4/5）。
 
 跨端互操作性说明：onenav 写的新事件片（`ufs-tags/<key>/<年>/tags-*.json`）zip-browser 的 `readUfsTags` 已能直接读取；zip-browser 写的发布状态片 onenav 不消费，互不干扰。两端的 `ufsTagKey`、`stamp`、`safeKey`、片名排序与事件结构均逐字一致，因此同一份标签在两端读出结果相同。
+
+修复记录（2026-11-27，提交 `775b4fb`）：
+- 现象：在 UFS 树行内标签输入框按 Enter 确认时，控制台报 `Failed to execute 'remove' on 'Element': The node to be removed is no longer a child of this node. Perhaps it was moved in a 'blur' event handler?`，页面加载/交互中断。
+- 根因：`Enter` 分支调用 `input.remove()` 触发 `blur`，`blur` 又调用 `finish()`，同一输入框被二次删除。
+- 修复：`finish` 增加一次性 `done` 标志；删除前先解绑 `keydown` / `blur` 监听；删除用 `parentNode.removeChild()` 并判空；`refreshUfsTags` 与根节点刷新跳过正含 `.row-tag-input` 的编辑区，避免重绘吞掉正在输入的 DOM。
+- 验证：语法检查、`npm test` 217 项（216 通过 1 跳过）、`npm run dist` 44 文件成功；已推送 `git@github.com:weijia/zip-browser.git main`，`origin/main` 同步至 `775b4fb`。
