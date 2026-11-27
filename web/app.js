@@ -10,7 +10,9 @@ import { initAnnotations, onRender, getAnnotationStore } from './annotations-ui.
 import { addTag, removeTag, rememberPath, listTags, keyForTarget } from './annotations-store.js';
 import { tagEntries, matchTagEntries, tagCounts, filterTagCounts, pickTagForQuery } from './tag-filter.js';
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
-import { initManifestSync, scheduleSync, fetchLocalHostInfo, getDataGroupFs, getActiveDataGroup, waitForDataGroupFs } from './manifest-sync.js';
+import { initManifestSync, scheduleSync, fetchLocalHostInfo, getDataGroupFs, getConnectedFs, getActiveDataGroup, waitForDataGroupFs } from './manifest-sync.js';
+import { readNetDriveTags } from './tags-sharded.js';
+import { installPublisherCommand, runPublicPublish, setPublicTarget } from './ufs-public-publisher.js';
 import { initDriveCache } from './drive-cache.js';
 import { initManifestVolumeImport } from './manifest-volume-import.js';
 import { initHostDisksPanel, hostDisksCacheInfo, hostDisksCachedDoc, cacheHostDisksDoc, restoreHostDisksFromCache, writeHostDisksDoc, rememberManualSerial } from './host-disks-panel.js';
@@ -1507,6 +1509,21 @@ function describeKeyForTags(key) {
 }
 
 let ufsView = { path: UFS_ROOT, entries: [], bundles: [] };
+let publicTargets = new Set();
+
+/** 从数据组重放各网盘的 public_target 标签；未就绪时按空集合处理。 */
+async function refreshPublicTargets(entries) {
+  const connected = getConnectedFs();
+  if (!connected?.fp) return new Set();
+  const out = new Set();
+  const list = Array.isArray(entries) ? entries : await api('/api/drives').then((data) => data.networkDrives || []).catch(() => []);
+  for (const entry of list) {
+    const dir = String(entry?.dir || '');
+    if (!dir) continue;
+    if ((await readNetDriveTags(connected, dir)).has('public_target')) out.add(dir);
+  }
+  return out;
+}
 let ufsTreeView = null;
 
 function ufsYearPath(year) {
@@ -1650,6 +1667,7 @@ async function renderUfs(target) {
     </div>`);
     stage.innerHTML = `<h2 class="stage-title">UFS · 虚拟网盘</h2>
       <p class="stage-hint">每次加入生成一个自包含 bundle，放在加入年份目录下；不再按文件修改年拆分。进入目录后可直接查看完整目录树。</p>
+      <button type="button" data-action="ufs-publish" style="margin:4px 0 10px">发布 public 文件…</button>
       ${rows.length ? rows.join('') : '<p class="stage-hint">还没有任何条目。在目录/文件行上点「+ufs」加入。</p>'}`;
     return;
   }
@@ -1666,6 +1684,7 @@ async function renderUfs(target) {
   const total = bundles.length + legacy.entries.length;
   stage.innerHTML = `<h2 class="stage-title">UFS · ${esc(year)}</h2>
     <p class="stage-hint">${bundles.length} 个 bundle${legacy.entries.length ? ` · ${legacy.entries.length} 条旧分片条目` : ''}${bundleInfo.broken ? ` · ${bundleInfo.broken} 份 bundle 读取失败` : ''}。bundle 点开是只读快照树；本机来源可用时可从树页打开实时位置。</p>
+    <button type="button" data-action="ufs-publish" style="margin:4px 0 10px">发布 public 文件…</button>
     ${total ? `${bundles.map((bundle) => ufsBundleRowHtml(bundle, bundle.localState)).join('')}${legacy.entries.map((entry) => ufsRowHtml(entry)).join('')}` : '<p class="stage-hint">这一年还没有条目。</p>'}`;
 }
 
@@ -2120,6 +2139,7 @@ async function renderDrives() {
     ? `<br><span class="drive-volume" title="卷根的 .dir-struct-id；没有标记文件时回退 Windows 卷序列号">卷 ID <code>${esc(id)}</code></span>`
     : '');
   const registered = Array.isArray(networkDrives) ? networkDrives : [];
+  publicTargets = await refreshPublicTargets(registered).catch(() => new Set());
   const hdDoc = hdState.doc;
   const hdMeta = hdDoc
     ? `主机 ${hdDoc.hosts?.length || 0} · 卷 ${hdDoc.volumes?.length || 0}${hdDoc.generatedAt ? ` · 更新 ${esc(hdDoc.generatedAt)}` : ''}`
@@ -2165,7 +2185,7 @@ async function renderDrives() {
       : '未填写容量信息';
     const canOpen = Boolean(item.path);
     return `<div class="drive-card network-storage${canOpen ? '' : ' net-static'}"${canOpen ? ` data-action="drive" data-path="${esc(item.path)}"` : ''} title="${canOpen ? '点击进入该网盘的本地缓存目录' : '登记的网络存储信息'}">
-      <div class="drive-head"><span class="drive-letter net">网</span><span class="drive-name" title="${esc(name)}">${esc(name)}</span><button type="button" class="net-edit dc-mini" data-action="net-drive-edit" data-dir="${esc(item.dir)}" title="编辑这个网盘的信息">编辑</button></div>
+      <div class="drive-head"><span class="drive-letter net">网</span><span class="drive-name" title="${esc(name)}">${esc(name)}</span><button type="button" class="net-edit dc-mini" data-action="net-drive-edit" data-dir="${esc(item.dir)}" title="编辑这个网盘的信息">编辑</button><button type="button" class="dc-mini" data-action="net-drive-tag" data-dir="${esc(item.dir)}" title="切换 public_target 标签">${publicTargets.has(item.dir) ? '取消 public_target' : '设为 public_target'}</button></div>
       <div class="drive-meta net-meta"><span class="net-type">${esc(item.backend || '未知后端')}</span> #${esc(item.seq)}<br>${meta}${item.hasInfo === false ? '<br><span class="dc-warn">info.json 缺失或损坏</span>' : ''}</div>
     </div>`;
   }).join('');
@@ -3139,6 +3159,33 @@ document.addEventListener('click', async (event) => {
     removeRowTag(element.dataset.path, element.dataset.tag);
     return;
   }
+  if (action === 'ufs-publish') {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      const result = await runPublicPublish();
+      if (result.ok) status(`发布完成：${result.results.length} 条结果（目标 ${result.targets.join('、')}）`);
+      else if (result.reason !== 'cancelled') status(`发布未执行：${result.reason}`, true);
+    } catch (err) {
+      showError(err);
+    }
+    return;
+  }
+  if (action === 'net-drive-tag') {
+    event.preventDefault();
+    event.stopPropagation();
+    const dir = element.dataset.dir;
+    try {
+      await setPublicTarget(dir, !publicTargets.has(dir));
+      if (publicTargets.has(dir)) publicTargets.delete(dir);
+      else publicTargets.add(dir);
+      await render(current());
+      status(`已更新 ${dir} 的 public_target 标签`);
+    } catch (err) {
+      showError(err);
+    }
+    return;
+  }
   if (action === 'ufs-add') {
     event.preventDefault();
     event.stopPropagation();
@@ -3546,6 +3593,7 @@ initManifestSync({
   getCopyRefs: () => selectionStore.get('copies'),
 });
 
+installPublisherCommand();
 const driveCache = initDriveCache({ api, status });
 initManifestVolumeImport({ api, status });
 initHostDisksPanel({ status });

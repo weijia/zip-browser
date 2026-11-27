@@ -33,6 +33,7 @@ import { openInExplorer } from './explorer-service.js';
 import { scanPaths, listTreeLevel, readMtimes } from './manifest-scan.js';
 import { startScanJob, scanJobStatus, cancelScanJob, streamScanJob } from './scan-jobs.js';
 import { streamUfsScan, hashLocalFile } from './ufs-scan.js';
+import { publishFiles } from './ufs-publish.js';
 import {
   createVault,
   unlockVault,
@@ -231,6 +232,11 @@ async function handleApi(req, res, url) {
     const body = await readJson(req);
     return json(res, 200, await hashLocalFile(body.path));
   }
+  // UFS public 发布：只写已登记网盘的缓存目录，逐文件返回结果。
+  if (req.method === 'POST' && pathname === '/api/ufs/publish') {
+    const body = await readJson(req);
+    return json(res, 200, await publishFiles(body));
+  }
 
   // UFS 本地状态批量探测：只 stat 路径，不列目录；UFS 年份页一次请求拿全部标记。
   if (req.method === 'POST' && pathname === '/api/local/state') {
@@ -382,7 +388,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && pathname.startsWith('/vendor/')) {
       return await serveVendor(res, pathname);
     }
-    if (req.method === 'GET' && ['/host.js', '/app.js', '/vault.js', '/style.css', '/location.js', '/update-checker.js', '/annotations-store.js', '/annotations-ui.js', '/image-viewer.js', '/manifest-export.js', '/manifest-sync.js', '/manifest-selection.js', '/manifest-payload.js', '/manifest-builder.js', '/file-list-export.js', '/zip-writer.js', '/trash-ui.js', '/drive-backends.js', '/drive-cache-store.js', '/drive-cache.js', '/manifest-volume-import.js', '/config-repo.js', '/tag-filter.js', '/ufs-nodes-reader.js', '/host-disk-merge.js', '/host-disks-panel.js', '/host-disks-browser.js', '/volume-tree.js', '/data-group-fs.js', '/device-registry-store.js', '/text-selection-guard.js', '/ufs-store.js'].includes(pathname)) {
+    if (req.method === 'GET' && ['/host.js', '/app.js', '/vault.js', '/style.css', '/location.js', '/update-checker.js', '/annotations-store.js', '/annotations-ui.js', '/image-viewer.js', '/manifest-export.js', '/manifest-sync.js', '/manifest-selection.js', '/manifest-payload.js', '/manifest-builder.js', '/file-list-export.js', '/zip-writer.js', '/trash-ui.js', '/drive-backends.js', '/drive-cache-store.js', '/drive-cache.js', '/manifest-volume-import.js', '/config-repo.js', '/tag-filter.js', '/ufs-nodes-reader.js', '/host-disk-merge.js', '/host-disks-panel.js', '/host-disks-browser.js', '/volume-tree.js', '/data-group-fs.js', '/device-registry-store.js', '/text-selection-guard.js', '/ufs-store.js', '/tags-sharded.js', '/ufs-public-publisher.js'].includes(pathname)) {
       return await serveStatic(res, pathname);
     }
     if (pathname.startsWith('/api/')) return await handleApi(req, res, url);
