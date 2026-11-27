@@ -918,3 +918,17 @@ button.sel-pill:hover { filter: brightness(.92); }
   .tv-path { display: none; }
   .tv-actions { margin-left: 0; }
 }
+
+/* UFS 虚拟网盘：文件名/路径过滤 */
+.ufs-filter-bar { display: flex; align-items: center; gap: 8px; margin: 8px 0 10px; flex-wrap: wrap; }
+.ufs-filter-input { flex: 1; min-width: 180px; max-width: 420px; font: inherit; font-size: 12px; padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--text-1, #1f2937); }
+.ufs-filter-input:focus { outline: none; border-color: var(--accent); }
+.ufs-filter-count { font-size: 11px; color: var(--text-3); }
+.ufs-filter-row { display: flex; align-items: center; gap: 7px; padding: 6px 4px; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 12px; }
+.ufs-filter-row:hover { background: var(--bg-hover); }
+.ufs-filter-row.is-dir .ufs-filter-path { color: #0b5c46; }
+.ufs-filter-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+.ufs-filter-meta { font-size: 10px; color: var(--text-3); white-space: nowrap; }
+@media (max-width: 640px) {
+  .ufs-filter-meta { display: none; }
+}

@@ -1525,6 +1525,7 @@ async function refreshPublicTargets(entries) {
   return out;
 }
 let ufsTreeView = null;
+let ufsFilterQuery = '';
 
 function ufsYearPath(year) {
   return `${UFS_ROOT}/${year}`;
@@ -2126,10 +2127,55 @@ function ufsTreeChildrenHtml(view, node, depth) {
   return shown.map((child) => ufsTreeNodeRowHtml(view, child, depth)).join('') + more;
 }
 
+/**
+ * UFS 过滤：按文件名或卷内相对路径做子串匹配。
+ * 大小写不敏感（纯 UI 便利，不改变标签/路径存储的大小写敏感语义）。
+ */
+function ufsFilterMatches(view, query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return [];
+  const rows = [];
+  for (const node of view.byId.values()) {
+    if (!node || node.id === view.rootId) continue;
+    if (String(node.name || '').toLowerCase().includes(q)
+      || String(node.rel || '').toLowerCase().includes(q)) rows.push(node);
+  }
+  rows.sort((a, b) => String(a.rel || '').localeCompare(String(b.rel || ''), 'zh-CN', { numeric: true }));
+  return rows;
+}
+
+/** 过滤结果按相对路径平铺，命中项在哪个深层目录都能直接看到。 */
+function ufsFilterRowHtml(view, node) {
+  const isDir = node.type === 'dir';
+  const hash = node.hash || '';
+  const hashText = hash ? `${hash.slice(0, 19)}…` : (node.hashError ? 'hash 失败' : '—');
+  return `<div class="ufs-filter-row${isDir ? ' is-dir' : ''}" data-action="${isDir ? 'ufs-filter-goto' : 'ufs-node-open'}" data-id="${esc(node.id)}" title="${esc(node.rel || node.name)}">
+    <span class="icon ${isDir ? 'icon-dir' : 'icon-file'}"></span>
+    <span class="ufs-filter-path">${esc(node.rel || node.name)}</span>
+    ${ufsTagsHtml(view, node.rel)}
+    <span class="ufs-filter-meta">${isDir ? '目录' : formatSize(Number(node.size) || 0)} · ${esc(ufsFormatTime(node.mtime))}</span>
+    ${isDir ? '' : `<button type="button" data-action="ufs-copy" data-text="${esc(hash || node.rel)}" title="${esc(hash || node.rel)}" style="font-size:10px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(hashText)}</button>`}
+  </div>`;
+}
+
 function renderUfsTreeBody() {
   const body = $('ufsTreeBody');
   if (!body || !ufsTreeView) return;
   const view = ufsTreeView;
+  const query = String(view.filter || '').trim();
+  const count = $('ufsFilterCount');
+  if (query) {
+    const matches = ufsFilterMatches(view, query);
+    const shown = matches.slice(0, 500);
+    if (count) count.textContent = matches.length
+      ? `匹配 ${matches.length} 项${matches.length > shown.length ? `，显示前 ${shown.length} 项` : ''}`
+      : '没有匹配项';
+    body.innerHTML = shown.length
+      ? shown.map((node) => ufsFilterRowHtml(view, node)).join('')
+      : `<p class="stage-hint">没有匹配「${esc(query)}」的节点。</p>`;
+    return;
+  }
+  if (count) count.textContent = '';
   body.innerHTML = view.root
     ? ufsTreeNodeRowHtml(view, view.root, 0)
     : '<p class="stage-hint">bundle 里没有可显示的节点。</p>';
@@ -2160,12 +2206,35 @@ async function renderUfsTree(target) {
     expanded: new Set([tree.root.id]),
     limits: new Map([[tree.root.id, 200]]),
     tags,
+    filter: ufsFilterQuery,
     localState: { kind: 'checking', localPath: null },
   };
   stage.innerHTML = `<div id="ufsTreeHead">${ufsTreeHeaderHtml(ufsTreeView)}</div>
     ${bundle.broken ? `<p class="stage-hint" style="color:#c0392b">${bundle.broken} 行节点读取失败，已跳过。</p>` : ''}
+    <div class="ufs-filter-bar">
+      <input id="ufsTreeFilter" class="ufs-filter-input" type="search" placeholder="过滤文件名或路径，例如 .APK" autocomplete="off" spellcheck="false" value="${esc(ufsFilterQuery)}">
+      <span id="ufsFilterCount" class="ufs-filter-count"></span>
+      <button type="button" data-action="ufs-filter-clear">清除</button>
+    </div>
     <div id="ufsTreeBody"></div>`;
   renderUfsTreeBody();
+  const filterInput = $('ufsTreeFilter');
+  if (filterInput) {
+    filterInput.addEventListener('input', () => {
+      if (!ufsTreeView || ufsTreeView.target?.path !== target.path) return;
+      ufsTreeView.filter = filterInput.value;
+      ufsFilterQuery = filterInput.value;
+      renderUfsTreeBody();
+    });
+    filterInput.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      filterInput.value = '';
+      if (ufsTreeView) ufsTreeView.filter = '';
+      ufsFilterQuery = '';
+      renderUfsTreeBody();
+    });
+  }
   ufsLocalStatesForSources([bundle.meta.source]).then((states) => {
     if (!ufsTreeView || ufsTreeView.target?.path !== target.path) return;
     ufsTreeView.localState = states[0] || { kind: 'unknown', localPath: null };
@@ -3360,6 +3429,34 @@ document.addEventListener('click', async (event) => {
   if (action === 'ufs-open-local') {
     event.preventDefault();
     await ufsOpenLocalDirectory();
+    return;
+  }
+  if (action === 'ufs-filter-clear') {
+    event.preventDefault();
+    const input = $('ufsTreeFilter');
+    if (input) input.value = '';
+    if (ufsTreeView) ufsTreeView.filter = '';
+    ufsFilterQuery = '';
+    renderUfsTreeBody();
+    return;
+  }
+  if (action === 'ufs-filter-goto') {
+    event.preventDefault();
+    if (!ufsTreeView) return;
+    const id = element.dataset.id || '';
+    let node = ufsTreeView.byId.get(id);
+    while (node) {
+      ufsTreeView.expanded.add(node.id);
+      if (!ufsTreeView.limits.has(node.id)) ufsTreeView.limits.set(node.id, 200);
+      node = node.parentId ? ufsTreeView.byId.get(node.parentId) : null;
+    }
+    const input = $('ufsTreeFilter');
+    if (input) input.value = '';
+    ufsTreeView.filter = '';
+    ufsFilterQuery = '';
+    renderUfsTreeBody();
+    const row = [...document.querySelectorAll('.ufs-tree-row')].find((item) => item.dataset.id === id);
+    row?.scrollIntoView({ block: 'center' });
     return;
   }
   if (action === 'ufs-tree-toggle') {
