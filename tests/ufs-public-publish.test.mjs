@@ -10,7 +10,9 @@ import {
   listShards,
   appendShard,
   netDriveTagsDir,
+  ufsTagsDir,
   readUfsTags,
+  setUfsNodeTags,
 } from '../web/tags-sharded.js';
 import { validateDestRel, sameVolume } from '../server/ufs-publish.js';
 
@@ -113,6 +115,33 @@ test('appendShard 只新建按年分片的事件片', async () => {
   assert.equal(written, 'net-drive-tags/RemoteStorage-1/2026/tags-20261127-120000-000000.json');
   assert.equal(fp.files.size, 1);
   assert.deepEqual(replayNetDriveTags(await listShards(conn, netDriveTagsDir('RemoteStorage-1'))).has('public_target'), true);
+});
+
+test('setUfsNodeTags 追加事件片并可被 readUfsTags 读回', async () => {
+  const bundleId = 'vol:abc/Photos';
+  const fp = memoryFs();
+  const conn = connected(fp);
+  const opts = { at: new Date(2026, 10, 27, 12, 0, 0).getTime(), random: 0, host: 'pc' };
+  const p1 = await setUfsNodeTags(conn, bundleId, 'a.jpg', ['public', '精选'], opts);
+  assert.equal(p1, `${ufsTagsDir(bundleId)}/2026/tags-20261127-120000-000000.json`);
+  const doc = JSON.parse(fp.files.get(p1));
+  assert.equal(doc.host, 'pc');
+  assert.deepEqual(doc.events, [{ op: 'set', rel: 'a.jpg', tags: ['public', '精选'] }]);
+
+  const p2 = await setUfsNodeTags(conn, bundleId, '', ['public'], { ...opts, random: 0.1 });
+  const p3 = await setUfsNodeTags(conn, bundleId, 'a.jpg', [], { ...opts, random: 0.2 });
+  assert.equal(fp.files.size, 3, '每次写都新建一片，不修改旧片');
+  const tags = await readUfsTags(conn, bundleId);
+  assert.deepEqual(tags.get(''), ['public'], '根节点标签可读');
+  assert.equal(tags.has('a.jpg'), false, '清空后 remove 事件生效');
+});
+
+test('setUfsNodeTags 严格保留标签大小写与顺序，去重', async () => {
+  const fp = memoryFs();
+  const conn = connected(fp);
+  await setUfsNodeTags(conn, 'b', 'x', ['Public', 'public', 'Public', '精选'], { random: 0 });
+  const tags = await readUfsTags(conn, 'b');
+  assert.deepEqual(tags.get('x'), ['Public', 'public', '精选']);
 });
 
 test('validateDestRel 校验年份、bundleKey 与相对路径', () => {

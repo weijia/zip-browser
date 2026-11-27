@@ -1,7 +1,7 @@
 # UFS public 标签文件发布到 public_target 网络存储
 
 更新时间：2026-11-27（第四轮：onenav 读写侧同步改造）
-状态：需求 + 设计 + **第一、二阶段实现完成**（发布功能 + onenav 分片读写；旧标签迁移未做）
+状态：需求 + 设计 + **第一、二、三阶段实现完成**（发布功能 + onenav 分片读写 + UFS 树内打标签；旧标签迁移未做）
 适用代码：`C:\codes\nodejs\zip-browser`（前端 `web/`，服务端 `server/`）、`C:\codes\nodejs\onenav`（`src/components/apps/filebrowser/`）
 
 实现落点：
@@ -414,6 +414,14 @@ ufs-public-state/<runId>/<年>/publish-<ts>-<rand>.json
 - `ufs.ts`：`readUfsTags` / `putUfsTags` 同样改造；清空标签用 `remove` 事件表达，不再 `unlink` 旧片。调用方 `FileBrowserApp.tsx` / `UfsView.tsx` 无需改动。
 - `sharded-tags.test.ts`（新）：10 项测试覆盖 safeKey/stamp、重放与乱序、跨年枚举、diff 追加、清空语义、旧片损坏降级。
 - 验证：onenav `npm test` 201 项全绿、`npm run build` 成功（`tsc -b` 通过）。
+
+已实现（第三阶段：zip-browser UFS 树内打标签，2026-11-27）：
+- `web/tags-sharded.js` 新增 `setUfsNodeTags(connected, bundleId, rel, tags)`：整表写回 diff 成单个 `set`/`remove` 事件片追加，不改旧片；标签大小写原样保留、去重；清空标签用 `remove` 表达。片格式与 onenav `appendTagDiff` 一致。
+- `web/app.js`：UFS 树每行（目录/文件）与「整份快照」行都显示标签 chip + `+标签` 就地输入（逗号/顿号分隔，回车确认、Esc 取消）；标签编辑走事件委托并 `stopPropagation`，不会误触行导航；`public` 标签高亮。渲染树时用 `getConnectedFs()` 加载标签表，写入后即时刷新。
+- `web/style.css`：新增 `.tz-public` 高亮样式。
+- 测试：`setUfsNodeTags` 追加片/读回/清空/大小写敏感（新增 2 项）；`npm test` 217 项（216 通过 1 跳过）、`npm run dist` 44 文件成功。
+
+意义：至此 `public` 标签可在 zip-browser 与 onenav 任一端的 UFS 视图里打，两端写的是同一份 `ufs-tags/` 事件片，发布流程读到的结果一致；不再需要跳到 onenav 打标签。
 
 未实现（按推荐排期）：
 - `annotations.json` 的 `fs:`/`zip:` 旧标签迁移。

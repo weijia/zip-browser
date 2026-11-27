@@ -11,7 +11,7 @@ import { addTag, removeTag, rememberPath, listTags, keyForTarget } from './annot
 import { tagEntries, matchTagEntries, tagCounts, filterTagCounts, pickTagForQuery } from './tag-filter.js';
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
 import { initManifestSync, scheduleSync, fetchLocalHostInfo, getDataGroupFs, getConnectedFs, getActiveDataGroup, waitForDataGroupFs } from './manifest-sync.js';
-import { readNetDriveTags } from './tags-sharded.js';
+import { readUfsTags, setUfsNodeTags, readNetDriveTags } from './tags-sharded.js';
 import { installPublisherCommand, runPublicPublish, setPublicTarget } from './ufs-public-publisher.js';
 import { initDriveCache } from './drive-cache.js';
 import { initManifestVolumeImport } from './manifest-volume-import.js';
@@ -1954,6 +1954,13 @@ function buildUfsTree(meta, nodes) {
   return { root, byId };
 }
 
+function ufsRootTagsInner(view) {
+  const rel = '';
+  const tags = (view.tags && view.tags.get(rel)) || [];
+  return tags.map((tag) => ufsTagChip(tag, rel)).join('')
+    + `<button type="button" class="tz-add" data-action="ufs-tag-add" data-rel="${rel}" title="给整份快照打标签（public 表示发布整份）">+标签</button>`;
+}
+
 function ufsTreeHeaderHtml(view) {
   const meta = view.meta || {};
   const summary = meta.summary || {};
@@ -1972,13 +1979,104 @@ function ufsTreeHeaderHtml(view) {
   return `<h2 class="stage-title">UFS · ${esc(meta.name)}</h2>
     <p class="stage-hint">${esc(ufsSourceWhere(meta.source))} · 加入 ${meta.addedAt ? new Date(meta.addedAt).toLocaleString('zh-CN', { hour12: false }) : '—'}</p>
     <p class="stage-hint">${Number(summary.dirs) || 0} 个目录 · ${Number(summary.files) || 0} 个文件 · ${formatSize(Number(summary.size) || 0)}${partial}${hashFailed}</p>
+    <p class="stage-hint">整份快照标签：<span class="row-tags ufs-row-tags" id="ufsRootTags" data-ufs-rel="">${ufsRootTagsInner(view)}</span></p>
     <p class="stage-hint" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">${badge}${localButton}
       <span style="color:var(--text-3)">${hint}</span>
     </p>`;
 }
 
+function ufsTagChip(tag, rel) {
+  const cls = tag === 'public' ? 'tz-manual tz-public' : 'tz-manual';
+  return `<span class="${cls}">${esc(tag)}<button type="button" class="tz-x" data-action="ufs-tag-remove" data-rel="${esc(rel)}" data-tag="${esc(tag)}" title="移除这个标签">×</button></span>`;
+}
+
+/** 把 UFS 标签写回数据组（追加事件片，不改旧片），然后就地刷新标签区。 */
+async function commitUfsNodeTags(rel, tags) {
+  const view = ufsTreeView;
+  if (!view) return;
+  const connected = getConnectedFs();
+  if (!connected?.fp) {
+    status('数据同步组还没就绪，标签未保存', true);
+    return;
+  }
+  const clean = [];
+  const seen = new Set();
+  for (const tag of tags) {
+    const value = String(tag ?? '').trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    clean.push(value);
+  }
+  await setUfsNodeTags(connected, view.meta.id, rel, clean, {
+    host: String(HOST.host || 'zip-browser'),
+  });
+  if (!view.tags) view.tags = new Map();
+  view.tags.set(String(rel || ''), clean);
+  refreshUfsTags(String(rel || ''));
+  status(`已保存标签${clean.length ? `：${clean.join('、')}` : '（已清空）'}`);
+}
+
+function refreshUfsTags(rel) {
+  const view = ufsTreeView;
+  if (!view) return;
+  document.querySelectorAll('.ufs-row-tags[data-ufs-rel]').forEach((node) => {
+    if ((node.dataset.ufsRel || '') !== rel) return;
+    const tags = (view.tags && view.tags.get(rel)) || [];
+    node.innerHTML = tags.map((tag) => ufsTagChip(tag, rel)).join('')
+      + `<button type="button" class="tz-add" data-action="ufs-tag-add" data-rel="${esc(rel)}" title="给这个节点打标签">+标签</button>`;
+  });
+  const rootSlot = $('ufsRootTags');
+  if (rootSlot && rel === '') rootSlot.innerHTML = ufsRootTagsInner(view);
+}
+
+/** UFS 树行内就地输入标签（逗号/顿号分隔），回车确认、Esc 取消。 */
+function openUfsTagInput(button) {
+  const host = button.closest('.ufs-row-tags');
+  if (!host || host.querySelector('.row-tag-input')) return;
+  const rel = button.dataset.rel || host.dataset.ufsRel || '';
+  const view = ufsTreeView;
+  const current = (view?.tags?.get(rel) || []).join('、');
+  button.classList.add('hidden');
+  const input = document.createElement('input');
+  input.className = 'row-tag-input';
+  input.maxLength = 128;
+  input.placeholder = current ? `${current}，追加…` : '标签名，回车确认';
+  input.autocomplete = 'off';
+  host.appendChild(input);
+  input.focus();
+  const finish = async (commit) => {
+    if (!input.isConnected) return;
+    const value = input.value.trim();
+    input.remove();
+    button.classList.remove('hidden');
+    if (!commit || !value) return;
+    const extra = value.split(/[,，、]+/).map((tag) => tag.trim()).filter(Boolean);
+    const base = ((view?.tags?.get(rel) || []));
+    await commitUfsNodeTags(rel, [...base, ...extra]);
+  };
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      event.stopPropagation();
+      finish(true).catch(showError);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      finish(false);
+    }
+  });
+  input.addEventListener('blur', () => finish(true).catch(showError));
+}
+
+function ufsTagsHtml(view, rel) {
+  const tags = (view.tags && view.tags.get(String(rel || ''))) || [];
+  const chips = tags.map((tag) => ufsTagChip(tag, rel)).join('');
+  return `<span class="row-tags ufs-row-tags" data-ufs-rel="${esc(rel || '')}">${chips}<button type="button" class="tz-add" data-action="ufs-tag-add" data-rel="${esc(rel || '')}" title="给这个节点打标签">+标签</button></span>`;
+}
+
 function ufsTreeNodeRowHtml(view, node, depth) {
   const indent = Math.max(0, Number(depth) || 0) * 18;
+  const tagSlot = ufsTagsHtml(view, node.rel);
   if (node.type === 'dir') {
     const children = node.children || [];
     const expanded = view.expanded.has(node.id);
@@ -1988,6 +2086,7 @@ function ufsTreeNodeRowHtml(view, node, depth) {
       <span style="width:14px;color:var(--text-3);text-align:center">${caret}</span>
       <span class="icon icon-dir"></span>
       <span style="font-size:13px">${esc(node.name)}</span>
+      ${tagSlot}
       <span style="flex:1;min-width:0;font-size:10px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(childMeta)}${node.partial ? ' · 不可读' : ''}</span>
       <span style="font-size:10px;color:var(--text-3)">${esc(ufsFormatTime(node.mtime))}</span>
     </div>${expanded ? ufsTreeChildrenHtml(view, node, depth + 1) : ''}`;
@@ -1998,6 +2097,7 @@ function ufsTreeNodeRowHtml(view, node, depth) {
     <span style="width:14px"></span>
     <span class="icon icon-file"></span>
     <span style="font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(node.rel)}">${esc(node.name)}</span>
+    ${tagSlot}
     <span style="flex:1;min-width:0;font-size:10px;color:var(--text-3);text-align:right">${formatSize(Number(node.size) || 0)} · ${esc(ufsFormatTime(node.mtime))}</span>
     <button type="button" data-action="ufs-copy" data-text="${esc(hash || node.rel)}" title="${esc(hash || node.rel)}" style="font-size:10px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(hashText)}</button>
   </div>`;
@@ -2034,6 +2134,10 @@ async function renderUfsTree(target) {
   const bundle = await readUfsBundle(fs, target.path);
   if (!bundle?.meta) throw new Error('UFS bundle 读取失败或格式不正确');
   const tree = buildUfsTree(bundle.meta, bundle.nodes);
+  const connected = getConnectedFs();
+  const tags = connected?.fp
+    ? await readUfsTags(connected, bundle.meta.id).catch(() => new Map())
+    : new Map();
   ufsTreeView = {
     target,
     meta: bundle.meta,
@@ -2043,6 +2147,7 @@ async function renderUfsTree(target) {
     rootId: tree.root.id,
     expanded: new Set([tree.root.id]),
     limits: new Map([[tree.root.id, 200]]),
+    tags,
     localState: { kind: 'checking', localPath: null },
   };
   stage.innerHTML = `<div id="ufsTreeHead">${ufsTreeHeaderHtml(ufsTreeView)}</div>
@@ -3147,7 +3252,7 @@ async function openZipBookmark({ zipPath, entry, label }) {
 document.addEventListener('click', async (event) => {
   // 行内标签区（含就地输入框）没有要导航的动作，避免 closest 落到行上触发目录导航。
   const tagHost = event.target.closest?.('.row-tags');
-  if (tagHost && !event.target.closest?.('[data-action="row-tag-add"], [data-action="row-tag-remove"]')) return;
+  if (tagHost && !event.target.closest?.('[data-action="row-tag-add"], [data-action="row-tag-remove"], [data-action="ufs-tag-add"], [data-action="ufs-tag-remove"]')) return;
   const element = event.target.closest('[data-action]');
   if (!element) return;
   const action = element.dataset.action;
@@ -3157,6 +3262,23 @@ document.addEventListener('click', async (event) => {
   }
   if (action === 'row-tag-remove') {
     removeRowTag(element.dataset.path, element.dataset.tag);
+    return;
+  }
+  if (action === 'ufs-tag-add') {
+    event.preventDefault();
+    event.stopPropagation();
+    openUfsTagInput(element);
+    return;
+  }
+  if (action === 'ufs-tag-remove') {
+    event.preventDefault();
+    event.stopPropagation();
+    const rel = element.dataset.rel || '';
+    const tag = element.dataset.tag || '';
+    const view = ufsTreeView;
+    if (!view) return;
+    const next = ((view.tags?.get(rel) || [])).filter((item) => item !== tag);
+    commitUfsNodeTags(rel, next).catch(showError);
     return;
   }
   if (action === 'ufs-publish') {

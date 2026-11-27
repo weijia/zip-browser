@@ -158,6 +158,32 @@ export async function readUfsTags(connected, bundleId) {
   return replayUfsTags(shards);
 }
 
+/**
+ * 给 UFS 节点打/改标签：整表写回 diff 成事件片追加，不改旧片。
+ * rel 为 bundle 内相对路径（根节点为空串），标签大小写原样保留。
+ * 标签变空时用 op:'remove'，与重放语义一致（不留下空数组键）。
+ */
+export async function setUfsNodeTags(connected, bundleId, rel, tags, options = {}) {
+  const cleanTags = [];
+  const seen = new Set();
+  for (const tag of Array.isArray(tags) ? tags : []) {
+    const value = String(tag ?? '').trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    cleanTags.push(value);
+  }
+  const event = cleanTags.length
+    ? { op: 'set', rel: String(rel ?? ''), tags: cleanTags }
+    : { op: 'remove', rel: String(rel ?? '') };
+  return appendShard(connected, ufsTagsDir(bundleId), 'tags', {
+    version: 1,
+    at: options.at ?? Date.now(),
+    host: options.host || 'zip-browser',
+    bundleId,
+    events: [event],
+  }, options);
+}
+
 export async function readNetDriveTags(connected, dir) {
   return replayNetDriveTags(await listShards(connected, netDriveTagsDir(dir)));
 }
