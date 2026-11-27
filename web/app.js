@@ -2021,12 +2021,15 @@ function refreshUfsTags(rel) {
   if (!view) return;
   document.querySelectorAll('.ufs-row-tags[data-ufs-rel]').forEach((node) => {
     if ((node.dataset.ufsRel || '') !== rel) return;
+    if (node.querySelector('.row-tag-input')) return; // 这行正在输入，别重写它的 DOM
     const tags = (view.tags && view.tags.get(rel)) || [];
     node.innerHTML = tags.map((tag) => ufsTagChip(tag, rel)).join('')
       + `<button type="button" class="tz-add" data-action="ufs-tag-add" data-rel="${esc(rel)}" title="给这个节点打标签">+标签</button>`;
   });
   const rootSlot = $('ufsRootTags');
-  if (rootSlot && rel === '') rootSlot.innerHTML = ufsRootTagsInner(view);
+  if (rootSlot && rel === '' && !rootSlot.querySelector('.row-tag-input')) {
+    rootSlot.innerHTML = ufsRootTagsInner(view);
+  }
 }
 
 /** UFS 树行内就地输入标签（逗号/顿号分隔），回车确认、Esc 取消。 */
@@ -2044,17 +2047,24 @@ function openUfsTagInput(button) {
   input.autocomplete = 'off';
   host.appendChild(input);
   input.focus();
+  let done = false;
+  let onKeydown;
+  let onBlur;
   const finish = async (commit) => {
-    if (!input.isConnected) return;
+    if (done) return;
+    done = true;
     const value = input.value.trim();
-    input.remove();
+    // 先解绑事件，避免 remove() 引发的 blur 再次进入 finish。
+    input.removeEventListener('keydown', onKeydown);
+    input.removeEventListener('blur', onBlur);
+    if (input.parentNode) input.parentNode.removeChild(input);
     button.classList.remove('hidden');
     if (!commit || !value) return;
     const extra = value.split(/[,，、]+/).map((tag) => tag.trim()).filter(Boolean);
-    const base = ((view?.tags?.get(rel) || []));
+    const base = (view?.tags?.get(rel) || []);
     await commitUfsNodeTags(rel, [...base, ...extra]);
   };
-  input.addEventListener('keydown', (event) => {
+  onKeydown = (event) => {
     if (event.key === 'Enter') {
       event.preventDefault();
       event.stopPropagation();
@@ -2064,8 +2074,10 @@ function openUfsTagInput(button) {
       event.stopPropagation();
       finish(false);
     }
-  });
-  input.addEventListener('blur', () => finish(true).catch(showError));
+  };
+  onBlur = () => finish(true).catch(showError);
+  input.addEventListener('keydown', onKeydown);
+  input.addEventListener('blur', onBlur);
 }
 
 function ufsTagsHtml(view, rel) {
