@@ -24,6 +24,6 @@
   },
   "devDependencies": {
     "zen-fs-gitee": "^1.2.42",
-    "zen-fs-remotestoragejs": "^1.3.23"
+    "zen-fs-remotestoragejs": "^1.3.24"
   }
 }
