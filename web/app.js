@@ -12,7 +12,7 @@ import { tagEntries, matchTagEntries, tagCounts, filterTagCounts, pickTagForQuer
 import { initVault, openVault, openVaultForPassword, saveZipPassword, getVaultSessionId, getDefaultPassword, openDefaultPasswordModal } from './vault.js';
 import { initManifestSync, scheduleSync, fetchLocalHostInfo, getDataGroupFs, getConnectedFs, getActiveDataGroup, waitForDataGroupFs } from './manifest-sync.js';
 import { readUfsTags, setUfsNodeTags, readNetDriveTags } from './tags-sharded.js';
-import { installPublisherCommand, runPublicPublish, setPublicTarget } from './ufs-public-publisher.js';
+import { installPublisherCommand, runPublicPublish, readPublishHistory, setPublicTarget } from './ufs-public-publisher.js';
 import { initDriveCache } from './drive-cache.js';
 import { initManifestVolumeImport } from './manifest-volume-import.js';
 import { initHostDisksPanel, hostDisksCacheInfo, hostDisksCachedDoc, cacheHostDisksDoc, restoreHostDisksFromCache, writeHostDisksDoc, rememberManualSerial } from './host-disks-panel.js';
@@ -1525,6 +1525,8 @@ async function refreshPublicTargets(entries) {
   return out;
 }
 let ufsTreeView = null;
+// UFS 页「发布历史」面板状态；面板挂在 #ufsPublishHistory，重绘 UFS 页不会丢失展开项。
+let publishHistoryState = { open: false, loaded: false, loading: false, error: '', rows: [], expanded: new Set() };
 let ufsFilterQuery = '';
 
 function ufsYearPath(year) {
@@ -1669,7 +1671,9 @@ async function renderUfs(target) {
     stage.innerHTML = `<h2 class="stage-title">UFS · 虚拟网盘</h2>
       <p class="stage-hint">每次加入生成一个自包含 bundle，放在加入年份目录下；不再按文件修改年拆分。进入目录后可直接查看完整目录树。</p>
       <button type="button" data-action="ufs-publish" style="margin:4px 0 10px">发布 public 文件…</button>
+      <div id="ufsPublishHistory"></div>
       ${rows.length ? rows.join('') : '<p class="stage-hint">还没有任何条目。在目录/文件行上点「+ufs」加入。</p>'}`;
+    renderPublishHistoryPanel();
     return;
   }
   const match = /^\/ufs\/(\d{4})\/?$/.exec(path);
@@ -1686,7 +1690,67 @@ async function renderUfs(target) {
   stage.innerHTML = `<h2 class="stage-title">UFS · ${esc(year)}</h2>
     <p class="stage-hint">${bundles.length} 个 bundle${legacy.entries.length ? ` · ${legacy.entries.length} 条旧分片条目` : ''}${bundleInfo.broken ? ` · ${bundleInfo.broken} 份 bundle 读取失败` : ''}。bundle 点开是只读快照树；本机来源可用时可从树页打开实时位置。</p>
     <button type="button" data-action="ufs-publish" style="margin:4px 0 10px">发布 public 文件…</button>
+    <div id="ufsPublishHistory"></div>
     ${total ? `${bundles.map((bundle) => ufsBundleRowHtml(bundle, bundle.localState)).join('')}${legacy.entries.map((entry) => ufsRowHtml(entry)).join('')}` : '<p class="stage-hint">这一年还没有条目。</p>'}`;
+  renderPublishHistoryPanel();
+}
+
+function publishHistoryHtml() {
+  const state = publishHistoryState;
+  let detail = '';
+  if (state.open) {
+    if (state.loading) detail = '<p class="stage-hint">正在读取发布历史…</p>';
+    else if (state.error) detail = `<p class="stage-hint">读取失败：${esc(state.error)}</p>`;
+    else if (!state.rows.length) detail = '<p class="stage-hint">还没有发布记录。点「发布 public 文件」后，每次运行都会记一片。</p>';
+    else detail = state.rows.map((row) => {
+      const counts = row.counts;
+      const expanded = state.expanded.has(row.shard);
+      const preflight = row.preflight?.reason
+        ? `<div class="ph-preflight">预检失败：${esc(row.preflight.reason)}</div>` : '';
+      const detailRows = expanded ? `<div class="ph-detail">${Object.entries(row.results).map(([name, item]) => {
+        const action = String(item?.action || 'unknown');
+        const kind = ['linked', 'copied'].includes(action) ? 'ok' : action === 'skipped' ? 'skip' : 'bad';
+        const reason = item?.reason ? `<div class="ph-reason">原因：${esc(String(item.reason))}</div>` : '';
+        return `<div class="ph-detail-row">
+          <span class="ph-act ph-act-${kind}">${esc(action)}</span>
+          <span class="ph-detail-name" title="${esc(name)}">${esc(name)}</span>
+          <span class="ph-detail-meta">${esc(String(item?.destRel || item?.method || ''))}</span>
+        </div>${reason}`;
+      }).join('') || '<div class="ph-detail-row">这条记录没有逐条结果</div>'}</div>` : '';
+      return `<div class="ph-run">
+        <div class="ph-run-head" data-action="ufs-publish-history-toggle" data-shard="${esc(row.shard)}">
+          <span class="ph-arrow">${expanded ? '▾' : '▸'}</span>
+          <span class="ph-time">${esc(new Date(row.at).toLocaleString())}</span>
+          <span class="ph-counts">成功 ${counts.linked + counts.copied} · 跳过 ${counts.skipped} · 失败 ${counts.failed}</span>
+          <span class="ph-meta">${esc(row.host || '未知主机')} · ${esc(row.targets.join('、') || '无目标')} · ${counts.total} 个文件</span>
+        </div>${preflight}${detailRows}</div>`;
+    }).join('');
+  }
+  return `<div class="publish-history">
+    <div class="publish-history-bar">
+      <button type="button" data-action="ufs-publish-history">${state.open ? '收起发布历史' : '发布历史'}</button>
+      ${state.open ? '<button type="button" data-action="ufs-publish-history-refresh">刷新</button>' : ''}
+    </div>${detail}</div>`;
+}
+
+function renderPublishHistoryPanel() {
+  const host = $('ufsPublishHistory');
+  if (host) host.innerHTML = publishHistoryHtml();
+}
+
+async function refreshPublishHistory() {
+  publishHistoryState.loading = true;
+  publishHistoryState.error = '';
+  renderPublishHistoryPanel();
+  try {
+    publishHistoryState.rows = await readPublishHistory();
+    publishHistoryState.loaded = true;
+  } catch (err) {
+    publishHistoryState.error = String(err?.message || err);
+  } finally {
+    publishHistoryState.loading = false;
+    renderPublishHistoryPanel();
+  }
 }
 
 /**
@@ -3362,6 +3426,29 @@ document.addEventListener('click', async (event) => {
     commitUfsNodeTags(rel, next).catch(showError);
     return;
   }
+  if (action === 'ufs-publish-history') {
+    event.preventDefault();
+    event.stopPropagation();
+    publishHistoryState.open = !publishHistoryState.open;
+    if (publishHistoryState.open && !publishHistoryState.loaded) await refreshPublishHistory();
+    else renderPublishHistoryPanel();
+    return;
+  }
+  if (action === 'ufs-publish-history-refresh') {
+    event.preventDefault();
+    event.stopPropagation();
+    await refreshPublishHistory();
+    return;
+  }
+  if (action === 'ufs-publish-history-toggle') {
+    event.preventDefault();
+    event.stopPropagation();
+    const key = element.dataset.shard || '';
+    if (publishHistoryState.expanded.has(key)) publishHistoryState.expanded.delete(key);
+    else publishHistoryState.expanded.add(key);
+    renderPublishHistoryPanel();
+    return;
+  }
   if (action === 'ufs-publish') {
     event.preventDefault();
     event.stopPropagation();
@@ -3369,6 +3456,7 @@ document.addEventListener('click', async (event) => {
       const result = await runPublicPublish();
       if (result.ok) status(`发布完成：${result.results.length} 条结果（目标 ${result.targets.join('、')}）`);
       else if (result.reason !== 'cancelled') status(`发布未执行：${result.reason}`, true);
+      if ((result.ok || result.runId) && publishHistoryState.open) await refreshPublishHistory();
     } catch (err) {
       showError(err);
     }

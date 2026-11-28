@@ -18,8 +18,10 @@ import {
   stamp,
 } from './tags-sharded.js';
 
-const BASE = String(window.ZB_HOST?.basePath || '').replace(/\/+$/, '');
-const AUTH_MODE = window.ZB_HOST?.auth === 'bearer';
+// 模块可能被 Node 测试直接导入，顶层不假设 window 存在。
+const ZB_HOST = (typeof window !== 'undefined' && window.ZB_HOST) || {};
+const BASE = String(ZB_HOST.basePath || '').replace(/\/+$/, '');
+const AUTH_MODE = ZB_HOST.auth === 'bearer';
 const PUBLIC_TAG = 'public';
 const TARGET_TAG = 'public_target';
 
@@ -94,24 +96,6 @@ async function hashIfNeeded(node, localPath) {
   return data?.hash || null;
 }
 
-/** 读发布状态：跨所有 runId 目录枚举，按片名排序，取每个 key 最近一次非 failed 记录。 */
-async function latestPublished(connected) {
-  const base = 'ufs-public-state';
-  const runs = (await connected.fp.readdir(connected.pathFor(base)).catch(() => [])).map(String);
-  const shards = [];
-  for (const run of runs) {
-    for (const shard of await listShards(connected, `${base}/${safeKey(run)}`)) shards.push(shard);
-  }
-  shards.sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
-  const latest = new Map();
-  for (const shard of shards) {
-    for (const [key, value] of Object.entries(shard.doc?.results || {})) {
-      if (value?.action && value.action !== 'failed') latest.set(key, value);
-    }
-  }
-  return latest;
-}
-
 /** 预检：收集候选与目标，不写任何文件。 */
 export async function preparePublish() {
   const connected = getConnectedFs();
@@ -122,7 +106,14 @@ export async function preparePublish() {
   const letters = await volumeLetters();
 
   // 目标：所有打 public_target 的网盘登记（大小写敏感）。
-  const driveData = await api('/api/drives').catch(() => ({ networkDrives: [] }));
+  // 读取失败必须留痕，不能静默变成「没有目标网盘」。
+  const errors = [];
+  let driveData = { networkDrives: [] };
+  try {
+    driveData = await api('/api/drives');
+  } catch (err) {
+    errors.push({ stage: 'drives', message: String(err?.message || err) });
+  }
   const targets = [];
   for (const entry of driveData.networkDrives || []) {
     const dir = String(entry?.dir || '');
@@ -133,7 +124,6 @@ export async function preparePublish() {
 
   const files = [];
   const skipped = { zip: 0, legacy: years.reduce((n, row) => n + Number(row.legacy || 0), 0), noSource: 0 };
-  const errors = [];
   for (const row of years) {
     const { bundles } = await listBundles(fs, String(row.year));
     for (const bundle of bundles) {
@@ -170,15 +160,52 @@ function buildDestRel(file) {
   return `${file.year}/${file.bundleKey}/${file.rel.split('/').filter(Boolean).join('/')}`;
 }
 
+/** 预检失败也写一片状态，让发布历史能看到失败尝试与原因。 */
+async function appendPreflightFailure(connected, reason, summary) {
+  const now = Date.now();
+  const runId = stamp(now);
+  const host = typeof window !== 'undefined' ? String(window.ZB_HOST?.host || 'pc') : 'pc';
+  await appendShard(connected, `ufs-public-state/${safeKey(runId)}`, 'publish', {
+    version: 1,
+    at: now,
+    host,
+    targets: (summary?.targets || []).map((target) => target.dir),
+    results: {},
+    preflight: { reason, summary },
+  }, { at: now, host });
+  return runId;
+}
+
 /** 执行：逐目标 × 逐文件，失败隔离；追加一片发布状态。 */
 export async function executePublish(plan, options = {}) {
   const { connected, targets, files } = plan;
   if (!connected?.fp) throw new Error('数据同步组尚未就绪');
   if (!targets.length) return { ok: false, reason: 'no-target', results: [] };
 
+  // 服务重启会清空内存白名单，UFS 快照里的源路径会全部变成「本次会话未打开」。
+  // 点发布是用户显式授权：先把真实存在的源路径批量放行，不存在的逐条记失败。
+  const unauthorized = new Map();
+  const sourcePaths = [...new Set(files.map((file) => file.localPath).filter(Boolean))];
+  if (sourcePaths.length) {
+    const auth = await api('/api/fs/allow', {
+      method: 'POST',
+      body: JSON.stringify({ paths: sourcePaths }),
+    }).catch((err) => ({
+      results: sourcePaths.map((p) => ({ path: p, ok: false, reason: String(err?.message || err) })),
+    }));
+    for (const item of auth.results || []) {
+      if (!item?.ok) unauthorized.set(String(item?.path || '').toLowerCase(), String(item?.reason || '授权失败'));
+    }
+  }
+
   // 先补齐 hash（没 hash 的节点发布前算一次），失败的文件单独记失败。
   const prepared = [];
   for (const file of files) {
+    const denied = unauthorized.get(String(file.localPath || '').toLowerCase());
+    if (denied) {
+      prepared.push({ ...file, hash: null, error: `源路径不可访问：${denied}` });
+      continue;
+    }
     try {
       const hash = await hashIfNeeded(file, file.localPath);
       prepared.push({ ...file, hash });
@@ -187,7 +214,6 @@ export async function executePublish(plan, options = {}) {
     }
   }
 
-  const prior = await latestPublished(connected);
   const results = [];
   const now = Date.now();
   const host = String(window.ZB_HOST?.host || 'pc');
@@ -203,11 +229,7 @@ export async function executePublish(plan, options = {}) {
         results.push({ key, action: 'failed', reason: file.error });
         continue;
       }
-      const old = prior.get(key);
-      if (old && old.hash === file.hash && old.size === file.size && old.mtime === file.mtime) {
-        results.push({ key, action: 'skipped', destRel });
-        continue;
-      }
+      // 幂等完全交给服务端：状态片只作审计，不能凭它跳过——目标文件可能已被删/覆盖。
       payload.push({
         source: file.localPath,
         bundleId: file.bundleId,
@@ -253,8 +275,28 @@ export async function runPublicPublish(options = {}) {
     skipped: plan.skipped,
     years: plan.years,
   };
-  if (!plan.targets.length) return { ok: false, reason: 'no-target', summary };
-  if (!plan.files.length) return { ok: false, reason: 'no-files', summary };
+  if (!plan.targets.length || !plan.files.length) {
+    let reason;
+    if (!plan.targets.length) {
+      const driveError = (plan.errors || []).find((item) => item.stage === 'drives');
+      reason = driveError
+        ? `没有目标网盘：读取网盘登记失败（${driveError.message}）`
+        : '没有目标网盘：请先给网盘登记打上 public_target 标签';
+    } else {
+      const parts = [];
+      if (plan.skipped.zip) parts.push(`zip 源 ${plan.skipped.zip} 个暂不支持`);
+      if (plan.skipped.legacy) parts.push(`旧分片 ${plan.skipped.legacy} 个`);
+      if (plan.skipped.noSource) parts.push(`源路径解析不出 ${plan.skipped.noSource} 个`);
+      reason = `没有可发布文件${parts.length ? `（${parts.join('、')}）` : '：请先给 UFS 节点打上 public 标签'}`;
+    }
+    let runId = null;
+    try {
+      runId = await appendPreflightFailure(plan.connected, reason, summary);
+    } catch {
+      // 历史写入失败不能挡住用户看到原因；状态栏仍然显示。
+    }
+    return { ok: false, reason, summary, runId };
+  }
   if (!options.autoConfirm) {
     const lines = [
       `将发布 ${plan.files.length} 个文件到 ${plan.targets.length} 个网盘：${plan.targets.map((t) => t.name).join('、')}。`,
@@ -265,6 +307,46 @@ export async function runPublicPublish(options = {}) {
   }
   const result = await executePublish(plan, options);
   return { ...result, summary };
+}
+
+/**
+ * 读发布历史：跨所有 runId 与年目录枚举状态片，按片名升序返回每次运行。
+ * 状态片只追加不覆盖，因此这里读到的是完整历史；计数中的「成功」= linked + copied。
+ */
+export async function readPublishHistory(connected = getConnectedFs()) {
+  if (!connected?.fp) throw new Error('数据同步组尚未就绪');
+  const base = 'ufs-public-state';
+  const runs = (await connected.fp.readdir(connected.pathFor(base)).catch(() => [])).map(String);
+  const shards = [];
+  for (const run of runs) {
+    for (const shard of await listShards(connected, `${base}/${safeKey(run)}`)) {
+      shards.push({ run, ...shard });
+    }
+  }
+  shards.sort((a, b) => a.path.localeCompare(b.path) || a.run.localeCompare(b.run));
+  return shards.map(({ run, path, doc }) => {
+    const source = doc?.results && typeof doc.results === 'object' ? doc.results : {};
+    const values = Object.values(source);
+    const count = (action) => values.filter((item) => item?.action === action).length;
+    return {
+      run,
+      shard: path,
+      at: Number(doc?.at) || 0,
+      host: typeof doc?.host === 'string' ? doc.host : '',
+      targets: Array.isArray(doc?.targets) ? doc.targets.map(String) : [],
+      counts: {
+        total: values.length,
+        linked: count('linked'),
+        copied: count('copied'),
+        skipped: count('skipped'),
+        failed: count('failed'),
+      },
+      results: source,
+      preflight: doc?.preflight && typeof doc.preflight === 'object'
+        ? { reason: String(doc.preflight.reason || ''), summary: doc.preflight.summary || null }
+        : null,
+    };
+  });
 }
 
 /** 网盘标签入口：给登记条目打/取消 public_target。 */

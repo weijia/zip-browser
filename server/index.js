@@ -12,6 +12,7 @@ import {
   normalizeLocalPath,
   detectTagsForDirs,
   statLocalPaths,
+  allowPaths,
 } from './fs-service.js';
 import {
   openArchive,
@@ -159,6 +160,12 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && pathname === '/api/list') {
     const abs = normalizeLocalPath(url.searchParams.get('path') || '');
     return json(res, 200, await listDirectory(abs));
+  }
+
+  // 批量放行真实存在的本机路径：发布时用于恢复「本次会话已打开」授权。
+  if (req.method === 'POST' && pathname === '/api/fs/allow') {
+    const body = await readJson(req);
+    return json(res, 200, await allowPaths(body.paths));
   }
 
   // 批量取目录自动标签（导出 struct 时写入节点 tags，口径同 dir-struct-gen）。

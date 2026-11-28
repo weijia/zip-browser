@@ -73,6 +73,28 @@ export function isPathAllowed(abs) {
   return false;
 }
 
+/**
+ * 批量放行真实存在的本机路径（或其父目录）。
+ * UFS 快照是持久化的，而 allowedPrefixes 只在服务进程内存中；服务重启后
+ * 「本次会话已打开」的授权全部丢失，发布这类用户显式动作需要重新放行。
+ * 只 stat、不读内容；路径必须真实存在，不存在的条目逐条返回失败原因。
+ */
+export async function allowPaths(paths) {
+  const list = (Array.isArray(paths) ? paths : []).slice(0, 500);
+  const results = await mapLimit(list, 16, async (raw) => {
+    try {
+      const abs = normalizeLocalPath(raw);
+      const stat = await fs.stat(abs);
+      const parent = stat.isDirectory() ? abs : path.win32.dirname(abs);
+      allowDirectory(parent);
+      return { path: abs, ok: true, allowed: parent };
+    } catch (err) {
+      return { path: String(raw ?? ''), ok: false, reason: String(err?.message || err) };
+    }
+  });
+  return { results };
+}
+
 export function isFileReadable(abs) {
   return isPathAllowed(abs) && isStaticAllowed(path.win32.basename(abs));
 }

@@ -13,7 +13,7 @@ import { ufsTagKey } from '../web/tags-sharded.js';
 const YEAR_RE = /^\d{4}$/;
 const MAX_FILES = 500;
 
-/** 纯函数：校验 destRel 形状 <年>/<bundleKey>/<rel>，返回规范化分段。 */
+/** 纯函数：校验 destRel 形状 <年>/<bundleKey>/<rel>，只返回规范化 rel 分段；年份与 bundleKey 由调用方拼进目标路径。 */
 export function validateDestRel(destRel, bundleId, year) {
   const raw = String(destRel || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
   const parts = raw.split('/');
@@ -69,14 +69,17 @@ export async function publishFiles(body) {
 
   const results = [];
   for (const file of files) {
-    const key = `${file?.bundleId || ''}|${file?.rel || ''}`;
+    // key 必须与前端 destByKey 一致（带目标），否则多目标时同文件的记录会互相覆盖、destRel 显示为空。
+    const key = `${file?.bundleId || ''}|${file?.rel || ''}|${target}`;
     try {
       const source = normalizeLocalPath(file?.source);
       if (!isPathAllowed(source)) throw new HttpError(403, '源文件未在本次会话中打开');
       const stat = await fs.stat(source);
       if (!stat.isFile()) throw new HttpError(400, '源路径不是文件');
       const relParts = validateDestRel(file.destRel, file.bundleId, file.year);
-      const destAbs = path.join(publicRoot, ...relParts);
+      // destRel 是 <年>/<bundleKey>/<rel>：年份与 bundleKey 必须落成真实目录，
+      // 否则不同 bundle 的同名 rel 会写进同一个扁平路径、互相覆盖（设计 §2 P0-4）。
+      const destAbs = path.join(publicRoot, String(file.year), ufsTagKey(file.bundleId), ...relParts);
       const inside = path.relative(publicRoot, destAbs);
       if (inside.startsWith('..') || path.isAbsolute(inside)) throw new HttpError(400, '目标路径越界');
       if (file.skipIfUnchanged) {
